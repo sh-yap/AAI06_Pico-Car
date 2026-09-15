@@ -25,7 +25,7 @@ supplies the records those checklists need; it does not replace them.
 | Buddy 3 — Line/barcode | Wynn | Pico W; physical board ID UNKNOWN | UNKNOWN |
 | Buddy 4 — IMU/terrain | Zhi Hong | Pico W; physical board ID UNKNOWN | UNKNOWN |
 | Buddy 5 — Obstacle/servo | Nicholas | Pico W; physical board ID UNKNOWN | UNKNOWN |
-| Vehicle Controller / integration coordination | UNKNOWN | Final Robo-Pico with Pico W assumed by user; physical confirmation pending | UNKNOWN |
+| Vehicle Controller / integration coordination | UNKNOWN | Robo-Pico tested with the green controller transferred from Suen Hong's Maker Pi Pico; physical board ID UNKNOWN | UNKNOWN |
 
 The controller responsibility belongs to this five-member team; it does not
 imply a sixth member or an additional microcontroller.
@@ -38,7 +38,7 @@ board. `UNKNOWN` means further information is needed.
 
 | Hardware item | Documented information / evidence | Information still needed |
 |---|---|---|
-| Final Robo-Pico | Final Pico W is a user-directed working assumption because the school supplies the board and the development controllers are Pico W; not physically confirmed. Cytron ROBO-PICO supports Pico/Pico W. Datasheet Rev 1.0, April 2023; board input specification 3.6–6 V; onboard power switch and single-cell LiPo/Li-Ion charging/protection. [D1](../project_datasheets/Robo%20Pico%20Board%20Datasheet.pdf), [D2](../project_datasheets/Robo_Pico.pdf). | Physical PCB revision, confirmation of installed Pico W when available, photograph, and actual power/wiring arrangement. |
+| Final Robo-Pico | User photos show the green controller transferred from the Maker Pi Pico into the Robo-Pico socket; the user confirms healthy SMP USB runtime. This is the same previously tested controller, not evidence of a separate school-supplied controller. Cytron ROBO-PICO supports Pico/Pico W. Datasheet Rev 1.0, April 2023; board input specification 3.6–6 V; onboard power switch and single-cell LiPo/Li-Ion charging/protection. [D1](../project_datasheets/Robo%20Pico%20Board%20Datasheet.pdf), [D2](../project_datasheets/Robo_Pico.pdf). | Physical PCB/controller IDs and revisions, local photo archive, permanent controller allocation, and actual vehicle power/wiring arrangement. |
 | Five Maker Pi Pico boards | All five members have Pico W (user confirmation). Supplied Maker Pi Pico pinout is for PCB Rev 1.2.0 and above. Pico W has CYW43439 2.4 GHz WiFi, 3.3 V GPIO, and a 21 × 51 mm controller PCB. [D3](../project_datasheets/MakerPiPico-Pinout.png), [D4](../project_datasheets/RP-008312-DS-2-pico-w-datasheet.pdf). | Confirm each carrier's product/revision and label each physical board; record accessory/socket connections. |
 | Left/right motors | User reports two motors matching the second attached image. Photo shows a geared motor assembly with a multiwire connector; no readable motor model/rating label is visible. Exact motor and encoder specifications cannot be established from appearance. No motor-model datasheet supplied. | Model/label or school parts-list entry, rated voltage, running/stall current if specified, gear ratio, connector pinout, left/right motor-to-terminal mapping, and bench motor driver. |
 | Motor driver on Robo-Pico | M1 uses GP8/GP9; M2 uses GP10/GP11. Maximum continuous current 1 A/channel, peak 1.5 A/channel for less than 5 s; PWM frequency limit 20 kHz. Brake/coast truth table below. [D1] pp. 5, 7–8. | Driver IC marking is not identified in the supplied text; actual motor polarity and selected bench driver remain UNKNOWN. |
@@ -68,6 +68,13 @@ NeoPixel uses GP18, buttons GP20/GP21, and buzzer GP22. Its optional battery
 sense jumper connects VBAT/2 to GP28/ADC2, sharing that analogue input.
 These are documented connections, not a completed application GPIO assignment.
 
+**USB/flashing connection:** Robo-Pico is a carrier with a central Pi Pico
+Socket and no onboard USB port (D1 PDF p. 3 Figure 1). Fit a Pico/Pico W to
+the socket; BOOTSEL and USB data access are on that controller (D1 PDF p. 6
+Figures 2–3). Maker/Grove ports are peripheral connectors, not USB ports.
+The user has now installed the green controller from the Maker Pi Pico and
+confirmed the basic Robo-Pico runtime check; see Session 2 below.
+
 The supplied Maker Pi Pico [pinout image](../project_datasheets/MakerPiPico-Pinout.png)
 shows NeoPixel GP28, buzzer GP18, buttons GP20–GP22, microSD GP10–GP15,
 audio GP18/GP19, and ESP-01 socket signals GP16/GP17. Grove pairs are
@@ -95,7 +102,7 @@ Fill these with labels, measurements, or `UNKNOWN`; calibration can wait until
 the respective bench-test stage.
 
 - Controller coordinator and interface reviewer for each Buddy: UNKNOWN.
-- Each Maker Pi Pico carrier revision/physical ID and final Robo-Pico revision: UNKNOWN. Plan for final Pico W as requested; verify the installed controller when available.
+- Each Maker Pi Pico carrier revision/physical ID and final Robo-Pico revision: UNKNOWN. The transferred green controller is now tested on Robo-Pico; record its ID and permanent allocation.
 - Motor model/voltage/current/gear ratio and connector pinout; encoder presence/channels/resolution/output specification; bench motor driver: UNKNOWN. Two motors are reported and an appearance photo is supplied.
 - Wheel-centre separation and chassis size in mm: UNKNOWN. Wheel diameter is reported as 60 mm; confirm both wheels' rolling diameter during calibration.
 - T-SG90 rated supply/current/pulse limits and selected Robo-Pico servo port: UNKNOWN; model has been recorded.
@@ -143,12 +150,15 @@ Make workflow. The locally tested SDK version is not a team version freeze.
 | Tester / board | Revision / profile / versions | Build | Flash | Console evidence |
 |---|---|---|---|---|
 | Skyler / Pico W, ID UNKNOWN | TBD | Pending | Pending | Pending |
-| Suen Hong / Pico W, ID UNKNOWN | TBD | Pending | Pending | Pending |
+| Suen Hong / Pico W, ID UNKNOWN | Intended SMP USB-CDC/WIFI none; review HEAD 476c33b; local GCC 15.2.Rel1/SDK 2.3.1; flashed revision not embedded in log | Pass: user reports supplied build command completed | Pass: user-reported flash supported by running demo | COM6; [review and raw log](../../evidence/platform/STAGE_1_FIRST_BOARD_REVIEW.md); 59 healthy frames, banner/time metadata missing |
 | Wynn / Pico W, ID UNKNOWN | TBD | Pending | Pending | Pending |
 | Zhi Hong / Pico W, ID UNKNOWN | TBD | Pending | Pending | Pending |
 | Nicholas / Pico W, ID UNKNOWN | TBD | Pending | Pending | Pending |
-| Final Robo-Pico / TBD | TBD | Pending | Pending | Pending |
+| Suen Hong / Robo-Pico with transferred green controller, IDs UNKNOWN | Same previously flashed SMP USB demo; exact flashed revision not embedded | Pass: reuses previously built firmware | Pass: previously flashed controller transferred to socket | User confirms working; latest screenshot COM6, 8 healthy frames seq 33–61; [review](../../evidence/platform/STAGE_1_ROBO_PICO_REVIEW.md); separate raw log pending |
 | Agent / fresh local clone | a3145cb; SMP USB-CDC; GCC 15.2.Rel1; SDK 2.3.1; Make 4.4.1 | Pass: clean local clone, ELF/UF2 generated | N/A | docs/private/stage1_fresh_clone_usb_build.log; hardware N/A |
+
+The user confirms Suen Hong performed the first bench-board test. Physical
+board ID/revision and complete capture metadata remain to be recorded.
 
 ## Session 3 — Agree the Stage 2 contracts
 

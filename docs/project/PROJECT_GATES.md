@@ -14,7 +14,7 @@ Do not treat local build success as completion of G1.
 | Gate | Status | Evidence or next requirement |
 |---|---|---|
 | G0 — Requirements | In progress | Requirements/question register and five named Buddy owners exist; mission agreement pending |
-| G1 — Platform | In progress locally | Three profiles build; clean local clone builds SMP USB-CDC; every-member build/flash/runtime checks pending |
+| G1 — Platform | In progress | Local/fresh-clone builds, first user bench board, and basic Robo-Pico SMP USB runtime check pass; every-member checks pending |
 | G2 — Architecture | Pending | Agree APIs, full GPIO/resource map, task ownership, units, and failures |
 | G3 — Drivers | Pending | Independent, repeatable tests for every physical device |
 | G4 — Motion | Pending | Measured speed/distance/turn accuracy and straight correction |
@@ -46,7 +46,8 @@ Make C flags do not enable `-Wall -Wextra`; a full warning audit remains pending
 The local versions differ from the lecturer's documented GCC 13.2.1 / SDK 2.2.0
 baseline. Successful compilation does not qualify those versions on hardware.
 
-No board was flashed and no sensor/motor/network operation was tested.
+During those agent-run builds no board was flashed and no sensor/motor/network
+operation was tested. Subsequent user bench-board runtime evidence is below.
 Generated files and private logs remain gitignored.
 On Windows the host converter is `elf2uf2.exe`; its specific paths are now
 ignored too.
@@ -66,6 +67,34 @@ The clone and its build outputs are under ignored `docs/private/`.
 
 Use [STAGE_1_GUIDE.md](STAGE_1_GUIDE.md) for member build/flash evidence and
 the complete Stage 1 exit checks.
+
+## First user bench-board runtime evidence
+
+The user reports building/flashing the supplied SMP USB demo and provides
+serial monitor COM6 and PowerShell screenshots. The saved raw capture contains
+59 frames, sequence 140–368, strictly increasing; all show equal producer and
+consumer counts, zero drops, and producer on processor 1 / consumer on processor 2.
+No stall/failure diagnostic is present. See the
+[evidence review](../../evidence/platform/STAGE_1_FIRST_BOARD_REVIEW.md).
+
+One-board flash/USB runtime checks pass on this evidence. The user confirms
+the tester is Suen Hong; physical board ID/revision remains unrecorded.
+Banner, exact elapsed time, and flashed revision are not embedded
+in the capture. Every-member Stage 1 checks remain pending. The subsequent
+basic Robo-Pico check is recorded below.
+
+## Robo-Pico basic runtime evidence
+
+Suen Hong transferred the previously flashed green controller from the Maker
+Pi Pico to the Robo-Pico socket. The user confirms it now works and supplies
+a serial screenshot with eight frames, sequence 33–61: increasing counts,
+equal produced/consumed, `dropped=0`, and `made_on=prc1 seen_on=prc2`.
+The screenshot shows COM6; use whichever COM port Windows currently assigns.
+
+The basic Stage 1 Robo-Pico runtime check passes. See the
+[evidence review](../../evidence/platform/STAGE_1_ROBO_PICO_REVIEW.md).
+A separate raw Robo-Pico log, startup banner, and duration record have not
+been supplied. This result does not verify motors, sensors, servo, or WiFi.
 
 ## Closing a checklist item
 

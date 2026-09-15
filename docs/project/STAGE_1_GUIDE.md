@@ -198,11 +198,35 @@ main branch still builds. Do not use ZIP files as the code-sharing workflow.
 
 ## 9. Final Robo-Pico platform check
 
-When available, repeat build/flash/observe on the final Pico W mounted on
-Robo-Pico, with external actuators disconnected. Resolve GP8/GP9 I2C-versus-motor
+The Robo-Pico carrier itself has **no USB connector**. The supplied
+[board datasheet](../project_datasheets/Robo%20Pico%20Board%20Datasheet.pdf),
+PDF page 3 Figure 1, labels a central **Pi Pico Socket**. PDF page 6 Figures
+2–3 show the USB connector and BOOTSEL button on the separate Pico/Pico W.
+The small Maker Port is a sensor connector, not a USB flashing port.
+
+When available, repeat build/flash/observe on a Pico W fitted to that socket,
+with external actuators disconnected:
+
+1. Disconnect USB and other board power. Check whether the central socket
+   already contains a Pico W. Final Pico W availability is currently assumed.
+2. If empty, fit a Pico W with suitable soldered pin headers, aligned with the
+   board's orientation marking. If transferring a Pico W from a bench carrier,
+   only remove it if it is socket-mounted; do not pull a soldered controller.
+3. Hold BOOTSEL on that Pico W while connecting the PC's USB data cable to
+   the **Pico W's micro-USB port**, not to the Robo-Pico Maker/Grove ports.
+4. Copy `mtk3pico_smp1_usb_cdc.uf2` to `RPI-RP2` as above. For a previously
+   flashed Pico W moved from the bench board, its firmware remains in flash;
+   copying again is optional unless a different image/revision is required.
+5. Power the assembly for normal operation, using the Robo-Pico power switch
+   as needed. Open the Pico W USB COM port and capture/check the demo output.
+6. Record the controller used, carrier revision/ID, tester, firmware revision,
+   and separate `evidence/platform/Robo-Pico-usb-console.txt` evidence.
+
+Resolve GP8/GP9 I2C-versus-motor
 initialization before any powered motor test. This Stage 1 check establishes
 platform startup/console, not motion, sensor, or mission performance.
-If the school board is unavailable, keep that Stage 1 item pending.
+If the school board or a suitable controller is unavailable, keep that Stage 1
+item pending.
 
 ## 10. Close Stage 1 only with evidence
 
@@ -214,7 +238,8 @@ If the school board is unavailable, keep that Stage 1 item pending.
 - The team agrees the Stage 1 coding baseline and shares code through Git.
 - The basic final Robo-Pico platform test passes.
 
-The local fresh-clone USB build passes, but team flashing and runtime evidence
-remain pending. Check only completed items in the authoritative
+The local fresh-clone USB build, first user bench-board flash/USB runtime,
+and basic Robo-Pico runtime checks pass. Remaining member checks and complete metadata are
+pending; see [gate status](PROJECT_GATES.md). Check only completed items in the authoritative
 [Stage 1 checklist](../autonomous_robot_project_roadmap_latest/02_STAGE_1_DEVELOPMENT_ENVIRONMENT.md)
 and [project gates](../autonomous_robot_project_roadmap_latest/PROJECT_GATES.md).
