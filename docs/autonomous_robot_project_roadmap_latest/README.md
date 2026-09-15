@@ -23,3 +23,9 @@ This folder contains the latest staged breakdown and checklists for the assignme
 14. Stage 13 — Engineering Evidence and Final Demonstration
 
 Use `PROJECT_GATES.md` as the hard go/no-go checklist before moving between phases.
+
+## Assignment starting assessment
+
+See [docs/project/README.md](../project/README.md) for the brief-based
+requirements baseline, first-session checklist, hardware audit, and current
+gate evidence. This folder remains the authoritative source of stage checklists.

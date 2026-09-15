@@ -1,9 +1,12 @@
 # Project Gates — Go / No-Go Checklist
 
+Current evidence and limitations: [gate status](../project/PROJECT_GATES.md).
+Local builds do not establish everyone-can-build/flash or hardware success.
+
 ## G0 — Requirements
 - [ ] Mission understood by all members
-- [ ] Buddy roles assigned
-- [ ] Open questions documented
+- [x] Buddy roles assigned — Skyler, Suen Hong, Wynn, Zhi Hong, Nicholas; see starting checklist
+- [x] Open questions documented — see OPEN_QUESTIONS.md
 
 ## G1 — Platform
 - [ ] Everyone can build

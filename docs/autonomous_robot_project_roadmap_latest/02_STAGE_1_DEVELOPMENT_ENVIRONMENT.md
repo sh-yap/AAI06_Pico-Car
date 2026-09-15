@@ -1,5 +1,10 @@
 # Stage 1 — Common Development Environment
 
+Local build evidence: [docs/project/PROJECT_GATES.md](../project/PROJECT_GATES.md).
+Step-by-step Windows flow: [Stage 1 guide](../project/STAGE_1_GUIDE.md).
+Checked local items below apply only to this Windows workspace. Every-member,
+flashing, and hardware checks remain pending; the fresh local clone build passes.
+
 ## Goal
 Every team member can build and flash the same codebase.
 
@@ -7,8 +12,8 @@ Every team member can build and flash the same codebase.
 - [ ] Install compiler/toolchain
 - [ ] Configure Pico C SDK
 - [ ] Obtain supplied GitHub template
-- [ ] Confirm micro T-Kernel RTOS integration
-- [ ] Build unmodified project
+- [x] Confirm micro T-Kernel RTOS integration — supplied demo compiles/links locally; runtime pending
+- [x] Build unmodified project — single-core UART, SMP UART, SMP USB-CDC; sources unchanged
 - [ ] Flash one Maker Pi Pico
 - [ ] Verify USB serial/debug output
 - [ ] Repeat on all five Maker Pi Pico boards
@@ -26,7 +31,7 @@ feature/comms
 ```
 
 ## Git checklist
-- [ ] Fresh clone builds successfully
+- [x] Fresh clone builds successfully — clean local committed clone a3145cb builds SMP USB-CDC; GitHub/new-PC checks pending
 - [ ] `main` always builds
 - [ ] `.gitignore` is correct
 - [ ] Everyone can pull/commit/push/merge

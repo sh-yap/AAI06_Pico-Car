@@ -8,7 +8,9 @@ Release
 *.o
 *.d
 build_make/tools/elf2uf2
+build_make/tools/elf2uf2.exe
 tools/elf2uf2/elf2uf2
+tools/elf2uf2/elf2uf2.exe
 build_make/.build_profile
 
 # Local Wi-Fi credentials. Copy config/wifi_credentials.example.h to this
@@ -21,3 +23,6 @@ config/tcp_test_config.h
 # Python
 __pycache__/
 *.pyc
+
+AGENTS.md
+docs/private
