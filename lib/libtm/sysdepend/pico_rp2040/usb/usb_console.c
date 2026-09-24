@@ -36,6 +36,8 @@ IMPORT unsigned	tm_tusb_write_available(void);
 IMPORT void	tm_tusb_write_char(char value);
 IMPORT void	tm_tusb_write_flush(void);
 IMPORT void	tm_tusb_discard_input(void);
+IMPORT unsigned	tm_tusb_read_available(void);
+IMPORT int	tm_tusb_read_char(void);
 
 #define USB_TASK_PRIORITY	3
 #if TK_SUPPORT_SMP
@@ -52,6 +54,9 @@ LOCAL UB		tx_buffer[USB_TX_SIZE];
 LOCAL volatile UW	tx_head;
 LOCAL volatile UW	tx_tail;
 LOCAL volatile UB	usb_started;
+LOCAL UB		rx_buffer[256];
+LOCAL volatile UW	rx_head;
+LOCAL volatile UW	rx_tail;
 
 #if TK_SUPPORT_SMP
 LOCAL T_SPLOCK		tx_lock;
@@ -116,6 +121,23 @@ EXPORT UW tm_usb_pending(void)
 	return pending;
 }
 
+/* Non-blocking input for bench applications.  USB input is kept separate
+ * from T-Monitor's legacy blocking receive API so normal diagnostics remain
+ * unchanged. */
+EXPORT INT tm_usb_console_getchar(void)
+{
+	UINT	intsts;
+	INT	value = -1;
+
+	tx_lock_enter(&intsts);
+	if (rx_tail != rx_head) {
+		value = rx_buffer[rx_tail];
+		rx_tail = (rx_tail + 1U) & 255U;
+	}
+	tx_lock_leave(intsts);
+	return value;
+}
+
 /*
  * Ordered bring-up checks, for readout over GPIO when USB does not
  * enumerate and the console therefore cannot describe its own failure.
@@ -178,6 +200,21 @@ LOCAL void usb_service_task(INT stacd, void *exinf)
 				  ? (tm_tusb_connected() ? 3 : 2)
 				  : 1;
 
+		/* Preserve host keystrokes for an optional application test console. */
+		while (tm_tusb_read_available() > 0U) {
+			INT	value = tm_tusb_read_char();
+			if (value >= 0) {
+				UW	next;
+				tx_lock_enter(&intsts);
+				next = (rx_head + 1U) & 255U;
+				if (next != rx_tail) {
+					rx_buffer[rx_head] = (UB)value;
+					rx_head = next;
+				}
+				tx_lock_leave(intsts);
+			}
+		}
+
 		/* Gate on enumeration, not on DTR.  If the host is not reading,
 		   write_available() falls to zero and the loop simply stops --
 		   it never waits. */
@@ -201,8 +238,6 @@ LOCAL void usb_service_task(INT stacd, void *exinf)
 			}
 			tm_tusb_write_flush();
 		}
-		tm_tusb_discard_input();
-
 		/* Sleep until the controller interrupts, with a periodic
 		   fallback so the ring still drains when the link is idle. */
 		tk_slp_tsk(USB_POLL_MS);
