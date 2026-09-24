@@ -16,6 +16,7 @@ they do not mean a subject is absent from the briefs.
 | MQTT | Briefing p. 4 and write-up p. 5 require it | Broker, credentials, topics, QoS, and command semantics |
 | Platform | Write-up p. 1 requires Pico/Robo-Pico, RTOS, C, SDK, template, Barr-C | Exact template and required final SMP/profile |
 | Demonstration | Briefing p. 10 mentions Week 10 | Calendar date and detailed assessment criteria |
+| Motor/encoder interface | `PicoCar.pptx` slide 1 documents a PH2.0-6P connector: encoder GND, A phase, B phase, encoder power, motor+, motor- | Motor/encoder model, motor voltage/current/gear ratio, encoder supply/output levels, pull-ups, PPR/CPR, and shaft reference |
 
 ## Clarification register
 
@@ -25,8 +26,8 @@ they do not mean a subject is absent from the briefs.
 - [ ] Is U-turn definitely assessed?
 - [ ] What hump-height accuracy/method is expected?
 - [ ] How should turn-rate monitoring be implemented with LSM303DLHC?
-- [ ] Exact motor specifications?
-- [ ] Encoder pulses/revolution?
+- [ ] Exact motor model, rated voltage/current, stall current, and gear ratio? The PH2.0-6P motor pins are now documented.
+- [ ] Encoder supply voltage, output type/logic level, pull-up requirement, pulses/revolution, x1/x2/x4 convention, and motor-shaft versus wheel-shaft reference? A/B phase pins are now documented.
 - [ ] Wheel diameter?
 - [ ] Wheel separation?
 - [ ] Servo model and pulse/angle range?

@@ -40,15 +40,33 @@ board. `UNKNOWN` means further information is needed.
 |---|---|---|
 | Final Robo-Pico | User photos show the green controller transferred from the Maker Pi Pico into the Robo-Pico socket; the user confirms healthy SMP USB runtime. This is the same previously tested controller, not evidence of a separate school-supplied controller. Cytron ROBO-PICO supports Pico/Pico W. Datasheet Rev 1.0, April 2023; board input specification 3.6–6 V; onboard power switch and single-cell LiPo/Li-Ion charging/protection. [D1](../project_datasheets/Robo%20Pico%20Board%20Datasheet.pdf), [D2](../project_datasheets/Robo_Pico.pdf). | Physical PCB/controller IDs and revisions, local photo archive, permanent controller allocation, and actual vehicle power/wiring arrangement. |
 | Five Maker Pi Pico boards | All five members have Pico W (user confirmation). Supplied Maker Pi Pico pinout is for PCB Rev 1.2.0 and above. Pico W has CYW43439 2.4 GHz WiFi, 3.3 V GPIO, and a 21 × 51 mm controller PCB. [D3](../project_datasheets/MakerPiPico-Pinout.png), [D4](../project_datasheets/RP-008312-DS-2-pico-w-datasheet.pdf). | Confirm each carrier's product/revision and label each physical board; record accessory/socket connections. |
-| Left/right motors | User reports two motors matching the second attached image. Photo shows a geared motor assembly with a multiwire connector; no readable motor model/rating label is visible. Exact motor and encoder specifications cannot be established from appearance. No motor-model datasheet supplied. | Model/label or school parts-list entry, rated voltage, running/stall current if specified, gear ratio, connector pinout, left/right motor-to-terminal mapping, and bench motor driver. |
+| Left/right motors | User reports two motors matching [D11](../project_datasheets/PicoCar.pptx) slide 1. It shows a geared motor/encoder assembly with a **PH2.0-6P** connector. Pins 5 and 6 are labelled `Motor line+` and `Motor line-`. No readable motor model/rating label or motor-model datasheet is supplied. | Model/label or school parts-list entry, rated voltage, running/stall current if specified, gear ratio, physical harness orientation/continuity verification, left/right motor-to-terminal mapping, and bench motor driver. |
 | Motor driver on Robo-Pico | M1 uses GP8/GP9; M2 uses GP10/GP11. Maximum continuous current 1 A/channel, peak 1.5 A/channel for less than 5 s; PWM frequency limit 20 kHz. Brake/coast truth table below. [D1] pp. 5, 7–8. | Driver IC marking is not identified in the supplied text; actual motor polarity and selected bench driver remain UNKNOWN. |
-| Encoders | Motor photo shows a multiwire connector, but its encoder pin functions/channel count and resolution are unconfirmed. No encoder model/resolution sheet supplied. TCRT5000's possible encoder applications do not identify the team's wheel encoder. | Confirm whether encoders are built into the motors; obtain model, supply/output voltage, signal channels, supplier PPR/CPR definition, motor-shaft versus wheel-shaft reference, and connector wiring. Wheel counts need bench calibration. |
+| Encoders | [D11] slide 1 confirms an encoder integrated with the shown motor assembly and documents the PH2.0-6P interface: pin 1 encoder ground, pin 2 encoder output A phase, pin 3 encoder output B phase, pin 4 encoder power supply, pin 5 motor line+, pin 6 motor line-. This establishes two labelled encoder phase outputs, but not their electrical levels or resolution. No encoder model/resolution sheet is supplied. TCRT5000's possible encoder applications do not identify this wheel encoder. | Obtain the encoder model, supply voltage, output type/voltage, required pull-ups, supplier PPR/CPR definition, counting convention (x1/x2/x4), and motor-shaft versus wheel-shaft reference. Verify connector orientation and wiring on the physical motor. Wheel counts still need bench calibration. |
 | Wheels/chassis | Wheel diameter reported by user: 6 cm = **60 mm**. No wheel-centre separation or chassis dimensions supplied. | Confirm both wheels' rolling diameter; measure wheel-centre separation mm, overall vehicle dimensions, and sensor/servo mounting geometry. |
 | Servo | Model reported by user: **T-SG90**. No model-specific voltage/current/pulse specification supplied. Robo-Pico servo signals are GP12–GP15; V+ follows the board's motor/servo supply. [D1] pp. 4, 7. | Supplier/model-specific voltage/current and pulse range, chosen servo port, and mounting. Safe angles/centre/settling time require calibration; do not assume every SG90-labelled variant has identical limits. |
 | Battery/power | User reports a **20000 mAh powerbank**, input **DC 5 V / 2.1 A**. User clarification confirms **Output 1: 5 V / 2.1 A** and **Output 2: 5 V / 2.1 A**. Combined simultaneous output current is not specified. Robo-Pico's single-cell battery connector capability does not establish use of a separate LiPo here. USB-only motor/servo supply is specified as VUSB minus 0.4 V; Grove +3V3 total output limit is 300 mA. [D1] pp. 3, 7, 9. | Powerbank brand/model and shared/per-port current limit, actual USB/power connection to the vehicle, device supply wiring, any regulator/boost module, and stop/power-switch arrangement. Treat 20000 mAh as the label rating; its voltage basis and usable output capacity are unconfirmed. |
 | Three IR sensors | User identifies **MH-Sensor-Series**. First attached image shows that PCB marking and connector labels **VCC, GND, DO, AO**: labelled digital and analogue outputs. The marking does not establish the exact optical component or module voltage rating. Waveshare's manual describes ST188 + LM393, 3.0–5.3 V, DOUT/AOUT/GND/VCC; TCRT5000 is a separate component sheet. Neither is yet confirmed as the exact datasheet for this MH module. [D5](../project_datasheets/Infrared-Reflective-Sensor-UserManual.pdf), [D6](../project_datasheets/tcrt5000.pdf), [D7](../project_datasheets/LM393-D.PDF). | Confirm all three modules match; identify optical/comparator components or obtain the school module specification; confirm supply/output voltages, selected DO/AO use and GPIOs, spacing, and mounting height. Black/white thresholds require calibration. |
-| IMU | OKY3231-2 / GY-511 module with LSM303DLHC, accelerometer + magnetometer, no gyroscope. Module sheet states 3–5 V input. Chip sheet states Vdd 2.16–3.6 V; do not treat chip/module supply ratings as interchangeable. Acceleration ranges ±2/4/8/16 g; magnetic ranges ±1.3 to ±8.1 gauss; I2C 100/400 kHz. [D8](../project_datasheets/OKY3231-2.pdf), [D9](../project_datasheets/lsm303dlhc.pdf) pp. 1, 10, 12, 21–22. | Confirm physical GY-511/module revision, regulator/pull-up arrangement and bus voltage, chosen SDA/SCL pins, mounted orientation, and calibration. |
+| IMU | OKY3231-2 / GY-511 module with LSM303DLHC, accelerometer + magnetometer, no gyroscope. [D11] slide 2 identifies the pictured board as `GY-511 LSM303DLHC 3-axis E-compass Sensor` and labels INT2, INT1, SDA, SCL, GND, 3.3 V, Vin, and DRDY. The module sheet states 3–5 V input. The chip sheet states Vdd 2.16–3.6 V; do not treat chip/module supply ratings as interchangeable. Acceleration ranges ±2/4/8/16 g; magnetic ranges ±1.3 to ±8.1 gauss; I2C 100/400 kHz. [D8](../project_datasheets/OKY3231-2.pdf), [D9](../project_datasheets/lsm303dlhc.pdf) pp. 1, 10, 12, 21–22. | Confirm the team's physical board matches the pictured GY-511 and record its revision, regulator/pull-up arrangement and bus voltage, chosen SDA/SCL pins, mounted orientation, and calibration. |
 | Ultrasonic | HC-SR04: DC 5 V, listed working current 15 mA, range 20–4000 mm, measuring angle 15°, dimensions 45 × 20 × 15 mm. Trigger high for at least 10 us; manual recommends more than 60 ms between measurements. Claimed accuracy up to 3 mm is a supplier specification, not our measured accuracy. [D10](../project_datasheets/HCSR04.pdf) pp. 1–2. | Confirm installed module, actual 5 V supply, Trigger/Echo pins, Echo level adaptation and resistor values, mounting, and known-distance calibration. |
+
+### PicoCar presentation review
+
+[D11](../project_datasheets/PicoCar.pptx) contains four image-only slides:
+
+1. Motor/encoder assembly and PH2.0-6P pinout. This supplies the new Buddy 2
+   connector and two-phase encoder information recorded above.
+2. GY-511 LSM303DLHC reference image and labelled module pins.
+3. Generic Raspberry Pi Pico W GPIO/function pinout.
+4. Robo-Pico board-layout reference image showing its motor terminals, motor
+   status LEDs/test buttons, servo ports, Pico socket, GPIO/Grove ports,
+   buttons, buzzer, NeoPixel, power inputs, and switch.
+
+Slides 3 and 4 are consistent with the supplied Pico W and Robo-Pico
+datasheets but do not identify the team's physical board revisions or add new
+electrical ratings. Slide 1 is a connector/interface reference, not a complete
+motor or encoder datasheet. Do not infer unlisted voltage, current, resolution,
+gear ratio, or logic-level specifications from appearance.
 
 ### Documented motor and board connections
 
@@ -103,19 +121,22 @@ the respective bench-test stage.
 
 - Controller coordinator and interface reviewer for each Buddy: UNKNOWN.
 - Each Maker Pi Pico carrier revision/physical ID and final Robo-Pico revision: UNKNOWN. The transferred green controller is now tested on Robo-Pico; record its ID and permanent allocation.
-- Motor model/voltage/current/gear ratio and connector pinout; encoder presence/channels/resolution/output specification; bench motor driver: UNKNOWN. Two motors are reported and an appearance photo is supplied.
+- Motor model/voltage/current/gear ratio, encoder supply/output levels and resolution, physical harness verification, left/right mapping, and bench motor driver: UNKNOWN. [PicoCar.pptx](../project_datasheets/PicoCar.pptx) slide 1 now documents the PH2.0-6P pinout and A/B encoder phases, so connector function and encoder presence/channel count are no longer unknown.
 - Wheel-centre separation and chassis size in mm: UNKNOWN. Wheel diameter is reported as 60 mm; confirm both wheels' rolling diameter during calibration.
 - T-SG90 rated supply/current/pulse limits and selected Robo-Pico servo port: UNKNOWN; model has been recorded.
 - Powerbank brand/model/current-sharing specification and vehicle power wiring: UNKNOWN. Capacity 20000 mAh, input 5 V / 2.1 A, and two outputs each labelled 5 V / 2.1 A are reported and clarified.
 - Whether all three MH-Sensor-Series modules match, their optical/comparator components, rated supply/output voltages, selected DO/AO use, and spacing/height: UNKNOWN. Series marking and DO/AO labels are visible.
 - Actual sensor wiring/power table, GY-511 orientation, Echo divider/level shifter, and GP28 battery-sense jumper state: UNKNOWN.
-- Local archive filenames for the supplied IR/motor images, photos of other hardware/labels, and available multimeter/ruler/USB-UART adapter: UNKNOWN.
+- The motor/encoder interface image is archived in [PicoCar.pptx](../project_datasheets/PicoCar.pptx) slide 1. A local archive filename for the supplied IR image, photos of other hardware/labels, and available multimeter/ruler/USB-UART adapter remain UNKNOWN.
 
-The datasheet folder has nine PDFs and one pinout image. It contains no
-identified motor, encoder, servo, powerbank, or wheel/chassis specification sheet.
-The user has supplied IR/motor images and servo/powerbank/wheel details in the
-conversation. Model-specific ratings and physical dimensions still need the
-records listed above; the images are not currently archived as local files.
+The datasheet folder has nine PDFs, one standalone pinout image, and one
+four-slide [PicoCar presentation](../project_datasheets/PicoCar.pptx). The
+presentation archives the motor/encoder interface image plus reference images
+for the GY-511, Pico W pinout, and Robo-Pico layout. It does not provide an
+identified motor or encoder model, motor electrical ratings, encoder electrical
+levels/resolution, or servo, powerbank, and wheel/chassis specification sheets.
+The supplied IR image is still not archived locally. Model-specific ratings and
+physical measurements still need the records listed above.
 
 ## Session 2 — Each member builds, flashes, and observes the demo
 

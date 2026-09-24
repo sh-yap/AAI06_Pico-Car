@@ -3,6 +3,28 @@
 ## Goal
 Build a repeatable motion layer that every other subsystem can trust.
 
+## Known motor/encoder interface
+
+The supplied `docs/project_datasheets/PicoCar.pptx` slide 1 shows an integrated
+geared motor/encoder assembly using a PH2.0-6P connector:
+
+| Pin | Documented function |
+|---:|---|
+| 1 | Encoder ground |
+| 2 | Encoder output A phase |
+| 3 | Encoder output B phase |
+| 4 | Encoder power supply |
+| 5 | Motor line+ |
+| 6 | Motor line- |
+
+This confirms two labelled encoder phase outputs and their connector positions.
+It does **not** specify the motor/encoder model, motor voltage/current/gear ratio,
+encoder supply/output voltage, output type, required pull-ups, PPR/CPR, or
+whether resolution is stated at the motor or wheel shaft. Obtain those values
+and verify the physical harness orientation/continuity before powered testing.
+Do not energise encoder power or connect A/B to RP2040 GPIO until their voltage
+and output levels are confirmed; the Pico/Pico W GPIO domain is 3.3 V.
+
 ## 4A — Motor control
 - [ ] Verify left motor polarity
 - [ ] Verify right motor polarity

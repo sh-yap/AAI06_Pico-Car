@@ -34,14 +34,15 @@ Make sure all five team members agree on what the robot must do before implement
 - [ ] Reserve Robo-Pico for integration/final robot
 
 ## Hardware audit
-- [ ] Record motor model
-- [ ] Record encoder model / resolution
+- [ ] Record motor model and electrical ratings — PH2.0-6P motor/encoder interface is documented, but the model, voltage, current, and gear ratio remain unknown
+- [x] Record motor/encoder connector pinout — `PicoCar.pptx` slide 1: pin 1 encoder ground, 2 A phase, 3 B phase, 4 encoder power, 5 motor+, 6 motor-
+- [ ] Record encoder model / resolution / electrical levels — two labelled phases are documented, but PPR/CPR, voltage, output type, and count convention remain unknown
 - [x] Record wheel diameter — user reports 60 mm; rolling-diameter calibration pending
 - [ ] Record wheel separation / track width
 - [x] Record servo model — T-SG90 (user report); electrical/pulse limits pending
 - [x] Record battery voltage / capacity — powerbank labelled 20000 mAh; outputs 1 and 2 each 5 V / 2.1 A; combined current/usable capacity pending
 - [x] Record IR sensor module model — MH-Sensor-Series (user report/image); exact variant/rating pending
-- [ ] Record IMU model
+- [x] Record IMU model — supplied material identifies GY-511 / LSM303DLHC; physical board revision still needs confirmation
 - [ ] Record ultrasonic module
 - [ ] Photograph all hardware
 - [ ] Identify Pico vs Pico W on each board
