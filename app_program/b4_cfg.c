@@ -11,11 +11,9 @@
 #include "b4_cfg.h"
 
 #define B4_CFG_MAX_GPIO                    29U
-#define B4_CFG_MAX_I2C_UNIT                 1U
-#define B4_CFG_I2C0_SDA_GPIO                 8U
-#define B4_CFG_I2C0_SCL_GPIO                 9U
-#define B4_CFG_I2C1_SDA_GPIO                 6U
-#define B4_CFG_I2C1_SCL_GPIO                 7U
+#define B4_CFG_I2C_UNIT                     1U
+#define B4_CFG_I2C_SDA_GPIO                 2U
+#define B4_CFG_I2C_SCL_GPIO                 3U
 #define B4_CFG_I2C_FREQUENCY_HZ        400000U
 #define B4_CFG_ACCEL_ADDRESS_LOW         0x18U
 #define B4_CFG_ACCEL_ADDRESS_HIGH        0x19U
@@ -89,16 +87,17 @@ b4_cfg_stationary_mean (const b4_types_sample_t * p_samples,
 
 /** @brief Return provisional values for the current Pico I2C driver.
  *
- * @return A configuration using I2C1 GP6/GP7 and provisional thresholds.
+ * @return A configuration using ROBO-PICO Grove Port 2 and provisional
+ *         thresholds.
  */
 b4_cfg_config_t
 b4_cfg_default (void)
 {
     b4_cfg_config_t config = {0};
 
-    config.i2c_unit = 1U;
-    config.sda_gpio = B4_CFG_I2C1_SDA_GPIO;
-    config.scl_gpio = B4_CFG_I2C1_SCL_GPIO;
+    config.i2c_unit = B4_CFG_I2C_UNIT;
+    config.sda_gpio = B4_CFG_I2C_SDA_GPIO;
+    config.scl_gpio = B4_CFG_I2C_SCL_GPIO;
     config.accel_i2c_address = B4_CFG_ACCEL_ADDRESS_HIGH;
     config.accel_data_rate_hz = B4_CFG_ACCEL_DATA_RATE_HZ;
     config.accel_range_g = B4_CFG_ACCEL_RANGE_G;
@@ -164,7 +163,7 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
 
         if ((!b_axes_valid) || (!b_addresses_valid) ||
             (false == b_bus_pins_valid) ||
-            (p_config->i2c_unit > B4_CFG_MAX_I2C_UNIT) ||
+            (p_config->i2c_unit != B4_CFG_I2C_UNIT) ||
             (p_config->sda_gpio > B4_CFG_MAX_GPIO) ||
             (p_config->scl_gpio > B4_CFG_MAX_GPIO) ||
             (p_config->i2c_frequency_hz != B4_CFG_I2C_FREQUENCY_HZ) ||
@@ -381,35 +380,21 @@ b4_cfg_sample_is_in_range (const b4_types_sample_t * p_sample)
     return (b_in_range);
 }
 
-/** @brief Check whether the selected pins match the RP2040 driver mapping.
+/** @brief Check whether the selected pins match the ROBO-PICO mapping.
  *
  * @param p_config The configuration containing an I2C unit and pin pair.
- * @return True when the unit and pins are supported by the existing driver.
+ * @return True only for I2C1 on Grove Port 2, GP2 and GP3.
  */
 static bool
 b4_cfg_bus_pins_are_valid (const b4_cfg_config_t * p_config)
 {
     bool b_valid = false;
 
-    switch (p_config->i2c_unit)
+    if ((B4_CFG_I2C_UNIT == p_config->i2c_unit) &&
+        (B4_CFG_I2C_SDA_GPIO == p_config->sda_gpio) &&
+        (B4_CFG_I2C_SCL_GPIO == p_config->scl_gpio))
     {
-        case 0U:
-            if ((B4_CFG_I2C0_SDA_GPIO == p_config->sda_gpio) &&
-                (B4_CFG_I2C0_SCL_GPIO == p_config->scl_gpio))
-            {
-                b_valid = true;
-            }
-            break;
-        case 1U:
-            if ((B4_CFG_I2C1_SDA_GPIO == p_config->sda_gpio) &&
-                (B4_CFG_I2C1_SCL_GPIO == p_config->scl_gpio))
-            {
-                b_valid = true;
-            }
-            break;
-        default:
-            b_valid = false;
-            break;
+        b_valid = true;
     }
 
     return (b_valid);

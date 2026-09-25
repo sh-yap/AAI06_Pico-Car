@@ -15,10 +15,11 @@
 #define B4_CFG_AXIS_Y 1U
 #define B4_CFG_AXIS_Z 2U
 
-/** @brief Hardware, calibration, and processing configuration.
+/** @brief ROBO-PICO hardware, calibration, and processing configuration.
  *
- * The RP2040 driver maps I2C0 to GP8/GP9 and I2C1 to GP6/GP7. I2C runs at
- * 400 kHz. Accelerometer and algorithm rates use the units in their names.
+ * The car-test image supports ROBO-PICO Grove Port 2, which maps I2C1 to
+ * SDA=GP2 and SCL=GP3. I2C runs at 400 kHz. Accelerometer and algorithm
+ * rates use the units in their names.
  *
  * I2C units are zero-based. SDA and SCL fields contain GPIO numbers. The
  * address uses the seven-bit accelerometer form. Rates are in hertz and the
@@ -72,7 +73,7 @@ typedef struct
     uint8_t max_consecutive_read_failures;
 } b4_cfg_config_t;
 
-/** Return the documented Phase 1 bench defaults. */
+/** Return the ROBO-PICO car-test defaults. */
 b4_cfg_config_t
 b4_cfg_default (void);
 

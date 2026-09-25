@@ -65,9 +65,13 @@ EXPORT ER knl_start_device( void )
 		if(err < E_OK) return err;
 	#endif
 
-	/* I2C unit.0 "iica" */
+	/* Buddy 4 uses only ROBO-PICO Grove Port 2 on I2C1. */
 	#if DEVCNF_USE_IIC
+	#if B4_CAR_TEST
+		err = dev_init_i2c(1);
+	#else
 		err = dev_init_i2c(0);
+	#endif
 		if(err < E_OK) return err;
 	#endif
 
