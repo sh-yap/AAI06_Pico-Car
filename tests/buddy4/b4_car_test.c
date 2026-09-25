@@ -184,6 +184,16 @@ car_test_failure_loop (const char * p_operation, b4_types_result_t result);
 static void
 car_test_run_baseline (void);
 
+/** @brief Derive the expected stationary gravity vector from orientation.
+ *
+ * @param p_config The validated sensor and orientation configuration.
+ * @param p_expected_mg The destination for the expected sensor-axis vector.
+ * @return The result of deriving the expected vector.
+ */
+static b4_types_result_t
+car_test_expected_gravity (const b4_cfg_config_t * p_config,
+                           b4_car_test_vector_t * p_expected_mg);
+
 /** @brief Run the calibration lifecycle and report what it measured. */
 static void
 car_test_run_calibration (void);
@@ -228,6 +238,7 @@ static void
 car_test_report_calibration (b4_types_result_t close_result,
                           b4_types_result_t calibrate_result,
                           b4_types_result_t init_result,
+                          b4_types_result_t reset_result,
                           uint16_t pre_stored_count,
                           const b4_car_test_vector_t * p_expected_mg);
 
@@ -549,13 +560,67 @@ car_test_run_baseline (void)
     car_test_stats_report(&g_car_test_stats, read_ok, read_fail);
 }
 
+/** @brief Derive the expected stationary gravity vector from orientation.
+ *
+ * The configuration was validated during startup. Its vertical axis is one
+ * of the three sensor axes, its sign is +1 or -1, and gravity is bounded by
+ * the supported sample range.
+ *
+ * @param p_config The validated sensor and orientation configuration.
+ * @param p_expected_mg The destination for the expected sensor-axis vector.
+ * @return The result of deriving the expected vector.
+ */
+static b4_types_result_t
+car_test_expected_gravity (const b4_cfg_config_t * p_config,
+                           b4_car_test_vector_t * p_expected_mg)
+{
+    b4_types_result_t result = B4_RESULT_OK;
+
+    if ((NULL == p_config) || (NULL == p_expected_mg))
+    {
+        result = B4_RESULT_INVALID_ARGUMENT;
+    }
+    else
+    {
+        /* Validation bounds the unsigned reference to the signed sample
+         * range, so the conversion preserves its exact value. */
+        int32_t gravity_mg = (int32_t)p_config->gravity_reference_mg;
+
+        p_expected_mg->x_mg = 0;
+        p_expected_mg->y_mg = 0;
+        p_expected_mg->z_mg = 0;
+
+        /* Validation limits the sign to -1 or +1, so this conversion is
+         * exact and the product remains within the validated sample range. */
+        gravity_mg *= (int32_t)p_config->vertical_sign;
+
+        switch (p_config->vertical_axis)
+        {
+            case B4_CFG_AXIS_X:
+                p_expected_mg->x_mg = gravity_mg;
+            break;
+            case B4_CFG_AXIS_Y:
+                p_expected_mg->y_mg = gravity_mg;
+            break;
+            case B4_CFG_AXIS_Z:
+                p_expected_mg->z_mg = gravity_mg;
+            break;
+            default:
+                result = B4_RESULT_HARDWARE_CONFIG_FAILURE;
+            break;
+        }
+    }
+
+    return (result);
+}
+
 /** @brief Run the calibration lifecycle and report what it measured.
  *
  * The sequence is the one the plan fixes: collect stationary uncorrected
  * samples, close the sensor, let b4_cfg_calibrate_stationary compute the
- * bias, initialize again with the updated configuration, then collect a
- * second stationary window. The harness never computes a bias itself, and
- * b4_proc needs no reinitialization because b4_imu applies the bias.
+ * bias, initialize again with the updated configuration, reset processing
+ * history, then collect a second stationary window. The harness never
+ * computes a bias itself.
  */
 static void
 car_test_run_calibration (void)
@@ -563,14 +628,18 @@ car_test_run_calibration (void)
     b4_types_result_t close_result = B4_RESULT_OK;
     b4_types_result_t calibrate_result = B4_RESULT_OK;
     b4_types_result_t init_result = B4_RESULT_OK;
+    b4_types_result_t reset_result = B4_RESULT_NOT_INITIALIZED;
+    b4_types_result_t expected_result = B4_RESULT_OK;
     b4_car_test_vector_t expected_mg = {0};
     b4_car_test_window_t pre_window = {0};
 
-    /* The module rests with +Z up, so the expected stationary vector is a
-     * zero horizontal pair and one gravity reference on the vertical axis.
-     * b4_cfg_validate bounds that reference to the sample range, so the
-     * signed conversion is exact. */
-    expected_mg.z_mg = (int32_t)g_car_test_config.gravity_reference_mg;
+    expected_result = car_test_expected_gravity(
+        &g_car_test_config,
+        &expected_mg);
+    if (B4_RESULT_OK != expected_result)
+    {
+        car_test_failure_loop("calibration_orientation", expected_result);
+    }
 
     tm_printf((UB *)"B4I calibration start samples=%u noise_limit_mg=%u\n",
               B4_CAR_TEST_CAL_SAMPLES,
@@ -614,6 +683,18 @@ car_test_run_calibration (void)
     init_result = b4_imu_init(&g_car_test_config);
     tm_printf((UB *)"B4I calibration reinit result=%s\n",
               b4_car_test_log_result_name(init_result));
+    if (B4_RESULT_OK != init_result)
+    {
+        car_test_failure_loop("b4_imu_init", init_result);
+    }
+
+    reset_result = b4_proc_reset_run_stats();
+    tm_printf((UB *)"B4I calibration proc_reset result=%s\n",
+              b4_car_test_log_result_name(reset_result));
+    if (B4_RESULT_OK != reset_result)
+    {
+        car_test_failure_loop("b4_proc_reset_run_stats", reset_result);
+    }
 
     tk_dly_tsk(B4_CAR_TEST_CAL_POST_WAIT_MS);
     car_test_collect_window(B4_CAR_TEST_CAL_SAMPLES);
@@ -630,6 +711,7 @@ car_test_run_calibration (void)
     car_test_report_calibration(close_result,
                              calibrate_result,
                              init_result,
+                             reset_result,
                              pre_window.stored_count,
                              &expected_mg);
 }
@@ -774,6 +856,7 @@ car_test_peak_deviation_mg (const b4_types_sample_t * p_sample,
  * @param close_result The result of b4_imu_close.
  * @param calibrate_result The result of b4_cfg_calibrate_stationary.
  * @param init_result The result of the reinitialization.
+ * @param reset_result The result of resetting processing history.
  * @param pre_stored_count The number of samples the calibration used.
  * @param p_expected_mg The expected stationary vector.
  */
@@ -781,6 +864,7 @@ static void
 car_test_report_calibration (b4_types_result_t close_result,
                           b4_types_result_t calibrate_result,
                           b4_types_result_t init_result,
+                          b4_types_result_t reset_result,
                           uint16_t pre_stored_count,
                           const b4_car_test_vector_t * p_expected_mg)
 {
@@ -808,6 +892,7 @@ car_test_report_calibration (b4_types_result_t close_result,
     b_pass = ((B4_RESULT_OK == close_result) &&
               (B4_RESULT_OK == calibrate_result) &&
               (B4_RESULT_OK == init_result) &&
+              (B4_RESULT_OK == reset_result) &&
               (B4_CAR_TEST_CAL_SAMPLES == pre_stored_count) &&
               (B4_CAR_TEST_CAL_SAMPLES == g_car_test_window.stored_count) &&
               (true == b_applied) &&

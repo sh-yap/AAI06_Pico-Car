@@ -30,7 +30,7 @@ INCPATH = -I"../include" -I"../config" -I"../kernel/knlinc" \
 # The profile includes the test-local calibration mode. The shared platform
 # makefile accepts this profile identity without knowing about Buddy 4 tests.
 PROFILE_ID := b4-car-test-cal$(B4_TEST_CALIBRATION)-$(CONSOLE)-$(WIFI)-smp$(SMP)
-PROFILE_FILE := .b4_car_test_profile
+PROFILE_FILE := .build_profile
 
 -include sources.mk
 
@@ -87,7 +87,8 @@ $(EXE_FILE).elf: $(OBJS) $(E2U)
 	$(E2U) $(EXE_FILE).elf $(EXE_FILE).uf2
 
 clean:
-	-$(RM) $(B4_OBJS) $(B4_DEPS) $(EXE_FILE).elf $(EXE_FILE).map $(EXE_FILE).uf2
+	-$(RM) $(OBJS) $(C_DEPS) $(ASM_DEPS) $(S_UPPER_DEPS) \
+	        $(EXE_FILE).elf $(EXE_FILE).map $(EXE_FILE).uf2
 
 .PHONY: all clean
 
