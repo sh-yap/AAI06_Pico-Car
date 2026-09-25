@@ -47,7 +47,6 @@
 
 #include "usb_console_compat.h"
 #include "demo_tasks.h"
-#include "b4_car_test.h"
 
 #if TM_WIFI_CYW43
 /* Plain C types on purpose - see the note in cyw43_utk.h. */
@@ -504,13 +503,6 @@ LOCAL BOOL made(const char *what, ID id)
 
 EXPORT INT usermain(void)
 {
-#if (0 != B4_CAR_TEST)
-    /* The car-test image runs only the diagnostic harness. It does not create
-       demonstration tasks or command any vehicle hardware. */
-    b4_car_test_run();
-
-    return 0;
-#else
 	ID	tid;
 
 	mpfid = tk_cre_mpf(&cmpf); if(!made("mpf", mpfid)) return 1;
@@ -531,5 +523,4 @@ EXPORT INT usermain(void)
 	   return the kernel shuts the system down. */
 	tk_slp_tsk(TMO_FEVR);
 	return 0;
-#endif
 }

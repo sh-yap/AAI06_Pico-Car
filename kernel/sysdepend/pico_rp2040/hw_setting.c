@@ -64,11 +64,7 @@ LOCAL const UW module_tbl[] = {
 
 #if USE_SDEV_DRV	// Do not use sample device driver
 	RESETS_RESET_ADC,		/* A/DC */
-#if B4_CAR_TEST
-	RESETS_RESET_I2C1,		/* ROBO-PICO Buddy 4 I2C1 */
-#else
-	RESETS_RESET_I2C0,		/* Legacy sample I2C0 */
-#endif
+	RESETS_RESET_I2C1,		/* ROBO-PICO Grove Port 2 I2C1 */
 #endif /* USE_SDEV_DRV */
 	0
 };
@@ -97,19 +93,11 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 	{GPIO_CTRL(28),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(28), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
 
-#if B4_CAR_TEST
 	/* ROBO-PICO Grove Port 2: I2C1 SDA=GP2 and SCL=GP3. */
 	{GPIO_CTRL(2),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(2), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
 	{GPIO_CTRL(3),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(3), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
-#else
-	/* Legacy sample I2C0 mapping. */
-	{GPIO_CTRL(8),	GPIO_CTRL_FUNCSEL_I2C},
-	{GPIO(8), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
-	{GPIO_CTRL(9),	GPIO_CTRL_FUNCSEL_I2C},
-	{GPIO(9), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
-#endif
 
 #endif /* USE_SDEV_DRV */
 	{0, 0}

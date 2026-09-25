@@ -186,49 +186,12 @@ endif
 endif
 
 #
-# Buddy 4 ROBO-PICO car-test gate.
-#
-#   B4_CAR_TEST=0  (default)  the demonstration application
-#   B4_CAR_TEST=1             the ROBO-PICO sensor diagnostic image
-#
-# The car-test profile is deliberately fixed to SMP=0, WIFI=none, and the
-# USB-CDC console. It owns the only supported Buddy 4 hardware target.
-#
-B4_CAR_TEST ?= 0
-ifneq ($(filter $(B4_CAR_TEST),0 1),$(B4_CAR_TEST))
-$(error Unknown B4_CAR_TEST '$(B4_CAR_TEST)'; use 0 or 1)
-endif
-
-ifeq ($(B4_CAR_TEST),1)
-ifneq ($(SMP),0)
-$(error B4_CAR_TEST=1 requires SMP=0)
-endif
-ifneq ($(WIFI),none)
-$(error B4_CAR_TEST=1 requires WIFI=none)
-endif
-ifneq ($(CONSOLE),usb_cdc)
-$(error B4_CAR_TEST=1 requires CONSOLE=usb_cdc)
-endif
-endif
-
-B4_CAR_TEST_SUFFIX :=
-ifeq ($(B4_CAR_TEST),1)
-B4_CAR_TEST_SUFFIX := _b4_car_test
-endif
-
-# Bare token, stringified by b4_car_test.c for the banner.
-B4_CAR_TEST_PROFILE := smp$(SMP)_$(CONSOLE)_$(WIFI)_b4_car_test$(B4_CAR_TEST)
-
-#
-# Images are named after the profile they were built with.  Every image is
+# Images are named after the profile they were built with. Every image is
 # flashed by hand from a downloads folder, so identically-named artifacts are
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(B4_CAR_TEST_SUFFIX)
-ifeq ($(B4_CAR_TEST),1)
-EXE_FILE := b4_robopico_car_test
-endif
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -278,10 +241,6 @@ CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
 
-# Also applied here, for the same ':= - before append' reason.
-CFLAGS += -DB4_CAR_TEST=$(B4_CAR_TEST) \
-           -DB4_CAR_TEST_PROFILE=$(B4_CAR_TEST_PROFILE)
-
 ################################################################################
 # Console selection
 #
@@ -309,8 +268,8 @@ CFLAGS += -DB4_CAR_TEST=$(B4_CAR_TEST) \
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-b4_car_test$(B4_CAR_TEST)
-PROFILE_FILE := .build_profile
+PROFILE_ID ?= smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)
+PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
 $(info Build profile is now $(PROFILE_ID); discarding objects built for another profile.)

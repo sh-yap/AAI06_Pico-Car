@@ -15,10 +15,9 @@
  *   B4E  processing events, printed when they happen
  *   B4H  health and fault changes, printed when they happen
  *
- * Deviation from BARR-C 1.6.a, module wide: tm_printf() and the name tables
- * below view read-only text through unsigned char pointers. The name tables
- * are const UB arrays and need no cast at all. A format string cast only adds
- * that same view of the literal and cannot alter any value.
+ * Deviation from BARR-C 1.6.a, module wide: tm_printf() views read-only text
+ * through unsigned char pointers. A format string cast only adds that same
+ * view of the literal and cannot alter any value.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,13 +28,12 @@
 #include <tm/tmonitor.h>
 
 #include "b4_car_test.h"
+#include "b4_car_test_log.h"
 #include "b4_cfg.h"
 #include "b4_imu.h"
 #include "b4_proc.h"
 #include "b4_types.h"
 #include "usb_console_compat.h"
-
-#if (0 != B4_CAR_TEST)
 
 /** Console enumeration wait before the first record is printed. */
 #define B4_CAR_TEST_CONSOLE_TIMEOUT_MS     20000U
@@ -62,13 +60,17 @@
 /** Interval between repeated startup failure records. */
 #define B4_CAR_TEST_FAILURE_REPORT_MS       2000U
 
-/** Build profile token, supplied by the makefile as -DB4_CAR_TEST_PROFILE. */
-#ifndef B4_CAR_TEST_PROFILE
-#define B4_CAR_TEST_PROFILE unknown_b4_car_test
+/** Build profile token, supplied by the dedicated test makefile. */
+#ifndef B4_TEST_PROFILE
+#define B4_TEST_PROFILE unknown_b4_car_test
 #endif
 
-#define B4_CAR_TEST_STRINGIFY_INNER(value) (#value)
-#define B4_CAR_TEST_STRINGIFY(value) B4_CAR_TEST_STRINGIFY_INNER(value)
+#ifndef B4_TEST_CALIBRATION
+#define B4_TEST_CALIBRATION 0
+#endif
+
+#define B4_TEST_STRINGIFY_INNER(value) (#value)
+#define B4_TEST_STRINGIFY(value) B4_TEST_STRINGIFY_INNER(value)
 
 /** @brief Descriptive stationary statistics for one car test measurement. */
 typedef struct
@@ -128,75 +130,6 @@ typedef struct
     uint32_t since_report;
     uint32_t since_summary;
 } b4_car_test_counter_t;
-
-/* Read-only text for the console. Each table follows its enum order and has
- * a trailing unknown entry. */
-static const UB g_car_test_result_names[][24] = {
-    "OK",
-    "INVALID_ARGUMENT",
-    "NOT_INITIALIZED",
-    "HARDWARE_CONFIG_FAILURE",
-    "SENSOR_COMM_FAILURE",
-    "INVALID_CALIBRATION",
-    "INVALID_SAMPLE",
-    "STALE_SAMPLE",
-    "TIMEOUT",
-    "REPEATED_READ_FAILURE",
-    "UNKNOWN_RESULT",
-};
-
-static const UB g_car_test_fault_names[][20] = {
-    "NONE",
-    "HARDWARE_CONFIG",
-    "SENSOR_COMM",
-    "INVALID_CALIBRATION",
-    "INVALID_SAMPLE",
-    "STALE_SAMPLE",
-    "READ_TIMEOUT",
-    "REPEATED_READ",
-    "UNKNOWN_FAULT",
-};
-
-static const UB g_car_test_health_names[][16] = {
-    "NOT_INITIALIZED",
-    "READY",
-    "DEGRADED",
-    "FAULT",
-    "UNKNOWN_HEALTH",
-};
-
-static const UB g_car_test_tilt_names[][16] = {
-    "UNKNOWN",
-    "LEVEL",
-    "FORWARD",
-    "BACKWARD",
-    "LEFT",
-    "RIGHT",
-    "COMPOUND",
-    "UNKNOWN_TILT",
-};
-
-static const UB g_car_test_motion_names[][16] = {
-    "QUIET",
-    "ACCELERATING",
-    "CLIMBING_HUMP",
-    "DESCENDING_HUMP",
-    "IMPACT",
-    "UNKNOWN_MOTION",
-};
-
-static const UB g_car_test_hump_names[][13] = {
-    "NORMAL",
-    "CANDIDATE",
-    "ASCENDING",
-    "PEAK",
-    "DESCENDING",
-    "COMPLETE",
-    "UNKNOWN_HUMP",
-};
-
-static const UB g_car_test_axis_names[][2] = {"X", "Y", "Z", "?"};
-static const UB g_car_test_sign_names[][2] = {"+", "-", "?"};
 
 static b4_car_test_health_t g_car_test_health = {0};
 static b4_car_test_counter_t g_car_test_counter = {0};
@@ -361,38 +294,6 @@ car_test_report_sample (const b4_types_status_t * p_status);
 static void
 car_test_report_summary (void);
 
-/** @brief Return the console name of a result. */
-static const UB *
-car_test_result_name (b4_types_result_t result);
-
-/** @brief Return the console name of a fault. */
-static const UB *
-car_test_fault_name (b4_types_fault_t fault);
-
-/** @brief Return the console name of a health level. */
-static const UB *
-car_test_health_name (b4_types_health_t health);
-
-/** @brief Return the console name of a tilt direction. */
-static const UB *
-car_test_tilt_name (b4_types_tilt_t tilt);
-
-/** @brief Return the console name of a motion classification. */
-static const UB *
-car_test_motion_name (b4_types_motion_t motion);
-
-/** @brief Return the console name of a hump state. */
-static const UB *
-car_test_hump_name (b4_types_hump_state_t hump_state);
-
-/** @brief Return the console name of a configured sensor axis. */
-static const UB *
-car_test_axis_name (uint8_t axis);
-
-/** @brief Return the console sign of a configured axis direction. */
-static const UB *
-car_test_sign_name (int8_t sign);
-
 /** @brief Return the larger of two signed milli-g values. */
 static int32_t
 car_test_max_mg (int32_t left_mg, int32_t right_mg);
@@ -446,7 +347,12 @@ b4_car_test_run (void)
     }
 
     car_test_run_baseline();
+#if B4_TEST_CALIBRATION
     car_test_run_calibration();
+#else
+    tm_printf((UB *)"B4I calibration mode=disabled; orientation review "
+              "first\n");
+#endif
 
     /* The stream copies the state it starts from, so later records only ever
      * report a real change. */
@@ -493,7 +399,7 @@ car_test_print_banner (const b4_cfg_config_t * p_config)
 {
     tm_printf((UB *)"\nBuddy 4 ROBO-PICO Car Test\n");
     tm_printf((UB *)"B4I firmware_profile=%s\n",
-              B4_CAR_TEST_STRINGIFY(B4_CAR_TEST_PROFILE));
+              B4_TEST_STRINGIFY(B4_TEST_PROFILE));
     tm_printf((UB *)"B4I mapping grove_port=2 controller=I2C1"
               " i2c_unit=%u sda_gpio=%u scl_gpio=%u frequency_hz=%u\n",
               p_config->i2c_unit,
@@ -512,12 +418,12 @@ car_test_print_banner (const b4_cfg_config_t * p_config)
               p_config->gravity_reference_mg);
     tm_printf((UB *)"B4I orientation forward=%s%s lateral=%s%s"
               " vertical=%s%s\n",
-              car_test_axis_name(p_config->forward_axis),
-              car_test_sign_name(p_config->forward_sign),
-              car_test_axis_name(p_config->lateral_axis),
-              car_test_sign_name(p_config->lateral_sign),
-              car_test_axis_name(p_config->vertical_axis),
-              car_test_sign_name(p_config->vertical_sign));
+              b4_car_test_log_axis_name(p_config->forward_axis),
+              b4_car_test_log_sign_name(p_config->forward_sign),
+              b4_car_test_log_axis_name(p_config->lateral_axis),
+              b4_car_test_log_sign_name(p_config->lateral_sign),
+              b4_car_test_log_axis_name(p_config->vertical_axis),
+              b4_car_test_log_sign_name(p_config->vertical_sign));
     tm_printf((UB *)"B4I thresholds_mg motion=%u tilt=%u impact=%u"
               " hump_start=%u\n",
               p_config->motion_threshold_mg,
@@ -544,14 +450,14 @@ car_test_startup (b4_cfg_config_t * p_config, const char ** pp_operation)
     *pp_operation = "b4_cfg_validate";
     result = b4_cfg_validate(p_config);
     tm_printf((UB *)"B4I bringup step=b4_cfg_validate result=%s\n",
-              car_test_result_name(result));
+              b4_car_test_log_result_name(result));
 
     if (B4_RESULT_OK == result)
     {
         *pp_operation = "b4_proc_init";
         result = b4_proc_init(p_config);
         tm_printf((UB *)"B4I bringup step=b4_proc_init result=%s\n",
-                  car_test_result_name(result));
+                  b4_car_test_log_result_name(result));
     }
 
     if (B4_RESULT_OK == result)
@@ -559,7 +465,7 @@ car_test_startup (b4_cfg_config_t * p_config, const char ** pp_operation)
         *pp_operation = "b4_imu_init";
         result = b4_imu_init(p_config);
         tm_printf((UB *)"B4I bringup step=b4_imu_init result=%s\n",
-                  car_test_result_name(result));
+                  b4_car_test_log_result_name(result));
     }
 
     return (result);
@@ -584,9 +490,9 @@ car_test_failure_loop (const char * p_operation, b4_types_result_t result)
         tm_printf((UB *)"B4H status=startup_failure operation=%s"
                   " result=%s health=%s fault=%s failures=%u\n",
                   p_operation,
-                  car_test_result_name(result),
-                  car_test_health_name(health),
-                  car_test_fault_name(fault),
+                  b4_car_test_log_result_name(result),
+                  b4_car_test_log_health_name(health),
+                  b4_car_test_log_fault_name(fault),
                   failure_count);
 
         tk_dly_tsk(B4_CAR_TEST_FAILURE_REPORT_MS);
@@ -689,7 +595,7 @@ car_test_run_calibration (void)
 
     close_result = b4_imu_close();
     tm_printf((UB *)"B4I calibration close result=%s\n",
-              car_test_result_name(close_result));
+              b4_car_test_log_result_name(close_result));
 
     calibrate_result = b4_cfg_calibrate_stationary(
         g_car_test_cal_samples,
@@ -699,7 +605,7 @@ car_test_run_calibration (void)
         expected_mg.z_mg,
         &g_car_test_config);
     tm_printf((UB *)"B4I calibration stationary result=%s\n",
-              car_test_result_name(calibrate_result));
+              b4_car_test_log_result_name(calibrate_result));
     tm_printf((UB *)"B4I calibration bias_mg x=%d y=%d z=%d\n",
               g_car_test_config.bias_x_mg,
               g_car_test_config.bias_y_mg,
@@ -707,7 +613,7 @@ car_test_run_calibration (void)
 
     init_result = b4_imu_init(&g_car_test_config);
     tm_printf((UB *)"B4I calibration reinit result=%s\n",
-              car_test_result_name(init_result));
+              b4_car_test_log_result_name(init_result));
 
     tk_dly_tsk(B4_CAR_TEST_CAL_POST_WAIT_MS);
     car_test_collect_window(B4_CAR_TEST_CAL_SAMPLES);
@@ -1009,8 +915,8 @@ car_test_stats_report (const b4_car_test_stats_t * p_stats,
 
     tm_printf((UB *)"B4I baseline final imu_health=%s imu_fault=%s"
               " failures=%u\n",
-              car_test_health_name(health),
-              car_test_fault_name(fault),
+              b4_car_test_log_health_name(health),
+              b4_car_test_log_fault_name(fault),
               failure_count);
 }
 
@@ -1034,10 +940,10 @@ car_test_capture_health (const b4_types_status_t * p_status)
 
     tm_printf((UB *)"B4I stream starting health=%s fault=%s imu_health=%s"
               " imu_fault=%s failures=%u\n",
-              car_test_health_name(g_car_test_health.proc_health),
-              car_test_fault_name(g_car_test_health.proc_fault),
-              car_test_health_name(g_car_test_health.imu_health),
-              car_test_fault_name(g_car_test_health.imu_fault),
+              b4_car_test_log_health_name(g_car_test_health.proc_health),
+              b4_car_test_log_fault_name(g_car_test_health.proc_fault),
+              b4_car_test_log_health_name(g_car_test_health.imu_health),
+              b4_car_test_log_fault_name(g_car_test_health.imu_fault),
               failure_count);
 }
 
@@ -1148,8 +1054,8 @@ car_test_report_transitions (const b4_types_status_t * p_status,
     {
         tm_printf((UB *)"B4H source=proc t=%u health=%s fault=%s\n",
                   now_ms,
-                  car_test_health_name(p_status->health),
-                  car_test_fault_name(p_status->fault));
+                  b4_car_test_log_health_name(p_status->health),
+                  b4_car_test_log_fault_name(p_status->fault));
 
         g_car_test_health.proc_health = p_status->health;
         g_car_test_health.proc_fault = p_status->fault;
@@ -1161,8 +1067,8 @@ car_test_report_transitions (const b4_types_status_t * p_status,
         tm_printf((UB *)"B4H source=imu t=%u health=%s fault=%s"
                   " failures=%u\n",
                   now_ms,
-                  car_test_health_name(imu_health),
-                  car_test_fault_name(imu_fault),
+                  b4_car_test_log_health_name(imu_health),
+                  b4_car_test_log_fault_name(imu_fault),
                   failure_count);
 
         g_car_test_health.imu_health = imu_health;
@@ -1196,7 +1102,7 @@ car_test_report_events (const b4_types_status_t * p_status,
             tm_printf((UB *)"B4E t=%u event=impact motion=%s x=%d y=%d"
                       " z=%d dx=%d dy=%d dz=%d\n",
                       p_status->sample.timestamp_ms,
-                      car_test_motion_name(p_status->motion),
+                      b4_car_test_log_motion_name(p_status->motion),
                       p_status->sample.accel_x_mg,
                       p_status->sample.accel_y_mg,
                       p_status->sample.accel_z_mg,
@@ -1211,7 +1117,7 @@ car_test_report_events (const b4_types_status_t * p_status,
             tm_printf((UB *)"B4E t=%u event=hump_start hump=%s"
                       " amplitude_mg=%u\n",
                       p_status->sample.timestamp_ms,
-                      car_test_hump_name(p_status->hump_state),
+                      b4_car_test_log_hump_name(p_status->hump_state),
                       p_status->current_hump_peak_mg);
         }
 
@@ -1221,7 +1127,7 @@ car_test_report_events (const b4_types_status_t * p_status,
             tm_printf((UB *)"B4E t=%u event=hump_complete hump=%s"
                       " amplitude_mg=%u highest_mg=%u\n",
                       p_status->sample.timestamp_ms,
-                      car_test_hump_name(p_status->hump_state),
+                      b4_car_test_log_hump_name(p_status->hump_state),
                       p_status->current_hump_peak_mg,
                       p_status->highest_hump_peak_mg);
         }
@@ -1255,15 +1161,15 @@ car_test_report_sample (const b4_types_status_t * p_status)
               p_status->filtered_y_mg,
               p_status->filtered_z_mg,
               p_status->vertical_deviation_mg,
-              car_test_tilt_name(p_status->tilt),
-              car_test_motion_name(p_status->motion),
-              car_test_hump_name(p_status->hump_state),
+              b4_car_test_log_tilt_name(p_status->tilt),
+              b4_car_test_log_motion_name(p_status->motion),
+              b4_car_test_log_hump_name(p_status->hump_state),
               p_status->current_hump_peak_mg,
               p_status->highest_hump_peak_mg,
-              car_test_health_name(p_status->health),
-              car_test_fault_name(p_status->fault),
-              car_test_health_name(imu_health),
-              car_test_fault_name(imu_fault),
+              b4_car_test_log_health_name(p_status->health),
+              b4_car_test_log_fault_name(p_status->fault),
+              b4_car_test_log_health_name(imu_health),
+              b4_car_test_log_fault_name(imu_fault),
               failure_count,
               p_status->b_sample_stale);
 }
@@ -1289,163 +1195,6 @@ car_test_report_summary (void)
               g_car_test_counter.hump_complete,
               g_car_test_counter.highest_peak_mg,
               tm_usb_dropped_bytes());
-}
-
-/** @brief Return the console name of a result.
- *
- * @param result The result to name.
- * @return The name of the result, or the unknown entry.
- */
-static const UB *
-car_test_result_name (b4_types_result_t result)
-{
-    const UB * p_name = g_car_test_result_names[B4_RESULT_REPEATED_READ_FAILURE
-                                             + 1];
-
-    /* The enum values are non-negative and contiguous, so the upper bound
-     * alone proves that the index is inside the table. */
-    if (B4_RESULT_REPEATED_READ_FAILURE >= result)
-    {
-        p_name = g_car_test_result_names[result];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console name of a fault.
- *
- * @param fault The fault to name.
- * @return The name of the fault, or the unknown entry.
- */
-static const UB *
-car_test_fault_name (b4_types_fault_t fault)
-{
-    const UB * p_name = g_car_test_fault_names[B4_FAULT_REPEATED_READ + 1];
-
-    if (B4_FAULT_REPEATED_READ >= fault)
-    {
-        p_name = g_car_test_fault_names[fault];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console name of a health level.
- *
- * @param health The health level to name.
- * @return The name of the health level, or the unknown entry.
- */
-static const UB *
-car_test_health_name (b4_types_health_t health)
-{
-    const UB * p_name = g_car_test_health_names[B4_HEALTH_FAULT + 1];
-
-    if (B4_HEALTH_FAULT >= health)
-    {
-        p_name = g_car_test_health_names[health];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console name of a tilt direction.
- *
- * @param tilt The tilt direction to name.
- * @return The name of the tilt direction, or the unknown entry.
- */
-static const UB *
-car_test_tilt_name (b4_types_tilt_t tilt)
-{
-    const UB * p_name = g_car_test_tilt_names[B4_TILT_COMPOUND + 1];
-
-    if (B4_TILT_COMPOUND >= tilt)
-    {
-        p_name = g_car_test_tilt_names[tilt];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console name of a motion classification.
- *
- * @param motion The motion classification to name.
- * @return The name of the classification, or the unknown entry.
- */
-static const UB *
-car_test_motion_name (b4_types_motion_t motion)
-{
-    const UB * p_name = g_car_test_motion_names[B4_MOTION_IMPACT + 1];
-
-    if (B4_MOTION_IMPACT >= motion)
-    {
-        p_name = g_car_test_motion_names[motion];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console name of a hump state.
- *
- * @param hump_state The hump state to name.
- * @return The name of the state, or the unknown entry.
- */
-static const UB *
-car_test_hump_name (b4_types_hump_state_t hump_state)
-{
-    const UB * p_name = g_car_test_hump_names[B4_HUMP_COMPLETE + 1];
-
-    if (B4_HUMP_COMPLETE >= hump_state)
-    {
-        p_name = g_car_test_hump_names[hump_state];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console name of a configured sensor axis.
- *
- * @param axis The axis number to name.
- * @return The name of the axis, or the unknown entry.
- */
-static const UB *
-car_test_axis_name (uint8_t axis)
-{
-    const UB * p_name = g_car_test_axis_names[B4_CFG_AXIS_Z + 1];
-
-    /* The axis number is unsigned and the table holds every valid axis plus
-     * the unknown entry, so the upper bound alone is enough. */
-    if (B4_CFG_AXIS_Z >= axis)
-    {
-        p_name = g_car_test_axis_names[axis];
-    }
-
-    return (p_name);
-}
-
-/** @brief Return the console sign of a configured axis direction.
- *
- * @param sign The axis sign to name.
- * @return The sign of the axis, or the unknown entry.
- */
-static const UB *
-car_test_sign_name (int8_t sign)
-{
-    const UB * p_name = g_car_test_sign_names[2];
-
-    if (1 == sign)
-    {
-        p_name = g_car_test_sign_names[0];
-    }
-    else if (-1 == sign)
-    {
-        p_name = g_car_test_sign_names[1];
-    }
-    else
-    {
-        p_name = g_car_test_sign_names[2];
-    }
-
-    return (p_name);
 }
 
 /** @brief Return the larger of two signed milli-g values.
@@ -1560,7 +1309,5 @@ car_test_gravity_magnitude_mg (int32_t x_mg,
 
     return (root_mg);
 }
-
-#endif /* B4_CAR_TEST */
 
 /*** end of file ***/
