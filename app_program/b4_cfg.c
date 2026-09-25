@@ -174,11 +174,11 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (0U == p_config->gravity_reference_mg) ||
             (p_config->gravity_reference_mg >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
-            (b4_cfg_abs_mg(p_config->offset_x_mg) >
+            (b4_cfg_abs_mg(p_config->bias_x_mg) >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
-            (b4_cfg_abs_mg(p_config->offset_y_mg) >
+            (b4_cfg_abs_mg(p_config->bias_y_mg) >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
-            (b4_cfg_abs_mg(p_config->offset_z_mg) >
+            (b4_cfg_abs_mg(p_config->bias_z_mg) >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
             (0U == p_config->stale_after_ms) ||
             (0U == p_config->motion_threshold_mg) ||
@@ -216,14 +216,19 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
     return (result);
 }
 
-/** @brief Calibrate offsets from stable, stationary samples.
+/** @brief Calibrate per-axis bias values from stable stationary samples.
+ *
+ * The stored bias is the stationary residual in sensor coordinates, mean
+ * minus expected, and the adapter applies it as measured minus bias. The
+ * samples must be uncorrected readings because the adapter subtracts the
+ * stored bias from every sample it returns.
  *
  * @param p_samples The stationary samples expressed in milli-g.
  * @param sample_count The number of samples in the sequence.
  * @param expected_x_mg The expected stationary X acceleration.
  * @param expected_y_mg The expected stationary Y acceleration.
  * @param expected_z_mg The expected stationary Z acceleration.
- * @param p_config The configuration whose offsets will be updated.
+ * @param p_config The configuration whose bias values will be updated.
  * @return The calibration result.
  */
 b4_types_result_t
@@ -238,9 +243,9 @@ b4_cfg_calibrate_stationary (const b4_types_sample_t * p_samples,
     int32_t mean_x_mg = 0;
     int32_t mean_y_mg = 0;
     int32_t mean_z_mg = 0;
-    int32_t offset_x_mg = 0;
-    int32_t offset_y_mg = 0;
-    int32_t offset_z_mg = 0;
+    int32_t bias_x_mg = 0;
+    int32_t bias_y_mg = 0;
+    int32_t bias_z_mg = 0;
 
     if ((NULL == p_samples) || (NULL == p_config))
     {
@@ -268,25 +273,27 @@ b4_cfg_calibrate_stationary (const b4_types_sample_t * p_samples,
             &mean_y_mg,
             &mean_z_mg);
 
-        offset_x_mg = expected_x_mg - mean_x_mg;
-        offset_y_mg = expected_y_mg - mean_y_mg;
-        offset_z_mg = expected_z_mg - mean_z_mg;
+        /* A positive residual means the sensor reads high, so the stored
+         * bias is the measured mean minus the expected value. */
+        bias_x_mg = mean_x_mg - expected_x_mg;
+        bias_y_mg = mean_y_mg - expected_y_mg;
+        bias_z_mg = mean_z_mg - expected_z_mg;
 
         if ((B4_RESULT_OK == result) &&
-            ((b4_cfg_abs_mg(offset_x_mg) >
+            ((b4_cfg_abs_mg(bias_x_mg) >
               (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
-             (b4_cfg_abs_mg(offset_y_mg) >
+             (b4_cfg_abs_mg(bias_y_mg) >
               (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
-             (b4_cfg_abs_mg(offset_z_mg) >
+             (b4_cfg_abs_mg(bias_z_mg) >
               (uint32_t)B4_CFG_MAX_SAMPLE_MG)))
         {
             result = B4_RESULT_INVALID_CALIBRATION;
         }
         else if (B4_RESULT_OK == result)
         {
-            p_config->offset_x_mg = offset_x_mg;
-            p_config->offset_y_mg = offset_y_mg;
-            p_config->offset_z_mg = offset_z_mg;
+            p_config->bias_x_mg = bias_x_mg;
+            p_config->bias_y_mg = bias_y_mg;
+            p_config->bias_z_mg = bias_z_mg;
         }
     }
 

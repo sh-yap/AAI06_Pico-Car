@@ -10,12 +10,11 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
-#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 
 #include <tk/tkernel.h>
-#include <dev_i2c.h>
+#include <tk/device.h>
 
 #include "b4_imu.h"
 
@@ -56,7 +55,10 @@ b4_imu_open_device (void);
 static ER
 b4_imu_close_device (void);
 
-/** @brief Execute one I2C transaction through the project device API.
+/** @brief Execute one I2C read transaction through the project device API.
+ *
+ * The device layer rejects a zero receive size, so receive_size is always at
+ * least one byte. Register writes use b4_imu_write_register instead.
  *
  * @param p_send_data The transaction's register and write bytes.
  * @param send_size The number of bytes to send.
@@ -106,8 +108,11 @@ b4_imu_decode_axis (UB low_byte, UB high_byte);
 
 /** @brief Convert the six output bytes to one calibrated sample.
  *
+ * Each axis is corrected with the stored bias for that axis, where the bias
+ * is the stationary residual, measured minus expected. See b4_cfg.h.
+ *
  * @param p_data The six-byte X, Y, and Z burst.
- * @param timestamp_ms The monotonic time in milliseconds.
+ * @param p_timestamp_ms The monotonic time in milliseconds.
  * @param p_sample The destination for the calibrated sample.
  */
 static void
@@ -125,6 +130,12 @@ b4_imu_record_read_error (ER error);
 
 /** @brief Initialize the accelerometer through the project I2C device.
  *
+ * Calling this function while the adapter is already initialized returns
+ * success without opening, reconfiguring, or resetting the device state, so
+ * the configuration supplied by the first successful call stays in effect.
+ * Calibrated bias values reach the adapter only after b4_imu_close followed
+ * by another initialization with the updated configuration.
+ *
  * @param p_config The validated hardware and calibration configuration.
  * @return The initialization result.
  */
@@ -135,7 +146,14 @@ b4_imu_init (const b4_cfg_config_t * p_config)
 
     if (NULL != p_config)
     {
-        if (false == g_b4_imu_state.b_initialized)
+        if (true == g_b4_imu_state.b_initialized)
+        {
+            /* Repeated initialization keeps the open device and its
+             * configuration untouched. Close the adapter first to apply
+             * newly calibrated bias values. */
+            result = B4_RESULT_OK;
+        }
+        else
         {
             result = b4_cfg_validate(p_config);
             if (B4_RESULT_OK == result)
@@ -369,7 +387,7 @@ b4_imu_transfer (UB * p_send_data,
                  SZ receive_size)
 {
     ER transfer_error = E_OK;
-    SZ actual_size = 0;
+    SZ reported_size = 0;
     T_I2C_EXEC transaction = {0};
 
     transaction.sadr =
@@ -384,10 +402,14 @@ b4_imu_transfer (UB * p_send_data,
         TDN_I2C_EXEC,
         &transaction,
         (SZ)sizeof(transaction),
-        &actual_size);
+        &reported_size);
 
+    /* The I2C device layer reports the request-block size rather than the
+     * number of payload bytes, so the transfer result is the completion
+     * check. The size is still checked to confirm the request block was
+     * consumed. sizeof(T_I2C_EXEC) is 20 bytes and fits the SZ range. */
     if ((E_OK == transfer_error) &&
-        (actual_size != (send_size + receive_size)))
+        (reported_size != (SZ)sizeof(transaction)))
     {
         transfer_error = E_IO;
     }
@@ -417,22 +439,22 @@ b4_imu_read_register (UB register_address, UB * p_value)
 
 /** @brief Write one accelerometer register.
  *
+ * The T-Kernel I2C device layer rejects a zero receive size for a
+ * TDN_I2C_EXEC transaction, so a register write uses the device layer's
+ * register-write path. That path sends the register address and value as a
+ * plain write and needs no receive byte.
+ *
  * @param register_address The seven-bit register address.
  * @param value The byte written to the register.
- * @return The transaction result.
+ * @return The register-write result.
  */
 static ER
 b4_imu_write_register (UB register_address, UB value)
 {
-    UB send_data[2] = {0U};
-    ER write_error = E_OK;
-
-    send_data[0] = register_address;
-    send_data[1] = value;
-    write_error = b4_imu_transfer(
-        send_data, (SZ)sizeof(send_data), NULL, 0);
-
-    return (write_error);
+    return (i2c_write_reg(g_b4_imu_state.device_id,
+                          g_b4_imu_state.config.accel_i2c_address,
+                          register_address,
+                          value));
 }
 
 /** @brief Configure the accelerometer and verify its control registers.
@@ -502,22 +524,25 @@ b4_imu_decode_axis (UB low_byte, UB high_byte)
 
 /** @brief Convert the six output bytes to one calibrated sample.
  *
+ * Each axis is corrected with the stored bias for that axis, where the bias
+ * is the stationary residual, measured minus expected. See b4_cfg.h.
+ *
  * @param p_data The six-byte X, Y, and Z burst.
- * @param timestamp_ms The monotonic time in milliseconds.
+ * @param p_timestamp_ms The monotonic time in milliseconds.
  * @param p_sample The destination for the calibrated sample.
  */
 static void
 b4_imu_decode_sample (const UB * p_data,
-                      uint32_t timestamp_ms,
+                      uint32_t p_timestamp_ms,
                       b4_types_sample_t * p_sample)
 {
-    p_sample->timestamp_ms = timestamp_ms;
+    p_sample->timestamp_ms = p_timestamp_ms;
     p_sample->accel_x_mg = b4_imu_decode_axis(p_data[0], p_data[1]) -
-                           g_b4_imu_state.config.offset_x_mg;
+                           g_b4_imu_state.config.bias_x_mg;
     p_sample->accel_y_mg = b4_imu_decode_axis(p_data[2], p_data[3]) -
-                           g_b4_imu_state.config.offset_y_mg;
+                           g_b4_imu_state.config.bias_y_mg;
     p_sample->accel_z_mg = b4_imu_decode_axis(p_data[4], p_data[5]) -
-                           g_b4_imu_state.config.offset_z_mg;
+                           g_b4_imu_state.config.bias_z_mg;
     p_sample->b_valid = true;
 }
 

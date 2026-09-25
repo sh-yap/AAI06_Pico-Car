@@ -27,9 +27,16 @@
  * Axis fields use B4_CFG_AXIS_X, B4_CFG_AXIS_Y, or B4_CFG_AXIS_Z. Each sign
  * is +1 or -1; positive maps to forward, right, or up for the chosen axis.
  *
- * Offsets and processing thresholds are in milli-g. Sample age and event
- * intervals are in milliseconds. Sample counts are consecutive samples. A
- * filter divisor of one passes each input directly.
+ * Bias fields are in milli-g. A bias is the stationary residual of one axis
+ * in sensor coordinates, measured minus expected, so a positive bias means
+ * the sensor reads high. Applying a bias means subtracting it from the
+ * measured value, calibrated = measured - bias. The X, Y, and Z bias fields
+ * always address the sensor axes, not the configured forward, lateral, and
+ * vertical axes. b4_cfg_calibrate_stationary is the only supported writer.
+ *
+ * Processing thresholds are in milli-g. Sample age and event intervals are
+ * in milliseconds. Sample counts are consecutive samples. A filter divisor
+ * of one passes each input directly.
  */
 typedef struct
 {
@@ -46,9 +53,9 @@ typedef struct
     int8_t forward_sign;
     int8_t lateral_sign;
     int8_t vertical_sign;
-    int32_t offset_x_mg;
-    int32_t offset_y_mg;
-    int32_t offset_z_mg;
+    int32_t bias_x_mg;
+    int32_t bias_y_mg;
+    int32_t bias_z_mg;
     uint32_t gravity_reference_mg;
     uint32_t stale_after_ms;
     uint32_t motion_threshold_mg;
@@ -73,7 +80,15 @@ b4_cfg_default (void);
 b4_types_result_t
 b4_cfg_validate (const b4_cfg_config_t * p_config);
 
-/** Calibrate offsets from stationary raw samples in milli-g. */
+/** Calibrate per-axis bias values from stationary samples in milli-g.
+ *
+ * Each stored bias is the mean stationary sample minus the expected value
+ * for that axis, so a sensor that reads high stores a positive bias. The
+ * samples must be uncorrected readings, collected before any bias is
+ * applied, for example while the configuration is at its b4_cfg_default()
+ * values. The adapter applies the stored bias to every sample it returns,
+ * so recalibrating after a bias is stored requires clearing the bias fields
+ * first. */
 b4_types_result_t
 b4_cfg_calibrate_stationary (const b4_types_sample_t * p_samples,
                              uint16_t sample_count,

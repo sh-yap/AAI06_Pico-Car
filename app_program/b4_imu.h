@@ -14,6 +14,12 @@
 
 /** @brief Initialize the accelerometer through the project I2C device.
  *
+ * Calling this while the adapter is already initialized returns success
+ * without reopening or reconfiguring the device, so the first successful
+ * call keeps its configuration. Newly calibrated bias values take effect
+ * after b4_imu_close followed by another initialization with the updated
+ * configuration.
+ *
  * @param p_config The validated hardware and calibration configuration.
  * @return The initialization result.
  */
@@ -21,6 +27,8 @@ b4_types_result_t
 b4_imu_init (const b4_cfg_config_t * p_config);
 
 /** @brief Read and calibrate one three-axis accelerometer sample.
+ *
+ * Each returned axis has the stored bias for that sensor axis subtracted.
  *
  * @param p_sample The destination for the calibrated sample.
  * @return The sample result.
@@ -41,6 +49,9 @@ b4_imu_get_health (b4_types_health_t * p_health,
                    uint8_t * p_failure_count);
 
 /** @brief Power down the accelerometer and close its I2C device handle.
+ *
+ * A later initialization applies the configuration it is given, so closing
+ * is the step that lets newly calibrated bias values take effect.
  *
  * @return The close result.
  */
