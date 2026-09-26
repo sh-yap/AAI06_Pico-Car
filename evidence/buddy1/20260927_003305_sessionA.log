@@ -1,0 +1,20 @@
+2026-09-27T00:33:07.524000000 robot/status online
+2026-09-27T00:33:07.525000000 robot/state {"v":1,"t":13070,"state":"READY","fault":0}
+2026-09-27T00:33:07.525000000 robot/summary {"v":1,"t":92730,"run_ms":27060,"dist_mm":4920,"max_hump_mm":41,"humps":3,"barcodes":4,"obstacles":2}
+2026-09-27T00:33:07.525000000 robot/info {"v":1,"t":13070,"build":"Sep 27 2026 00:28:58"}
+2026-09-27T00:33:08.496000000 robot/heartbeat {"v":1,"t":18070,"seq":6,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:09.496000000 robot/heartbeat {"v":1,"t":19070,"seq":7,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:10.494000000 robot/heartbeat {"v":1,"t":20070,"seq":8,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:11.502000000 robot/heartbeat {"v":1,"t":21070,"seq":9,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:12.496000000 robot/heartbeat {"v":1,"t":22070,"seq":10,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:13.495000000 robot/heartbeat {"v":1,"t":23070,"seq":11,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:14.496000000 robot/heartbeat {"v":1,"t":24070,"seq":12,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:15.495000000 robot/heartbeat {"v":1,"t":25070,"seq":13,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:16.497000000 robot/heartbeat {"v":1,"t":26070,"seq":14,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:17.495000000 robot/heartbeat {"v":1,"t":27070,"seq":15,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:18.501000000 robot/heartbeat {"v":1,"t":28070,"seq":16,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:19.501000000 robot/heartbeat {"v":1,"t":29070,"seq":17,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:20.508000000 robot/heartbeat {"v":1,"t":30070,"seq":18,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:21.496000000 robot/heartbeat {"v":1,"t":31070,"seq":19,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:22.520000000 robot/heartbeat {"v":1,"t":32070,"seq":20,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:33:37.916000000 robot/status offline

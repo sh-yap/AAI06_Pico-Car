@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 600" width="1100" height="600" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f5597"/>
+    </marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7b3fa0"/>
+    </marker>
+    <marker id="k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+    <style>
+      .title { font-size: 20px; font-weight: 700; fill: #1b2a4a; }
+      .task { fill: #e8f0fb; stroke: #2f5597; stroke-width: 2; }
+      .ctl  { fill: #fff4e5; stroke: #c77700; stroke-width: 2; }
+      .radio{ fill: #e8f5e9; stroke: #2e7d32; stroke-width: 2.2; }
+      .hw   { fill: #eeeeee; stroke: #666; stroke-width: 1.5; }
+      .obj  { fill: #ffffff; stroke: #555; stroke-width: 1.5; }
+      .api  { fill: #fafbfd; stroke: #9aa8c0; stroke-width: 1.5; stroke-dasharray: 6 4; }
+      .h  { font-size: 13.5px; font-weight: 700; fill: #111; }
+      .t  { font-size: 11.5px; fill: #333; }
+      .s  { font-size: 11px; fill: #555; }
+      .d  { stroke: #2f5597; stroke-width: 1.6; fill: none; marker-end: url(#a); }
+      .c  { stroke: #7b3fa0; stroke-width: 1.6; fill: none; marker-end: url(#g); }
+      .w  { stroke: #333; stroke-width: 1.6; fill: none; marker-end: url(#k); }
+      .lg { font-size: 11.5px; fill: #333; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1100" height="600" fill="#ffffff"/>
+  <text x="20" y="32" class="title">Buddy 1 - Communication task interaction (comms API)</text>
+
+  <!-- Producer tasks -->
+  <rect x="20" y="60" width="200" height="54" rx="8" class="task"/>
+  <text x="120" y="82" class="h" text-anchor="middle">Motion Task (B2)</text>
+  <text x="120" y="100" class="t" text-anchor="middle">comms_report_motion()</text>
+
+  <rect x="20" y="130" width="200" height="68" rx="8" class="task"/>
+  <text x="120" y="152" class="h" text-anchor="middle">Line/Barcode Task (B3)</text>
+  <text x="120" y="170" class="t" text-anchor="middle">comms_report_line()</text>
+  <text x="120" y="186" class="t" text-anchor="middle">comms_event_barcode()</text>
+
+  <rect x="20" y="214" width="200" height="84" rx="8" class="task"/>
+  <text x="120" y="236" class="h" text-anchor="middle">IMU/Terrain Task (B4)</text>
+  <text x="120" y="254" class="t" text-anchor="middle">comms_report_terrain()</text>
+  <text x="120" y="270" class="t" text-anchor="middle">comms_event_hump()</text>
+  <text x="120" y="286" class="t" text-anchor="middle">comms_event_motion()</text>
+
+  <rect x="20" y="314" width="200" height="54" rx="8" class="task"/>
+  <text x="120" y="336" class="h" text-anchor="middle">Obstacle Task (B5)</text>
+  <text x="120" y="354" class="t" text-anchor="middle">comms_event_obstacle()</text>
+
+  <rect x="20" y="400" width="200" height="100" rx="8" class="ctl"/>
+  <text x="120" y="422" class="h" text-anchor="middle">Vehicle Controller</text>
+  <text x="120" y="440" class="t" text-anchor="middle">comms_set_state/fault()</text>
+  <text x="120" y="456" class="t" text-anchor="middle">comms_begin/end_run()</text>
+  <text x="120" y="472" class="t" text-anchor="middle">comms_get_command()</text>
+  <text x="120" y="490" class="s" text-anchor="middle">(owner to be assigned)</text>
+
+  <!-- comms API objects -->
+  <rect x="270" y="50" width="300" height="470" rx="10" class="api"/>
+  <text x="420" y="72" class="h" text-anchor="middle">comms API (comms.c) - no task of its own</text>
+  <text x="420" y="89" class="s" text-anchor="middle">every call returns immediately; static memory only</text>
+
+  <rect x="290" y="104" width="260" height="70" rx="6" class="obj"/>
+  <text x="420" y="124" class="h" text-anchor="middle">Snapshot slots x3 (seqlock)</text>
+  <text x="420" y="142" class="t" text-anchor="middle">motion / line / terrain, latest wins</text>
+  <text x="420" y="158" class="s" text-anchor="middle">writer never waits; reader retries later</text>
+
+  <rect x="290" y="190" width="260" height="84" rx="6" class="obj"/>
+  <text x="420" y="210" class="h" text-anchor="middle">Event message buffer</text>
+  <text x="420" y="228" class="t" text-anchor="middle">16 events, FIFO, tk_snd_mbf(TMO_POL)</text>
+  <text x="420" y="244" class="t" text-anchor="middle">barcode, hump, obstacle, motion, run</text>
+  <text x="420" y="260" class="s" text-anchor="middle">full: event dropped + counted (ev_drop)</text>
+
+  <rect x="290" y="290" width="260" height="56" rx="6" class="obj"/>
+  <text x="420" y="310" class="h" text-anchor="middle">State / fault words</text>
+  <text x="420" y="328" class="t" text-anchor="middle">single 32-bit writes (atomic)</text>
+
+  <rect x="290" y="420" width="260" height="70" rx="6" class="obj"/>
+  <text x="420" y="440" class="h" text-anchor="middle">Command message buffer</text>
+  <text x="420" y="458" class="t" text-anchor="middle">4 commands: START / STOP</text>
+  <text x="420" y="474" class="s" text-anchor="middle">controller polls with TMO_POL</text>
+
+  <!-- producer arrows -->
+  <path d="M220,87 L288,120" class="d"/>
+  <path d="M220,164 L288,140" class="d"/>
+  <path d="M220,182 L288,215" class="d"/>
+  <path d="M220,256 L288,155" class="d"/>
+  <path d="M220,270 L288,235" class="d"/>
+  <path d="M220,341 L288,250" class="d"/>
+  <path d="M220,440 L288,318" class="d"/>
+  <path d="M220,458 L288,262" class="d"/>
+  <path d="M288,455 L222,472" class="c"/>
+
+  <!-- Radio task -->
+  <rect x="620" y="170" width="220" height="200" rx="10" class="radio"/>
+  <text x="730" y="194" class="h" text-anchor="middle">Radio Service Task</text>
+  <text x="730" y="212" class="t" text-anchor="middle">cyw43_utk_task, priority 4</text>
+  <text x="730" y="228" class="t" text-anchor="middle">processor 1, 2 ms poll loop</text>
+  <text x="730" y="250" class="t" text-anchor="middle">owns CYW43439 + lwIP</text>
+  <text x="730" y="266" class="t" text-anchor="middle">WiFi rejoin, DHCP</text>
+  <text x="730" y="282" class="t" text-anchor="middle">MQTT session + backoff</text>
+  <text x="730" y="298" class="t" text-anchor="middle">comms_link_next(): JSON,</text>
+  <text x="730" y="314" class="t" text-anchor="middle">rate limit 5 Hz / topic,</text>
+  <text x="730" y="330" class="t" text-anchor="middle">skip unchanged (2 s refresh)</text>
+  <text x="730" y="352" class="s" text-anchor="middle">status snapshot via seqlock</text>
+
+  <path d="M552,140 L618,215" class="d"/>
+  <path d="M552,232 L618,255" class="d"/>
+  <path d="M552,318 L618,300" class="d"/>
+  <path d="M618,345 L552,450" class="c"/>
+
+  <!-- Hardware + network -->
+  <rect x="890" y="170" width="190" height="96" rx="6" class="hw"/>
+  <text x="985" y="192" class="h" text-anchor="middle">CYW43439 radio</text>
+  <text x="985" y="210" class="t" text-anchor="middle">PIO SPI + 2 DMA ch.</text>
+  <text x="985" y="226" class="t" text-anchor="middle">GP23 ON, GP24 DATA,</text>
+  <text x="985" y="242" class="t" text-anchor="middle">GP25 CS, GP29 CLK</text>
+  <text x="985" y="258" class="s" text-anchor="middle">(internal to Pico W)</text>
+
+  <path d="M842,218 L888,218" class="w"/>
+  <path d="M888,238 L842,238" class="w"/>
+
+  <rect x="890" y="300" width="190" height="80" rx="6" class="hw"/>
+  <text x="985" y="322" class="h" text-anchor="middle">MQTT broker</text>
+  <text x="985" y="340" class="t" text-anchor="middle">Mosquitto on laptop</text>
+  <text x="985" y="356" class="t" text-anchor="middle">2.4 GHz WPA2 hotspot</text>
+  <text x="985" y="372" class="s" text-anchor="middle">port 1883</text>
+  <path d="M985,266 L985,298" class="w"/>
+
+  <rect x="890" y="410" width="190" height="66" rx="6" class="hw"/>
+  <text x="985" y="432" class="h" text-anchor="middle">Dashboard / logger</text>
+  <text x="985" y="450" class="t" text-anchor="middle">MQTT Explorer, mqtt_log</text>
+  <text x="985" y="466" class="s" text-anchor="middle">sends robot/command</text>
+  <path d="M985,380 L985,408" class="w"/>
+
+  <!-- Legend -->
+  <rect x="620" y="420" width="240" height="160" rx="6" fill="#ffffff" stroke="#bbb"/>
+  <text x="632" y="440" class="h">Legend</text>
+  <rect x="632" y="450" width="18" height="12" class="task"/><text x="658" y="460" class="lg">RTOS task (other buddy)</text>
+  <rect x="632" y="470" width="18" height="12" class="radio"/><text x="658" y="480" class="lg">RTOS task (Buddy 1)</text>
+  <rect x="632" y="490" width="18" height="12" class="obj"/><text x="658" y="500" class="lg">Kernel object / shared data</text>
+  <rect x="632" y="510" width="18" height="12" class="hw"/><text x="658" y="520" class="lg">Hardware / external</text>
+  <path d="M632,540 L652,540" class="d"/><text x="658" y="544" class="lg">Data (telemetry, events)</text>
+  <path d="M632,560 L652,560" class="c"/><text x="658" y="564" class="lg">Command flow</text>
+</svg>

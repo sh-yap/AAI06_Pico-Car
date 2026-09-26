@@ -1,0 +1,16 @@
+2026-09-27T00:42:17.880000000 robot/status online
+2026-09-27T00:42:17.881000000 robot/state {"v":1,"t":13330,"state":"READY","fault":0}
+2026-09-27T00:42:17.881000000 robot/summary {"v":1,"t":92730,"run_ms":27060,"dist_mm":4920,"max_hump_mm":41,"humps":3,"barcodes":4,"obstacles":2}
+2026-09-27T00:42:17.881000000 robot/info {"v":1,"t":13330,"build":"Sep 27 2026 00:37:09"}
+2026-09-27T00:42:18.696000000 robot/heartbeat {"v":1,"t":42330,"seq":30,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:19.703000000 robot/heartbeat {"v":1,"t":43330,"seq":31,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:20.710000000 robot/heartbeat {"v":1,"t":44330,"seq":32,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:21.706000000 robot/heartbeat {"v":1,"t":45330,"seq":33,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:22.697000000 robot/heartbeat {"v":1,"t":46330,"seq":34,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:23.696000000 robot/heartbeat {"v":1,"t":47330,"seq":35,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:24.696000000 robot/heartbeat {"v":1,"t":48330,"seq":36,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:25.699000000 robot/heartbeat {"v":1,"t":49330,"seq":37,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:26.708000000 robot/heartbeat {"v":1,"t":50330,"seq":38,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:27.704000000 robot/heartbeat {"v":1,"t":51330,"seq":39,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:28.703000000 robot/heartbeat {"v":1,"t":52330,"seq":40,"state":"READY","fault":0,"ev_drop":0}
+2026-09-27T00:42:44.014000000 robot/status offline

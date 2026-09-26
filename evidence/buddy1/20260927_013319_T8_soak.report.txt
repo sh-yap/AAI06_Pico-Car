@@ -1,0 +1,54 @@
+MQTT log report: 20260927_013319_T8_soak.log
+Duration: 1,829.9 s   messages: 14553   avg rate: 8.0 msg/s   payload: 694 B/s
+
+topic                        count     msg/s  avg bytes
+robot/command                    2      0.00          5
+robot/event/barcode            327      0.18         49
+robot/event/command              2      0.00         40
+robot/event/hump               234      0.13         44
+robot/event/obstacle           148      0.08        117
+robot/event/run                  1      0.00         33
+robot/heartbeat               1810      0.99         74
+robot/info                       1      0.00         49
+robot/state                    651      0.36         51
+robot/status                     1      0.00          6
+robot/summary                    2      0.00        110
+robot/telemetry/line          1646      0.90         54
+robot/telemetry/motion        8819      4.82        100
+robot/telemetry/terrain        909      0.50         99
+
+Heartbeat: 1810 received, 0 missing in 0 gap(s), 0 reboot(s), longest silence 4.7 s
+Heartbeat interval by the Pico's own clock: max 3.74 s (1.00 = sent on time)
+  01:33:42.356  no heartbeat arrived for 2.8 s
+  01:33:51.118  no heartbeat arrived for 3.5 s
+  01:34:02.595  no heartbeat arrived for 3.0 s
+  01:34:43.175  no heartbeat arrived for 2.7 s
+  01:35:35.697  no heartbeat arrived for 3.5 s
+  01:37:09.879  no heartbeat arrived for 3.2 s
+  01:38:09.644  no heartbeat arrived for 2.8 s
+  01:41:59.648  no heartbeat arrived for 2.9 s
+  01:45:22.045  no heartbeat arrived for 2.8 s
+  01:48:26.704  no heartbeat arrived for 3.0 s
+  01:50:01.877  no heartbeat arrived for 3.0 s
+  01:50:17.395  no heartbeat arrived for 2.5 s
+  01:51:16.761  no heartbeat arrived for 2.8 s
+  01:53:29.919  no heartbeat arrived for 2.6 s
+  01:53:36.698  no heartbeat arrived for 2.7 s
+  01:54:22.498  no heartbeat arrived for 4.7 s
+  01:54:39.076  no heartbeat arrived for 2.6 s
+  01:55:07.186  no heartbeat arrived for 2.6 s
+  01:55:26.500  no heartbeat arrived for 3.2 s
+  02:01:50.348  no heartbeat arrived for 2.9 s
+Command acknowledgement: 2 commands, avg 140 ms, max 222 ms (laptop -> Pico -> laptop)
+Events dropped on the robot (max ev_drop): 0
+
+Timeline:
+  01:33:21.746  status: online
+  01:33:21.747  firmware: {"v":1,"t":798090,"build":"Sep 27 2026 01:06:54"}
+  01:33:21.747  SUMMARY: {"v":1,"t":818950,"run_ms":129030,"dist_mm":23460,"max_hump_mm":48,"humps":16,"barcodes":23,"obstacles":10}
+  01:33:26.408  command sent: start
+  01:33:26.630  command ack (222 ms): {"v":1,"t":1530850,"cmd":"start","ok":1}
+  01:33:26.630  run: {"v":1,"t":1530870,"run":"BEGIN"}
+  02:03:28.486  command sent: stop
+  02:03:28.543  command ack (57 ms): {"v":1,"t":3332870,"cmd":"stop","ok":1}
+  02:03:28.607  SUMMARY: {"v":1,"t":3332890,"run_ms":1802020,"dist_mm":327640,"max_hump_mm":48,"humps":234,"barcodes":327,"obstacles":148}

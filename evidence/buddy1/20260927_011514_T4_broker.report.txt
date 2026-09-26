@@ -1,0 +1,51 @@
+MQTT log report: 20260927_011514_T4_broker.log
+Duration: 297.4 s   messages: 1641   avg rate: 5.5 msg/s   payload: 453 B/s
+
+topic                        count     msg/s  avg bytes
+robot/command                    7      0.02          5
+robot/event/barcode             27      0.09         48
+robot/event/command              7      0.02         39
+robot/event/hump                20      0.07         43
+robot/event/obstacle            12      0.04        116
+robot/event/run                  2      0.01         32
+robot/heartbeat                293      0.99         71
+robot/info                       3      0.01         49
+robot/state                     58      0.20         50
+robot/status                     3      0.01          6
+robot/summary                    2      0.01        105
+robot/telemetry/line           213      0.72         53
+robot/telemetry/motion         844      2.84         96
+robot/telemetry/terrain        150      0.50         98
+
+Heartbeat: 293 received, 2 missing in 1 gap(s), 0 reboot(s), longest silence 3.7 s
+Heartbeat interval by the Pico's own clock: max 1.72 s (1.00 = sent on time)
+  01:16:37.013  no heartbeat arrived for 2.7 s
+  01:19:09.790  no heartbeat arrived for 3.7 s
+Command acknowledgement: 7 commands, avg 113 ms, max 371 ms (laptop -> Pico -> laptop)
+Events dropped on the robot (max ev_drop): 0
+
+Timeline:
+  01:15:16.322  status: online
+  01:15:16.323  SUMMARY: {"v":1,"t":155760,"run_ms":63690,"dist_mm":11580,"max_hump_mm":48,"humps":8,"barcodes":11,"obstacles":5}
+  01:15:16.323  firmware: {"v":1,"t":85770,"build":"Sep 27 2026 01:06:54"}
+  01:16:26.320  command sent: hello
+  01:16:26.491  command ack (171 ms): {"v":1,"t":510710,"cmd":"unknown","ok":0}
+  01:16:28.373  command sent: status
+  01:16:28.744  command ack (371 ms): {"v":1,"t":512950,"cmd":"status","ok":1}
+  01:16:28.744  firmware: {"v":1,"t":512950,"build":"Sep 27 2026 01:06:54"}
+  01:16:30.438  command sent: start
+  01:16:30.451  command ack (13 ms): {"v":1,"t":514750,"cmd":"start","ok":1}
+  01:16:30.551  run: {"v":1,"t":514800,"run":"BEGIN"}
+  01:16:32.488  command sent: start
+  01:16:32.522  command ack (34 ms): {"v":1,"t":516810,"cmd":"start","ok":1}
+  01:18:19.326  command sent: stop
+  01:18:19.373  command ack (47 ms): {"v":1,"t":623670,"cmd":"stop","ok":1}
+  01:18:19.456  SUMMARY: {"v":1,"t":623700,"run_ms":108900,"dist_mm":19800,"max_hump_mm":48,"humps":14,"barcodes":19,"obstacles":9}
+  01:18:27.143  command sent: stop
+  01:18:27.169  command ack (26 ms): {"v":1,"t":631470,"cmd":"stop","ok":1}
+  01:19:06.643  status: offline
+  01:19:09.693  status: online
+  01:19:09.693  firmware: {"v":1,"t":672090,"build":"Sep 27 2026 01:06:54"}
+  01:19:25.477  command sent: start
+  01:19:25.608  command ack (131 ms): {"v":1,"t":689910,"cmd":"start","ok":1}
+  01:19:25.648  run: {"v":1,"t":689920,"run":"BEGIN"}
