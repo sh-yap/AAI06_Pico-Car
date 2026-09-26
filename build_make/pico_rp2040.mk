@@ -143,6 +143,32 @@ $(error WIFI_TCPBULK=1 requires WIFI_TCP=1)
 endif
 endif
 
+# Pico-Car telemetry: an MQTT client session to a LAN broker, owned by the
+# radio task.  Needs a DHCP lease; the broker address is local configuration.
+WIFI_MQTT ?= 0
+ifneq ($(filter $(WIFI_MQTT),0 1),$(WIFI_MQTT))
+$(error Unknown WIFI_MQTT '$(WIFI_MQTT)'; use 0 or 1)
+endif
+ifeq ($(WIFI_MQTT),1)
+ifneq ($(WIFI_DHCP),1)
+$(error WIFI_MQTT=1 requires WIFI_DHCP=1)
+endif
+ifeq ($(wildcard ../config/mqtt_config.h),)
+$(error WIFI_MQTT=1 needs config/mqtt_config.h; copy it from config/mqtt_config.example.h and set the broker address)
+endif
+endif
+
+# COMMS_DEMO=1 adds a task that feeds fake telemetry through the comms API,
+# standing in for the other subsystems.  Never use it for the real car.
+COMMS_DEMO ?= 0
+ifneq ($(filter $(COMMS_DEMO),0 1),$(COMMS_DEMO))
+$(error Unknown COMMS_DEMO '$(COMMS_DEMO)'; use 0 or 1)
+endif
+COMMS_DEMO_SUFFIX :=
+ifeq ($(COMMS_DEMO),1)
+COMMS_DEMO_SUFFIX := _demo
+endif
+
 ifeq ($(WIFI_NETIF),1)
 ifneq ($(WIFI_JOIN),1)
 $(error WIFI_NETIF=1 requires WIFI_JOIN=1)
@@ -183,6 +209,9 @@ endif
 ifeq ($(WIFI_TCPBULK),1)
 WIFI_SUFFIX := _wifi_tcpbulk
 endif
+ifeq ($(WIFI_MQTT),1)
+WIFI_SUFFIX := _wifi_mqtt
+endif
 endif
 
 #
@@ -191,7 +220,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -241,6 +270,15 @@ CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
 
+# Fake-data driver for the comms API (app_program/comms_demo.c).
+CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO)
+
+# Rebuild the build stamp every time, so the date/time printed at boot and
+# published on robot/info always identifies the image actually flashed.
+mtkernel_3/app_program/build_info.o: FORCE
+.PHONY: FORCE
+FORCE:
+
 ################################################################################
 # Console selection
 #
@@ -268,7 +306,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
@@ -406,9 +444,14 @@ endif
 ifeq ($(WIFI_TCPBULK),1)
 LWIP_PORT_OBJS += ./mtkernel_3/lib/libnet/lwip/lwip_utk_tcpbulk.o
 endif
+ifeq ($(WIFI_MQTT),1)
+LWIP_OBJS += ./mtkernel_3/lwip/apps/mqtt/mqtt.o
+LWIP_PORT_OBJS += ./mtkernel_3/lib/libnet/lwip/lwip_utk_mqtt.o
+endif
 endif
 
 WIFI_INCLUDES := -I"$(WIFIDIR)" \
+                 -I"../app_program" \
                  -I"../lib/libtm/sysdepend/pico_rp2040/usb" \
                  -I"$(CYW43_DRIVER_PATH)/src" \
                  -I"$(CYW43_DRIVER_PATH)/firmware" \
@@ -416,6 +459,7 @@ WIFI_INCLUDES := -I"$(WIFIDIR)" \
                  -I"$(PICO_SDK_PATH)/src/boards/include" \
                  -I"$(PICO_SDK_PATH)/src/common/pico_base_headers/include" \
                  -I"$(PICO_SDK_PATH)/src/common/hardware_claim/include" \
+                 -I"$(PICO_SDK_PATH)/src/common/pico_util/include" \
                  -I"$(PICO_SDK_PATH)/src/common/pico_binary_info/include" \
                  -I"$(PICO_SDK_PATH)/src/rp2040/pico_platform/include" \
                  -I"$(PICO_SDK_PATH)/src/rp2040/hardware_regs/include" \
@@ -446,6 +490,7 @@ CFLAGS += -DTM_WIFI_CYW43=1 -DTM_WIFI_JOIN=$(WIFI_JOIN) \
           -DTM_WIFI_STATIC=$(WIFI_STATIC) -DTM_WIFI_DHCP=$(WIFI_DHCP) \
           -DTM_WIFI_DNS=$(WIFI_DNS) -DTM_WIFI_UDP=$(WIFI_UDP) \
           -DTM_WIFI_TCP=$(WIFI_TCP) -DTM_WIFI_TCPBULK=$(WIFI_TCPBULK) \
+          -DTM_WIFI_MQTT=$(WIFI_MQTT) \
           -DCYW43_ENABLE_BLUETOOTH=0 \
           -DCYW43_USE_OTP_MAC=1 -DPICO_CYW43_LOGGING_ENABLED=0 \
           -DPICO_RP2040=1 -DPICO_32BIT=1 -DPICO_ON_DEVICE=1 -DPICO_BUILD=1 \

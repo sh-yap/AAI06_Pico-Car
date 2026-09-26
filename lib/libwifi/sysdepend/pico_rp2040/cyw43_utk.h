@@ -13,6 +13,13 @@
 
 #define CYW43_UDP_RING     32
 #define CYW43_UDP_PAYLOAD  48
+#define CYW43_MQTT_CMD_MAX 64
+
+/* Values of mqtt_state; same order as lwip_utk_mqtt_state_t. */
+#define CYW43_MQTT_IDLE        0
+#define CYW43_MQTT_CONNECTING  1
+#define CYW43_MQTT_CONNECTED   2
+#define CYW43_MQTT_BACKOFF     3
 
 typedef struct {
     volatile int32_t init_result;
@@ -35,6 +42,12 @@ typedef struct {
     volatile uint32_t join_elapsed_ms;
     volatile int32_t link_rssi;
     uint8_t bssid[6];
+    /* Automatic rejoin after the association is lost (or never made). */
+    volatile uint32_t rejoin_active;
+    volatile uint32_t link_losses;
+    volatile uint32_t rejoin_attempts;
+    volatile uint32_t rejoins;
+    volatile uint32_t rejoin_delay_ms;
     volatile uint32_t lwip_initialized;
     volatile uint32_t netif_initialized;
     volatile uint32_t netif_up;
@@ -44,12 +57,14 @@ typedef struct {
     volatile uint32_t netif_no_sys;
     volatile uint32_t netif_mtu;
     uint8_t netif_mac[6];
+    uint8_t netif_ip[4];        /* current address, 0.0.0.0 if none */
     volatile uint32_t dhcp_enabled;
     volatile uint32_t dhcp_started;
     volatile uint32_t dhcp_complete;
     volatile int32_t dhcp_result;
     volatile uint32_t dhcp_elapsed_ms;
     volatile uint32_t dhcp_tries;
+    volatile uint32_t dhcp_state;       /* lwIP DHCP_STATE_*, 10 = BOUND */
     uint8_t dhcp_address[4];
     uint8_t dhcp_netmask[4];
     uint8_t dhcp_gateway[4];
@@ -174,6 +189,23 @@ typedef struct {
     uint8_t ipv4_gateway[4];
     uint8_t ping_target[4];
     uint8_t arp_mac[6];
+    /* MQTT session (WIFI_MQTT=1).  Mirrors lwip_utk_mqtt_status_t; the
+       payload size must match LWIP_UTK_MQTT_CMD_MAX (checked in
+       cyw43_utk.c). */
+    volatile uint32_t mqtt_enabled;
+    volatile uint32_t mqtt_state;
+    volatile int32_t mqtt_last_error;
+    volatile uint32_t mqtt_connect_attempts;
+    volatile uint32_t mqtt_connects;
+    volatile uint32_t mqtt_disconnects;
+    volatile uint32_t mqtt_retry_delay_ms;
+    volatile uint32_t mqtt_published;
+    volatile uint32_t mqtt_publish_errors;
+    volatile uint32_t mqtt_cmd_count;
+    volatile uint32_t mqtt_cmd_len;
+    uint8_t mqtt_cmd_payload[CYW43_MQTT_CMD_MAX];
+    uint8_t mqtt_broker[4];
+    uint16_t mqtt_port;
     /* Stamped by the reader, not the radio task: how many torn snapshots the
      * seqlock in cyw43_utk_get_status() has had to discard since boot. */
     uint32_t status_retries;
