@@ -69,6 +69,13 @@
 #define B4_TEST_CALIBRATION 0
 #endif
 
+/** ROBO-PICO Grove port that the selected diagnostic mapping uses. */
+#ifdef B4_DIAG_GROVE6
+#define B4_CAR_TEST_GROVE_PORT              "6"
+#else
+#define B4_CAR_TEST_GROVE_PORT              "2"
+#endif
+
 #define B4_TEST_STRINGIFY_INNER(value) (#value)
 #define B4_TEST_STRINGIFY(value) B4_TEST_STRINGIFY_INNER(value)
 
@@ -411,7 +418,8 @@ car_test_print_banner (const b4_cfg_config_t * p_config)
     tm_printf((UB *)"\nBuddy 4 ROBO-PICO Car Test\n");
     tm_printf((UB *)"B4I firmware_profile=%s\n",
               B4_TEST_STRINGIFY(B4_TEST_PROFILE));
-    tm_printf((UB *)"B4I mapping grove_port=2 controller=I2C1"
+    tm_printf((UB *)"B4I mapping grove_port=" B4_CAR_TEST_GROVE_PORT
+              " controller=I2C1"
               " i2c_unit=%u sda_gpio=%u scl_gpio=%u frequency_hz=%u\n",
               p_config->i2c_unit,
               p_config->sda_gpio,

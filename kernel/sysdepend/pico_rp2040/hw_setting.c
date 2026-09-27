@@ -88,6 +88,10 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 	{GPIO_CTRL(1),	GPIO_CTRL_FUNCSEL_UART},	/* P1 UART0-RX */
 
 #if USE_SDEV_DRV	// Do not use sample device driver
+#ifdef B4_DIAG_GROVE6
+	/* Buddy 4 diagnostic image: GP26 and GP27 are the Grove port 6 I2C1
+	   pair, so the ADC entries for those two pins are left out. */
+#else
 	/* P26 : ADC0 */
 	{GPIO_CTRL(26),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(26), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
@@ -95,8 +99,9 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 	/* P27 : ADC1 */
 	{GPIO_CTRL(27),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(27), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
+#endif /* B4_DIAG_GROVE6 */
 
-	/* P28 : ADC2 */
+	/* P28 : ADC2, configured in every profile */
 	{GPIO_CTRL(28),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(28), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
 
@@ -113,11 +118,19 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 #endif /* USE_SDEV_DRV */
 
 #if defined(BOARD_ROBO_PICO_ROBOT)
-	/* Proposed team I2C1 bus; GP8/9 remain available for motor PWM. */
+#ifdef B4_DIAG_GROVE6
+	/* Buddy 4 diagnostic image: Grove port 6 SDA=GP26 and SCL=GP27. */
+	{GPIO_CTRL(26),	GPIO_CTRL_FUNCSEL_I2C},
+	{GPIO(26), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
+	{GPIO_CTRL(27),	GPIO_CTRL_FUNCSEL_I2C},
+	{GPIO(27), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
+#else
+	/* Grove port 2: I2C1 SDA=GP2 and SCL=GP3, with GP8/9 left for motor PWM. */
 	{GPIO_CTRL(2),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(2), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
 	{GPIO_CTRL(3),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(3), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
+#endif /* B4_DIAG_GROVE6 */
 #endif
 	{0, 0}
 };

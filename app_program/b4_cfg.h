@@ -17,9 +17,10 @@
 
 /** @brief ROBO-PICO hardware, calibration, and processing configuration.
  *
- * The car-test image supports ROBO-PICO Grove Port 2, which maps I2C1 to
- * SDA=GP2 and SCL=GP3. I2C runs at 400 kHz. Accelerometer and algorithm
- * rates use the units in their names.
+ * The car-test image supports the configured ROBO-PICO Grove port. The
+ * diagnostic build selects Grove port 6, which maps I2C1 to SDA=GP26 and
+ * SCL=GP27. Other builds keep Grove port 2, GP2 and GP3. I2C runs at
+ * 400 kHz. Accelerometer and algorithm rates use the units in their names.
  *
  * I2C units are zero-based. SDA and SCL fields contain GPIO numbers. The
  * address uses the seven-bit accelerometer form. Rates are in hertz and the

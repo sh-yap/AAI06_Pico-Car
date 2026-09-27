@@ -2,10 +2,11 @@
  *
  * @brief LSM303DLHC accelerometer access through the project I2C device.
  *
- * The ROBO-PICO I2C1 driver maps Grove Port 2 to GP2/GP3 and uses a fixed
- * 400 kHz bus. The adapter initializes unit 1 when it is not already
- * registered. Samples use
- * the datasheet's 100 Hz, plus or minus 2 g, high-resolution configuration.
+ * The ROBO-PICO I2C1 driver maps the selected Grove port to its pins and
+ * uses a fixed 400 kHz bus. The diagnostic build selects Grove port 6,
+ * GP26 and GP27. Other builds keep Grove port 2, GP2 and GP3. The adapter
+ * initializes unit 1 when it is not already registered. Samples use the
+ * datasheet's 100 Hz, plus or minus 2 g, high-resolution configuration.
  * The six-byte burst returns calibrated acceleration in milli-g. The caller
  * must own the I2C unit while this adapter is active.
  *

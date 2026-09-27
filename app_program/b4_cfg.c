@@ -12,8 +12,15 @@
 
 #define B4_CFG_MAX_GPIO                    29U
 #define B4_CFG_I2C_UNIT                     1U
+#ifdef B4_DIAG_GROVE6
+/* The Buddy 4 diagnostic image uses Grove port 6, GP26 and GP27, so the
+   occupied Grove port 2 stays free for other subsystems. */
+#define B4_CFG_I2C_SDA_GPIO                26U
+#define B4_CFG_I2C_SCL_GPIO                27U
+#else
 #define B4_CFG_I2C_SDA_GPIO                 2U
 #define B4_CFG_I2C_SCL_GPIO                 3U
+#endif
 #define B4_CFG_I2C_FREQUENCY_HZ        400000U
 #define B4_CFG_ACCEL_ADDRESS_LOW         0x18U
 #define B4_CFG_ACCEL_ADDRESS_HIGH        0x19U
@@ -87,8 +94,11 @@ b4_cfg_stationary_mean (const b4_types_sample_t * p_samples,
 
 /** @brief Return provisional values for the current Pico I2C driver.
  *
- * @return A configuration using ROBO-PICO Grove Port 2 and provisional
- *         thresholds.
+ * The diagnostic build selects ROBO-PICO Grove port 6, GP26 and GP27.
+ * Other builds keep Grove port 2, GP2 and GP3.
+ *
+ * @return A configuration using the selected ROBO-PICO Grove port and
+ *         provisional thresholds.
  */
 b4_cfg_config_t
 b4_cfg_default (void)
@@ -383,7 +393,7 @@ b4_cfg_sample_is_in_range (const b4_types_sample_t * p_sample)
 /** @brief Check whether the selected pins match the ROBO-PICO mapping.
  *
  * @param p_config The configuration containing an I2C unit and pin pair.
- * @return True only for I2C1 on Grove Port 2, GP2 and GP3.
+ * @return True only for I2C1 on the selected Grove port pins.
  */
 static bool
 b4_cfg_bus_pins_are_valid (const b4_cfg_config_t * p_config)
