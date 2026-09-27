@@ -18,6 +18,19 @@
 
 SMP ?= 0
 
+# Application and board are deliberately part of the build profile.  Keeping
+# them here (rather than in a generated project) lets the lecturer's make
+# build select a reproducible entry point without duplicating the kernel tree.
+APP ?= demo
+BOARD ?= pico
+
+ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test ultrasonic_test servo_test),$(APP))
+$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, ultrasonic_test or servo_test)
+endif
+ifneq ($(filter $(BOARD),pico robo_pico_robot),$(BOARD))
+$(error Unknown BOARD '$(BOARD)'; use pico or robo_pico_robot)
+endif
+
 ifneq ($(SMP),0)
 ifneq ($(SMP),1)
 $(error Unknown SMP '$(SMP)'; use 0 or 1)
@@ -220,7 +233,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)_$(APP)_$(BOARD)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -279,6 +292,10 @@ mtkernel_3/app_program/build_info.o: FORCE
 .PHONY: FORCE
 FORCE:
 
+ifeq ($(BOARD),robo_pico_robot)
+CFLAGS += -DBOARD_ROBO_PICO_ROBOT=1
+endif
+
 ################################################################################
 # Console selection
 #
@@ -306,7 +323,7 @@ FORCE:
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)
+PROFILE_ID := app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
