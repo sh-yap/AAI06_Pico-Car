@@ -60,17 +60,12 @@ EXPORT ER knl_start_device( void )
 	ER	err;
 
 	/* A/D Converter unit.0 "adca" */
-#ifdef B4_DIAG_GROVE6
-	/* The Buddy 4 diagnostic image reserves the ADC0 and ADC1 pins for
-	   the Grove port 6 I2C bus, so the ADC device is not started. */
-#else
 	#if DEVCNF_USE_ADC
 		err = dev_init_adc(0);
 		if(err < E_OK) return err;
 	#endif
-#endif
 
-	/* ROBO-PICO Grove port 6 or port 2 uses I2C1 for the sensor bus. */
+	/* ROBO-PICO Grove port 2 uses I2C1 for the sensor bus. */
 	#if DEVCNF_USE_IIC
 		err = dev_init_i2c(1);
 		if(err < E_OK) return err;

@@ -69,12 +69,8 @@
 #define B4_TEST_CALIBRATION 0
 #endif
 
-/** ROBO-PICO Grove port that the selected diagnostic mapping uses. */
-#ifdef B4_DIAG_GROVE6
-#define B4_CAR_TEST_GROVE_PORT              "6"
-#else
+/** ROBO-PICO Grove port that the diagnostic mapping uses. */
 #define B4_CAR_TEST_GROVE_PORT              "2"
-#endif
 
 #define B4_TEST_STRINGIFY_INNER(value) (#value)
 #define B4_TEST_STRINGIFY(value) B4_TEST_STRINGIFY_INNER(value)

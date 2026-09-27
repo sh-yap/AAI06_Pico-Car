@@ -12,15 +12,10 @@
 
 #define B4_CFG_MAX_GPIO                    29U
 #define B4_CFG_I2C_UNIT                     1U
-#ifdef B4_DIAG_GROVE6
-/* The Buddy 4 diagnostic image uses Grove port 6, GP26 and GP27, so the
-   occupied Grove port 2 stays free for other subsystems. */
-#define B4_CFG_I2C_SDA_GPIO                26U
-#define B4_CFG_I2C_SCL_GPIO                27U
-#else
+/* The reported ROBO-PICO IMU wiring uses Grove port 2, I2C1 SDA=GP2 and
+   SCL=GP3. */
 #define B4_CFG_I2C_SDA_GPIO                 2U
 #define B4_CFG_I2C_SCL_GPIO                 3U
-#endif
 #define B4_CFG_I2C_FREQUENCY_HZ        400000U
 #define B4_CFG_ACCEL_ADDRESS_LOW         0x18U
 #define B4_CFG_ACCEL_ADDRESS_HIGH        0x19U
@@ -94,10 +89,9 @@ b4_cfg_stationary_mean (const b4_types_sample_t * p_samples,
 
 /** @brief Return provisional values for the current Pico I2C driver.
  *
- * The diagnostic build selects ROBO-PICO Grove port 6, GP26 and GP27.
- * Other builds keep Grove port 2, GP2 and GP3.
+ * The IMU uses ROBO-PICO Grove port 2, I2C1 SDA=GP2 and SCL=GP3.
  *
- * @return A configuration using the selected ROBO-PICO Grove port and
+ * @return A configuration using the ROBO-PICO Grove port 2 and
  *         provisional thresholds.
  */
 b4_cfg_config_t

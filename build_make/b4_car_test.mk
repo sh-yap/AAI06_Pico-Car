@@ -30,13 +30,19 @@ ifneq ($(filter $(B4_TEST_CALIBRATION),0 1),$(B4_TEST_CALIBRATION))
 $(error Unknown B4_TEST_CALIBRATION '$(B4_TEST_CALIBRATION)'; use 0 or 1)
 endif
 
+# A command line can override the board assignment above, and the shared
+# robot-board pin setup is required, so reject any other board.
+ifneq ($(BOARD),robo_pico_robot)
+$(error Buddy 4 car test requires BOARD=robo_pico_robot)
+endif
+
 INCPATH = -I"../include" -I"../config" -I"../kernel/knlinc" \
           -I"../app_program" -I"../tests/buddy4"
 
-# The profile includes the test-local calibration mode and the Grove port 6
-# mapping. The shared platform makefile accepts this profile identity
-# without knowing about Buddy 4 tests.
-PROFILE_ID := b4-car-test-grove6-cal$(B4_TEST_CALIBRATION)-$(CONSOLE)-$(WIFI)-smp$(SMP)
+# The profile includes the board, the Grove port 2 mapping, and the
+# test-local calibration mode. The shared platform makefile accepts this
+# profile identity without knowing about Buddy 4 tests.
+PROFILE_ID := b4-car-test-grove2-board$(BOARD)-cal$(B4_TEST_CALIBRATION)-$(CONSOLE)-$(WIFI)-smp$(SMP)
 PROFILE_FILE := .build_profile
 
 -include sources.mk
@@ -69,11 +75,11 @@ B4_DEPS := $(B4_OBJS:.o=.d)
 OBJS += $(B4_OBJS)
 C_DEPS += $(B4_DEPS)
 
-# The diagnostic image uses ROBO-PICO Grove port 6 on I2C1, GP26 and GP27,
-# so the occupied Grove port 2 stays free for other subsystems.
-CFLAGS += -DB4_DIAG_GROVE6=1 \
-          -DB4_TEST_CALIBRATION=$(B4_TEST_CALIBRATION) \
-          -DB4_TEST_PROFILE=b4_robopico_car_test_cal$(B4_TEST_CALIBRATION)
+# The diagnostic image uses the reported ROBO-PICO IMU wiring on Grove
+# port 2, I2C1 SDA=GP2 and SCL=GP3, through the shared robot-board pin
+# setup and with the ADC device available for the analog sensors.
+CFLAGS += -DB4_TEST_CALIBRATION=$(B4_TEST_CALIBRATION) \
+          -DB4_TEST_PROFILE=b4_robopico_car_test_grove2_cal$(B4_TEST_CALIBRATION)
 
 mtkernel_3/app_program/%.o: ../app_program/%.c
 	@echo 'Building Buddy 4 production file: $<'
