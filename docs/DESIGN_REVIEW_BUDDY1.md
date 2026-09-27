@@ -24,25 +24,25 @@ Diagrams (PNG for Word, SVG for editing): `docs/img/comms_statechart.png`,
 
 | ID | Requirement |
 |---|---|
-| FR-C1 | The robot shall join the configured 2.4 GHz WPA2 network and connect to the MQTT broker automatically after power-up, with no user action. |
-| FR-C2 | The robot shall publish telemetry over MQTT: robot state, motor speeds, encoder counts, distance travelled, line sensor status, and terrain / hump data. |
-| FR-C3 | The robot shall publish an event for each barcode decoded (code and navigation command), each hump (peak height), each obstacle profile (distance, bearing, width, left/right clearance, recommended action) and each motion event (e.g. impact). |
-| FR-C4 | At the end of a run the robot shall publish a run summary including the highest hump peak, distance travelled, run time and event counts; the summary shall remain available on the broker (retained). |
-| FR-C5 | The robot shall accept the commands `start`, `stop` and `status` on `robot/command` and acknowledge every command.  Commands shall never drive the motors directly; they only start or stop the autonomous mission. |
-| FR-C6 | The robot shall publish a heartbeat every second (state, fault flags, dropped-event count) and an `online` / `offline` status; `offline` shall be published by the broker (MQTT last will) if the robot disappears. |
-| FR-C7 | The robot shall detect loss of the WiFi network or the broker and reconnect automatically, without restarting. |
+| FR-B1-01 | The robot shall join the configured 2.4 GHz WPA2 network and connect to the MQTT broker automatically after power-up, with no user action. |
+| FR-B1-02 | The robot shall publish telemetry over MQTT: robot state, motor speeds, encoder counts, distance travelled, line sensor status, and terrain / hump data. |
+| FR-B1-03 | The robot shall publish an event for each barcode decoded (code and navigation command), each hump (peak height), each obstacle profile (distance, bearing, width, left/right clearance, recommended action) and each motion event (e.g. impact). |
+| FR-B1-04 | At the end of a run the robot shall publish a run summary including the highest hump peak, distance travelled, run time and event counts; the summary shall remain available on the broker (retained). |
+| FR-B1-05 | The robot shall accept the commands `start`, `stop` and `status` on `robot/command` and acknowledge every command.  Commands shall never drive the motors directly; they only start or stop the autonomous mission. |
+| FR-B1-06 | The robot shall publish a heartbeat every second (state, fault flags, dropped-event count) and an `online` / `offline` status; `offline` shall be published by the broker (MQTT last will) if the robot disappears. |
+| FR-B1-07 | The robot shall detect loss of the WiFi network or the broker and reconnect automatically, without restarting. |
 
 ### 1.2 Non-functional requirements (Buddy 1)
 
 | ID | Requirement | Measured (evidence) |
 |---|---|---|
-| NFR-C1 | No `comms` API call shall block the calling task; if a queue is full the item is dropped and counted, never waited for. | By design (all kernel calls use `TMO_POL`); `ev_drop` 0 in all tests. |
-| NFR-C2 | WiFi/MQTT activity shall not delay a 10 ms control-style task (priority 5) by more than 5 ms. | Busy run: avg 0.19 ms, max 2.0 ms, 0 samples > 5 ms (T7). One 6.4 ms peak while joining - see A-C3. |
-| NFR-C3 | A command shall be acknowledged within 200 ms. | avg 72 ms, max 107 ms (T3); one 371 ms outlier while the phone hotspot was congested (T4 log). |
-| NFR-C4 | Each telemetry topic shall be published at most 5 times per second, and unchanged values at most every 2 s. | Whole link during a run: 4.1 msg/s, 328 B/s (T2). |
-| NFR-C5 | After the network or broker returns, the MQTT session shall be restored within 30 s; after power-up, within 30 s. | 2 s after WiFi link up (T5); 3 s after broker restart (T4); 6-7 s after power-up (T1). |
-| NFR-C6 | Events raised while disconnected shall be delivered after reconnection in their original order with their original timestamps, or counted as dropped. | 38 s broker outage: 15 events queued and all delivered in order within 0.4 s of reconnect (T4). |
-| NFR-C7 | The communication code shall use no dynamic memory allocation and fit in < 16 KB flash and < 4 KB RAM (excluding the lwIP stack). | ~12.3 KB flash, ~2.7 KB RAM (comms + MQTT session + lwIP MQTT client). |
+| NFR-B1-01 | No `comms` API call shall block the calling task; if a queue is full the item is dropped and counted, never waited for. | By design (all kernel calls use `TMO_POL`); `ev_drop` 0 in all tests. |
+| NFR-B1-02 | WiFi/MQTT activity shall not delay a 10 ms control-style task (priority 5) by more than 5 ms. | **Not always met.** Busy run: avg 0.19 ms, max 2.0 ms (T7).  Rare peaks above 5 ms: 6.4 ms while joining, and 8.4 ms once in 1000 samples while idle (2026-09-27 retest).  Cause: the radio driver busy-waits inside the priority-4 radio task.  Mitigation: time-critical loops run above priority 4 (section 3, A-C3). |
+| NFR-B1-03 | A command shall be acknowledged within 200 ms. | avg 72 ms, max 107 ms (T3); one 371 ms outlier while the phone hotspot was congested (T4 log). |
+| NFR-B1-04 | Each telemetry topic shall be published at most 5 times per second, and unchanged values at most every 2 s. | Whole link during a run: 4.1 msg/s, 328 B/s (T2). |
+| NFR-B1-05 | After the network or broker returns, the MQTT session shall be restored within 30 s; after power-up, within 30 s. | 2 s after WiFi link up (T5); 3 s after broker restart (T4); 6-7 s after power-up (T1). |
+| NFR-B1-06 | Events raised while disconnected shall be delivered after reconnection in their original order with their original timestamps, or counted as dropped. | 38 s broker outage: 15 events queued and all delivered in order within 0.4 s of reconnect (T4). |
+| NFR-B1-07 | The communication code shall use no dynamic memory allocation and fit in < 16 KB flash and < 4 KB RAM (excluding the lwIP stack). | ~12.3 KB flash, ~2.7 KB RAM (comms + MQTT session + lwIP MQTT client). |
 
 ---
 
@@ -51,8 +51,8 @@ Diagrams (PNG for Word, SVG for editing): `docs/img/comms_statechart.png`,
 | Device / Module | Type | Signal Name | Sensor label | Pico GPIO Pin | Interface | Notes / RTOS Task Owner |
 |---|---|---|---|---|---|---|
 | CYW43439 WiFi (on Pico W) | Comms | WL_ON | WL_REG_ON | GP23 | GPIO out | Radio power enable. Radio Service Task only. Internal to Pico W, not on the header. |
-| CYW43439 WiFi | Comms | WL_DATA | WL_D | GP24 | PIO SPI (bidirectional) + host-wake IRQ | Radio Service Task only. |
-| CYW43439 WiFi | Comms | WL_CS | WL_CS | GP25 | PIO SPI | Radio Service Task only.  Also why the Pico W on-board LED is not an RP2040 pin. |
+| CYW43439 WiFi | Comms | WL_DATA | WL_D | GP24 | PIO SPI (bidirectional) | Radio Service Task only.  The chip's host-wake interrupt is not used: the radio task polls every 2 ms, leaving the GPIO interrupt free for Buddy 2's encoders. |
+| CYW43439 WiFi | Comms | WL_CS | WL_CS | GP25 | PIO SPI | Radio Service Task only.  (On a plain Pico GP25 drives the on-board LED; on the Pico W that LED is wired to the WiFi chip instead.) |
 | CYW43439 WiFi | Comms | WL_CLK | WL_CLK | GP29 | PIO SPI | Radio Service Task only.  GP29 cannot be used as ADC3 while WiFi is on. |
 
 Shared-resource notes for the other buddies:
@@ -60,7 +60,12 @@ Shared-resource notes for the other buddies:
 - The radio claims **one PIO state machine and two DMA channels** at boot
   (whichever are free first).  Any subsystem using PIO or DMA (e.g. the
   ultrasonic or encoder capture) must use different ones.
-- GP23, GP24, GP25 and GP29 are reserved.  The liveness LED is on GP16.
+- GP23, GP24, GP25 and GP29 are wired inside the Pico W and are not on
+  the header, so no car wiring uses them; they are listed so the pin map
+  is complete.  **Buddy 1 uses no header pins.**
+- The kernel's liveness LED is on GP16 (`BOARD_LED_PIN` in
+  `include/sys/sysdepend/pico_rp2040/sysdef.h`); it can be moved or
+  dropped if another subsystem needs GP16.
 
 ---
 
@@ -83,7 +88,7 @@ needed around the network stack.  It runs at priority 4: below the USB
 console service (3) so the console cannot overflow, and above the
 subsystem tasks so that the 2 ms poll, lwIP timers and MQTT keep-alive
 stay on time.  Because it sits above the subsystem tasks, its CPU use
-delays them: measured at most 2.0 ms in a busy run (NFR-C2), but the radio
+delays them: measured at most 2.0 ms in a busy run (NFR-B1-02), but the radio
 driver's busy-waits reached 6.4 ms once while joining.  **Recommendation to
 the team:** control loops that cannot tolerate ~2-6 ms of jitter (motor
 speed PID) should run at a higher priority than 4 (e.g. 2-3) and keep each
@@ -163,9 +168,9 @@ wait in the queue.
 | AI or initial idea | Team decision | Engineering reason | Affected artefact |
 |---|---|---|---|
 | Run MQTT inside the existing radio task (lwIP `NO_SYS`), rather than a separate MQTT task. | Accepted | lwIP must run in one context; a second task would need locks around the whole stack and could deadlock with the radio driver. | Task table, interaction diagram |
-| Let the laptop drive the robot remotely over MQTT. | Modified | The brief requires autonomous operation with no remote control; commands are limited to `start` / `stop` / `status`, and the vehicle controller decides how to act on them. | FR-C5, statechart, API |
-| Send each report as it happens, at whatever rate the subsystem produces it. | Modified | Resource efficiency is assessed: telemetry is rate-limited to 5 Hz per topic and unchanged values are skipped (2 s refresh); measured ~60 % fewer terrain messages. | NFR-C4, interaction diagram |
-| JSON payloads vs a compact binary format. | Accepted (JSON) | Readable in any MQTT tool for debugging and the demo; measured cost only 328 B/s. Integers only (no FPU on RP2040). | Message format, NFR-C4 |
+| Let the laptop drive the robot remotely over MQTT. | Modified | The brief requires autonomous operation with no remote control; commands are limited to `start` / `stop` / `status`, and the vehicle controller decides how to act on them. | FR-B1-05, statechart, API |
+| Send each report as it happens, at whatever rate the subsystem produces it. | Modified | Resource efficiency is assessed: telemetry is rate-limited to 5 Hz per topic and unchanged values are skipped (2 s refresh); measured ~60 % fewer terrain messages. | NFR-B1-04, interaction diagram |
+| JSON payloads vs a compact binary format. | Accepted (JSON) | Readable in any MQTT tool for debugging and the demo; measured cost only 328 B/s. Integers only (no FPU on RP2040). | Message format, NFR-B1-04 |
 | Keep lwIP's DHCP address-conflict check (ARP probe). | Rejected with reason | After a quick power-cycle the phone hotspot answered the probe for the old lease, so DHCP declined every address forever (D1).  Disabled, as Raspberry Pi's own Pico W examples do. | Assumption A-C1, test plan |
 
 ### 8.3 Final gap check (Buddy 1 part)
@@ -177,7 +182,7 @@ List only gaps the team must review and justify."*
 
 | AI-identified gap | Team response | Action taken | Evidence or reason |
 |---|---|---|---|
-| MQTT is unauthenticated and unencrypted (anonymous, plain TCP). | Accepted as risk | None for the prototype. | Private hotspot, lab-only data, no remote control of motion (FR-C5); TLS would cost RAM/CPU the project does not need. |
+| MQTT is unauthenticated and unencrypted (anonymous, plain TCP). | Accepted as risk | None for the prototype. | Private hotspot, lab-only data, no remote control of motion (FR-B1-05); TLS would cost RAM/CPU the project does not need. |
 | The radio task outranks subsystem tasks, so its busy-waits can delay a motor control loop. | Needs validation | Measured (T7) and recommended that the PID loop run above priority 4. | A-C3; re-measure with Buddy 2's PID at integration. |
 | The event queue can overflow in a long outage. | Accepted as risk | Drops are counted in `ev_drop`, never silent; size (16) can be raised cheaply (~40 B per slot). | T4: 38 s outage used 15 of 16 slots with test-generator rates. |
 | Broker address is fixed at build time. | Needs validation | Address kept in `config/mqtt_config.h` (one line). | A-C1; confirm venue / broker with the lecturer. |
@@ -193,5 +198,5 @@ List only gaps the team must review and justify."*
 | Which task owns each hardware device? | The Radio Service Task alone owns the CYW43439 (GP23/24/25/29, one PIO state machine, two DMA channels).  No other task calls the radio or lwIP. |
 | Which task has the highest priority, and why? | (Team answer.)  Buddy 1 input: the radio task is priority 4 - below the USB console, above subsystem tasks - and time-critical control loops should be placed above it (see section 3). |
 | Which subsystem statechart corresponds to which task? | The communication statechart (WiFi link + MQTT session) corresponds to the Radio Service Task. |
-| How are functional requirements reflected? | FR-C1, FR-C7: WiFi link and MQTT session statechart.  FR-C2 to FR-C4: `comms` snapshots and event queue, published by the Radio Service Task.  FR-C5: command queue read by the vehicle controller.  FR-C6: heartbeat and last will in the MQTT session. |
+| How are functional requirements reflected? | FR-B1-01, FR-B1-07: WiFi link and MQTT session statechart.  FR-B1-02 to FR-B1-04: `comms` snapshots and event queue, published by the Radio Service Task.  FR-B1-05: command queue read by the vehicle controller.  FR-B1-06: heartbeat and last will in the MQTT session. |
 | What changes are still expected after Week 6? | Telemetry fields/units may change after review with each buddy (A-C4); the PID priority recommendation must be confirmed at integration (A-C3); broker details depend on the venue (A-C1). |

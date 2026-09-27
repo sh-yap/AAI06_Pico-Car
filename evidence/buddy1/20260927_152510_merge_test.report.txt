@@ -1,0 +1,18 @@
+MQTT log report: 20260927_152510_merge_test.log
+Duration: 46.1 s   messages: 50   avg rate: 1.1 msg/s   payload: 70 B/s
+
+topic                        count     msg/s  avg bytes
+robot/heartbeat                 46      1.00         65
+robot/info                       1      0.02         47
+robot/state                      1      0.02         42
+robot/status                     1      0.02          6
+robot/summary                    1      0.02        102
+
+Heartbeat: 46 received, 0 missing in 0 gap(s), 0 reboot(s), longest silence 1 s
+Heartbeat interval by the Pico's own clock: max 1.02 s (1.00 = sent on time)
+Events dropped on the robot (max ev_drop): 0
+
+Timeline:
+  15:25:12.262  status: online
+  15:25:12.263  firmware: {"v":1,"t":5710,"build":"Sep 27 2026 15:10:57"}
+  15:25:12.263  SUMMARY: {"v":1,"t":147730,"run_ms":26400,"dist_mm":4800,"max_hump_mm":41,"humps":3,"barcodes":4,"obstacles":2}

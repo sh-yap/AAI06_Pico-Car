@@ -1,0 +1,35 @@
+MQTT log report: 20260927_152653_merge_test2.log
+Duration: 61.3 s   messages: 339   avg rate: 5.5 msg/s   payload: 444 B/s
+
+topic                        count     msg/s  avg bytes
+robot/command                    2      0.03          5
+robot/event/barcode              6      0.10         47
+robot/event/command              2      0.03         39
+robot/event/hump                 4      0.07         43
+robot/event/obstacle             2      0.03        116
+robot/event/run                  1      0.02         32
+robot/heartbeat                 61      1.00         70
+robot/info                       1      0.02         47
+robot/state                     15      0.24         49
+robot/status                     1      0.02          6
+robot/summary                    2      0.03        102
+robot/telemetry/line            39      0.64         53
+robot/telemetry/motion         178      2.90         93
+robot/telemetry/terrain         25      0.41         98
+
+Heartbeat: 61 received, 0 missing in 0 gap(s), 0 reboot(s), longest silence 3.5 s
+Heartbeat interval by the Pico's own clock: max 1.58 s (1.00 = sent on time)
+  15:27:31.049  no heartbeat arrived for 3.5 s
+Command acknowledgement: 2 commands, avg 43 ms, max 69 ms (laptop -> Pico -> laptop)
+Events dropped on the robot (max ev_drop): 0
+
+Timeline:
+  15:26:55.842  status: online
+  15:26:55.843  firmware: {"v":1,"t":5710,"build":"Sep 27 2026 15:10:57"}
+  15:26:55.843  SUMMARY: {"v":1,"t":147730,"run_ms":26400,"dist_mm":4800,"max_hump_mm":41,"humps":3,"barcodes":4,"obstacles":2}
+  15:27:09.420  command sent: start
+  15:27:09.489  command ack (69 ms): {"v":1,"t":206990,"cmd":"start","ok":1}
+  15:27:09.608  run: {"v":1,"t":207020,"run":"BEGIN"}
+  15:27:45.534  command sent: stop
+  15:27:45.550  command ack (16 ms): {"v":1,"t":243050,"cmd":"stop","ok":1}
+  15:27:45.627  SUMMARY: {"v":1,"t":243100,"run_ms":36080,"dist_mm":6560,"max_hump_mm":48,"humps":4,"barcodes":6,"obstacles":2}
