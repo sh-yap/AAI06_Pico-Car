@@ -330,7 +330,7 @@ EXPORT ER dev_i2c_llinit( T_I2C_DCB *p_dcb)
 		while((in_w(RESETS_RESET_DONE)&(RESETS_RESET_I2C0))==0);
 #endif
 
-#if DEVCNF_I2C_SETPINFUNC
+#if DEVCNF_I2C_SETPINFUNC && !defined(BOARD_ROBO_PICO_ROBOT)
 		out_w(GPIO_CTRL(8), GPIO_CTRL_FUNCSEL_I2C);
 		out_w(GPIO(8), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT);
 		out_w(GPIO_CTRL(9), GPIO_CTRL_FUNCSEL_I2C);
@@ -345,13 +345,13 @@ EXPORT ER dev_i2c_llinit( T_I2C_DCB *p_dcb)
 		while((in_w(RESETS_RESET_DONE)&(RESETS_RESET_I2C1))==0);
 #endif
 
-#if DEVCNF_I2C_SETPINFUNC
+#if DEVCNF_I2C_SETPINFUNC && !defined(BOARD_ROBO_PICO_ROBOT)
 		out_w(GPIO_CTRL(6), GPIO_CTRL_FUNCSEL_I2C);
 		out_w(GPIO(6), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT);
 		out_w(GPIO_CTRL(7), GPIO_CTRL_FUNCSEL_I2C);
 		out_w(GPIO(7), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT);
-		break;
 #endif
+		break;
 	default:
 		(void)tk_del_flg(ll_devcb[unit].done_flgid);
 		return E_PAR;
