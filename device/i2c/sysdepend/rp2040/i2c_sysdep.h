@@ -21,8 +21,8 @@
 #define	__DEV_I2C_RP2040_H__
 
 #define	DEV_I2C_UNITNM		(2)	/* Number of devive units */
-#define	DEV_I2C_0		(0)	/* I2C1 */
-#define	DEV_I2C_1		(1)	/* I2C2 */
+#define	DEV_I2C_0		(0)	/* RP2040 I2C0 */
+#define	DEV_I2C_1		(1)	/* RP2040 I2C1 */
 
 /* I2C device driver operating state */
 #define	I2C_STS_START		0x0000

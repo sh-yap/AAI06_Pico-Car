@@ -26,4 +26,5 @@ __pycache__/
 
 AGENTS.md
 docs/private
+/.vscode
 /personal/
