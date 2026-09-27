@@ -14,10 +14,20 @@
 #include <tm/tmonitor.h>
 
 
-/* IR sensor ADC channel assignments. */
-#define IR_LEFT_CH        0
-#define IR_CENTRE_CH      1
-#define IR_RIGHT_CH       2
+/*
+ * IR sensor GPIO assignments.
+ *
+ * Left sensor   AO -> GP28 / ADC2
+ * Centre sensor AO -> GP27 / ADC1
+ * Right sensor  AO -> GP26 / ADC0
+ */
+#define IR_LEFT_PIN        28U
+#define IR_CENTRE_PIN      27U
+#define IR_RIGHT_PIN       26U
+
+#define IR_LEFT_ADC        2U
+#define IR_CENTRE_ADC      1U
+#define IR_RIGHT_ADC       0U
 
 /* ADC unit 0 is registered as "adca" by the T-Kernel device layer. */
 #define IR_ADC_DEVNAME    ((CONST UB *)"adca")
