@@ -62,9 +62,16 @@ LOCAL const UW module_tbl[] = {
 	RESETS_RESET_PWM,		/* PWM */
 #endif	/* USE_PTMR */
 
+#if defined(BOARD_ROBO_PICO_ROBOT)
+	/* Buddy 2 owns PWM directly; this does not enable the physical-timer
+	 * subsystem, it only releases the PWM peripheral from reset. */
+	RESETS_RESET_PWM,
+#endif
+
 #if USE_SDEV_DRV	// Do not use sample device driver
 	RESETS_RESET_ADC,		/* A/DC */
-	RESETS_RESET_I2C1,		/* ROBO-PICO Grove Port 2 I2C1 */
+	RESETS_RESET_I2C0,		/* I2C0, default board pin pair GP8/GP9 */
+	RESETS_RESET_I2C1,		/* I2C1, ROBO-PICO sensor bus */
 #endif /* USE_SDEV_DRV */
 	0
 };
@@ -93,13 +100,25 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 	{GPIO_CTRL(28),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(28), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
 
-	/* ROBO-PICO Grove Port 2: I2C1 SDA=GP2 and SCL=GP3. */
+#if !defined(BOARD_ROBO_PICO_ROBOT)
+	/* P8 : I2C0_SDA */
+	{GPIO_CTRL(8),	GPIO_CTRL_FUNCSEL_I2C},
+	{GPIO(8), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},	/* Pull-up */
+
+	/* P9 : I2C0_SCL */
+	{GPIO_CTRL(9),	GPIO_CTRL_FUNCSEL_I2C},
+	{GPIO(9), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},	/* Pull-up */
+#endif
+
+#endif /* USE_SDEV_DRV */
+
+#if defined(BOARD_ROBO_PICO_ROBOT)
+	/* Proposed team I2C1 bus; GP8/9 remain available for motor PWM. */
 	{GPIO_CTRL(2),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(2), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
 	{GPIO_CTRL(3),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(3), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
-
-#endif /* USE_SDEV_DRV */
+#endif
 	{0, 0}
 };
 
