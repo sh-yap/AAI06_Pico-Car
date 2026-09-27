@@ -47,6 +47,7 @@
 
 #include "usb_console_compat.h"
 #include "demo_tasks.h"
+#include "buddy3_task.h" 
 
 #if TM_WIFI_CYW43
 /* Plain C types on purpose - see the note in cyw43_utk.h. */
@@ -457,6 +458,13 @@ LOCAL T_CTSK ctsk_blink = {
 	.tskatr		= TA_HLNG | TA_RNG3,
 };
 
+LOCAL T_CTSK ctsk_buddy3 = {          
+	.itskpri	= 5,
+	.stksz		= STACK_SZ,
+	.task		= buddy3_task,
+	.tskatr		= TA_HLNG | TA_RNG3,
+};
+
 LOCAL T_CMPF cmpf = {
 	.mpfatr		= TA_TFIFO | TA_RNG3,
 	.mpfcnt		= N_RECORDS,
@@ -515,6 +523,7 @@ EXPORT INT usermain(void)
 	tid = tk_cre_tsk(&ctsk_monitor);  if(made("tsk(monitor)",  tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_consumer); if(made("tsk(consumer)", tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_producer); if(made("tsk(producer)", tid)) tk_sta_tsk(tid, 0);
+	tid = tk_cre_tsk(&ctsk_buddy3);   if(made("tsk(buddy3)",   tid)) tk_sta_tsk(tid, 0); 
 #if TM_WIFI_CYW43
 	tid = tk_cre_tsk(&ctsk_wifi);     if(made("tsk(wifi)",     tid)) tk_sta_tsk(tid, 0);
 #endif
