@@ -24,8 +24,8 @@ SMP ?= 0
 APP ?= demo
 BOARD ?= pico
 
-ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test),$(APP))
-$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test or motion_closed_loop_test)
+ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test ultrasonic_test servo_test),$(APP))
+$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, ultrasonic_test or servo_test)
 endif
 ifneq ($(filter $(BOARD),pico robo_pico_robot),$(BOARD))
 $(error Unknown BOARD '$(BOARD)'; use pico or robo_pico_robot)
