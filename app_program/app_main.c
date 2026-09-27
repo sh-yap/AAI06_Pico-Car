@@ -518,6 +518,7 @@ EXPORT INT usermain(void)
 	mbfid = tk_cre_mbf(&cmbf); if(!made("mbf", mbfid)) return 1;
 	semid = tk_cre_sem(&csem); if(!made("sem", semid)) return 1;
 	flgid = tk_cre_flg(&cflg); if(!made("flg", flgid)) return 1;
+	if(!made("mbf(buddy3)", buddy3_output_mbf_create())) return 1;
 
 	tid = tk_cre_tsk(&ctsk_blink);    if(made("tsk(blink)",    tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_monitor);  if(made("tsk(monitor)",  tid)) tk_sta_tsk(tid, 0);

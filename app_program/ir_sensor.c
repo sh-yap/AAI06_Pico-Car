@@ -50,10 +50,15 @@ void ir_sensor_init(void)
 }
 
 
-/* Synchronous read of one ADC channel. */
+/*
+ * Synchronous read of one ADC channel.
+ *
+ * The RP2040 ADC driver counts size in samples, not bytes, accepts
+ * exactly one sample per read, and writes it as a 32-bit UW.
+ */
 static uint16_t ir_read_channel(W channel)
 {
-    uint16_t value = 0U;
+    UW value = 0U;
     SZ actual_size = 0;
     ER ercd;
 
@@ -66,17 +71,17 @@ static uint16_t ir_read_channel(W channel)
         ir_adc_dd,
         channel,
         &value,
-        sizeof(value),
+        1,
         &actual_size
     );
 
     if ((ercd < E_OK) ||
-        (actual_size != (SZ)sizeof(value)))
+        (actual_size != 1))
     {
         return 0U;
     }
 
-    return value;
+    return (uint16_t)(value & 0x0FFFU);
 }
 
 
@@ -84,9 +89,9 @@ ir_readings_t ir_sensor_read(void)
 {
     ir_readings_t readings;
 
-    readings.left   = ir_read_channel(IR_LEFT_CH);
-    readings.centre = ir_read_channel(IR_CENTRE_CH);
-    readings.right  = ir_read_channel(IR_RIGHT_CH);
+    readings.left   = ir_read_channel(IR_LEFT_ADC);
+    readings.centre = ir_read_channel(IR_CENTRE_ADC);
+    readings.right  = ir_read_channel(IR_RIGHT_ADC);
 
     return readings;
 }

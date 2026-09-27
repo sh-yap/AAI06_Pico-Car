@@ -15,6 +15,8 @@
 
 #include "motion_encoder.h"
 
+#include <tm/tmonitor.h>
+
 
 /* Polling period - may need adjusting once barcode timing is tested. */
 #define BUDDY3_TASK_PERIOD_MS    10U
@@ -32,6 +34,20 @@
  * slow consumer does not force this task to block on every cycle.
  */
 #define BUDDY3_OUTPUT_MBF_SLOTS  4U
+
+/*
+ * Debug output on the console. Set to 0 once calibration is done.
+ * Prints a status line every BUDDY3_DEBUG_EVERY cycles
+ * (20 x 10 ms = 200 ms) and one line per finished barcode capture.
+ */
+#define BUDDY3_DEBUG             1
+#define BUDDY3_DEBUG_EVERY       20U
+
+#if BUDDY3_DEBUG
+static const char *const line_state_name[] = {
+    "LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION"
+};
+#endif
 
 ID buddy3_output_mbfid = -1;
 
@@ -72,6 +88,11 @@ void buddy3_task(INT stacd, void *exinf)
 
     buddy3_output_msg_t out_msg;
 
+#if BUDDY3_DEBUG
+    uint32_t debug_cycle = 0U;
+    bool barcode_was_ready;
+#endif
+
     (void)stacd;
     (void)exinf;
 
@@ -104,8 +125,33 @@ void buddy3_task(INT stacd, void *exinf)
         barcode_update(barcode_is_black, timestamp_ms, encoder_position);
         barcode_check_timeout(timestamp_ms);
 
+#if BUDDY3_DEBUG
+        /* Sample before barcode_get_command(), which clears it. */
+        barcode_was_ready = barcode_available();
+#endif
+
         /* barcode_get_command() safely returns NAV_NONE if nothing is ready. */
         nav_command = barcode_get_command();
+
+#if BUDDY3_DEBUG
+        if (barcode_was_ready)
+        {
+            tm_printf((UB *)"[buddy3] barcode captured at %u ms -> nav=%d\n",
+                      timestamp_ms, (INT)nav_command);
+        }
+
+        if (++debug_cycle >= BUDDY3_DEBUG_EVERY)
+        {
+            debug_cycle = 0U;
+            /* Error printed x1000 - tm_printf has no %f. */
+            tm_printf((UB *)"[buddy3] L=%4u C=%4u R=%4u  %-8s err=%5d"
+                           "  black=%d  enc=%d\n",
+                      readings.left, readings.centre, readings.right,
+                      line_state_name[line_state],
+                      (INT)(line_error * 1000.0f),
+                      (INT)barcode_is_black, (INT)encoder_position);
+        }
+#endif
 
         out_msg.line_state  = line_state;
         out_msg.line_error  = line_error;
