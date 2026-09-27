@@ -13,10 +13,10 @@
 #include <stdint.h>
 
 
-/* TEMPORARY thresholds */
-#define IR_LEFT_THRESHOLD      2048U
-#define IR_CENTRE_THRESHOLD    2048U
-#define IR_RIGHT_THRESHOLD     2048U
+/* Calibrated 2026-09-27: white ~170-210, black ~2510-2630 (midpoint). */
+#define IR_LEFT_THRESHOLD      1300U
+#define IR_CENTRE_THRESHOLD    1300U
+#define IR_RIGHT_THRESHOLD     1300U
 
 
 #define JUNCTION_DEBOUNCE_COUNT    3U

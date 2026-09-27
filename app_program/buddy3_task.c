@@ -22,11 +22,11 @@
 #define BUDDY3_TASK_PERIOD_MS    10U
 
 /*
- * TEMPORARY threshold for barcode sensing on the centre IR sensor.
- * Placeholder, same as line_follow.c's thresholds - replace after
- * hardware calibration (5A).
+ * Threshold for barcode sensing on the centre IR sensor.
+ * Same value as line_follow.c's calibrated thresholds
+ * (white ~170-210, black ~2510-2630).
  */
-#define BARCODE_IR_THRESHOLD     2048U
+#define BARCODE_IR_THRESHOLD     1300U
 
 /*
  * Output message buffer - default choice (message buffer, matching
