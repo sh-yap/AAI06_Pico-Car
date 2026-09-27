@@ -11,6 +11,12 @@ CONSOLE ?= usb_cdc
 WIFI ?= none
 B4_TEST_CALIBRATION ?= 0
 
+# The target board is the ROBO-PICO car, so the shared kernel and driver
+# sources select the robot board branches. That is what reserves PWM for
+# Buddy 2 and leaves GP8 to GP11 to the motor driver. It also gives this
+# image the shared I2C1 bus selection instead of a private copy of it.
+BOARD := robo_pico_robot
+
 ifneq ($(SMP),0)
 $(error Buddy 4 car test requires SMP=0)
 endif
