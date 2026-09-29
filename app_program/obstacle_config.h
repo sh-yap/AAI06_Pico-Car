@@ -20,6 +20,12 @@
 /* Servo signal.  S1 = GP12, S2 = GP13, S3 = GP14, S4 = GP15. */
 #define OBSTACLE_SERVO_PIN              (12U)
 
+/* HC-SR04 on Grove 1 (GP0/GP1), the only Grove port free on the car.
+ * These are the UART0 console pins at boot; obstacle_ultrasonic_init()
+ * takes them over, so only the UART copy of the console is lost (the USB
+ * console is unaffected).  Servo ports S3/S4 were tried first but did not
+ * pass a Trig-to-Echo loopback test, so they may be output-only. */
+
 /* HC-SR04 Trigger: any free GPIO. */
 #define OBSTACLE_TRIG_PIN               (0U)
 
