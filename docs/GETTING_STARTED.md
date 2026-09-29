@@ -14,7 +14,7 @@ From a clean machine to a Pico W running both cores. Roughly 15 minutes.
 | GNU `make` | The build system. This port does not use CMake or the Pico SDK build. |
 | USB-serial adapter | For the UART console - GP0 TX, GP1 RX, 115200 8N1. |
 | Pico SDK (**only** for `CONSOLE=usb_cdc`) | The USB console links TinyUSB from the Pico SDK. Not needed for the default UART build. |
-| External LED + resistor on **GP16** | Liveness indicator. The Pico W's on-board LED is on the CYW43439 radio, not an RP2040 pin, so it is unavailable while the radio is powered down. |
+| External LED + resistor on **GP19** | Liveness indicator. The Pico W's on-board LED is on the CYW43439 radio, not an RP2040 pin, so it is unavailable while the radio is powered down. |
 
 On Debian/Ubuntu:
 
@@ -261,7 +261,7 @@ Four always, plus a fifth in radio builds.
 | `consumer_task` | 6 | 2 | Receives, checks the payload, returns the credit, sets the event flag |
 | `monitor_task` | 7 | either | Waits on the event flag and prints one status line |
 | `wifi_status_task` | 8 | either | **Radio builds only** (`WIFI=cyw43`). Reports link, address and UDP echo traffic. Does not drive the radio - a service task owns that |
-| `blink_task` | 10 | either | Blinks GP16. Touches nothing the console touches |
+| `blink_task` | 10 | either | Blinks GP19. Touches nothing the console touches |
 
 Under SMP the producer is pinned to processor 1 and the consumer to processor
 2 with `TA_ASSPRC`, so **every message crosses a core boundary**. Built with
@@ -356,7 +356,7 @@ under test.
 
 ### What the LED tells you
 
-The LED on GP16 blinks at 2 Hz once USB is up (immediately on a UART build).
+The LED on GP19 blinks at 2 Hz once USB is up (immediately on a UART build).
 Before that it blinks a *count* of how far USB bring-up got - long flash = 5,
 short flash = 1:
 
@@ -673,12 +673,12 @@ profile, output goes to the Pico's USB port instead, not GP0/GP1.
 
 The banner is printed only after the host enumerates, so it will not appear at
 reset - open the port and wait a second or two. If nothing ever arrives, read
-the GP16 LED against the bring-up table above; it tells you how far USB got.
+the GP19 LED against the bring-up table above; it tells you how far USB got.
 
 ### No LED activity
 
 The Pico W's on-board LED is on the radio chip and will not light in the
-radio-down profiles. Use an external LED on GP16, or change `BOARD_LED_PIN`
+radio-down profiles. Use an external LED on GP19, or change `BOARD_LED_PIN`
 in `include/sys/sysdepend/pico_rp2040/sysdef.h`. Avoid GP23, GP24, GP25 and
 GP29 - the radio reserves them.
 

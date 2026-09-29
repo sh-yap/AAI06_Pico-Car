@@ -26,15 +26,15 @@ programs build; they have not yet been run on hardware.
 | Signal | Connection |
 | --- | --- |
 | Servo | Servo port **S1 = GP12** (brown GND, red V+, orange signal) |
-| HC-SR04 Trig | **GP16** |
-| HC-SR04 Echo | **GP17 through a divider**: Echo → 1 kΩ → GP17, GP17 → 2 kΩ → GND |
+| HC-SR04 Trig | **GP0** |
+| HC-SR04 Echo | **GP1 through a divider**: Echo → 1 kΩ → GP1, GP1 → 2 kΩ → GND |
 | HC-SR04 VCC / GND | V+ and GND of a spare servo port (about 4.6 V on USB power) |
 
-- Do not use Grove 1 (GP0/GP1): startup code gives those pins to the UART
-  console in every build.
+- The `robo_pico_robot` profile is USB-CDC-console-only. It disables the UART0
+  mirror so that startup does not drive GP0 or claim GP1.
 - Grove ports only supply 3.3 V; the HC-SR04 needs 5 V. Powered at 5 V its
-  Echo output is 5 V, so the divider is required before GP17.
-- Use the Grove port wired to GP16/GP17 for the two signal wires, or jumper
+  Echo output is 5 V, so the divider is required before GP1.
+- Use the Grove port wired to GP0/GP1 for the two signal wires, or jumper
   them. Check the board labels, not the wire colours.
 - To move a pin, change it in `obstacle_config.h` only. The build rejects
   invalid choices: Echo must be an odd GPIO, and neither pin may share a PWM
@@ -42,7 +42,7 @@ programs build; they have not yet been run on hardware.
 
 ## How it works
 
-- **Echo timing, no interrupt:** GP17 is PWM slice 0 channel B. The slice
+- **Echo timing, no interrupt:** GP1 is PWM slice 0 channel B. The slice
   runs in level-gated mode at 1 µs per count, so it counts only while Echo is
   high. After each ping the counter holds the echo width in µs. This avoids
   Buddy 2's GPIO interrupt, and task switches or USB printing can't skew it.

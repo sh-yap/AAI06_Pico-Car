@@ -211,8 +211,11 @@ Existing reservations to include in the resource map:
 
 | Resource | Current use to account for |
 |---|---|
-| GP0/GP1 | UART0 console, including the default USB profile's UART mirror |
-| GP16 | Demo liveness LED output |
+| GP0/GP1 | HC-SR04 Trigger/Echo on the final robot; the `robo_pico_robot` profile requires USB CDC and disables the UART0 mirror |
+| GP4/GP5 | Right wheel encoder A/B |
+| GP6/GP7 | Currently unassigned |
+| GP16/GP17 | Left wheel encoder A/B; do not fit an ESP-01 module |
+| GP19 | Demo liveness LED output |
 | GP8/GP9 | Inherited I2C0 startup/driver initialization conflicts with Robo-Pico motor 1 |
 | GP10/GP11 | Robo-Pico motor 2; shared with Maker Pi Pico microSD wiring on bench carrier |
 | GP12–GP15 | Robo-Pico servo ports; shared with Maker Pi Pico microSD wiring on bench carrier |
@@ -223,7 +226,7 @@ Existing reservations to include in the resource map:
 | USBCTRL, CYW43 PIO/DMA | Existing services own these when enabled |
 
 This is a reservation list, not a final Robo-Pico pinout. Check schematics
-before assigning pins or flashing a demo that drives GP16. Record actual
+before assigning pins or flashing a demo that drives GP19. Record actual
 PIO state machines, DMA channels, timers, and PWM slices during Stage 2.
 The current kernel tick is 10 ms; barcode edges and ultrasonic echo timing
 must not be treated as measurements from a millisecond task sleep alone.

@@ -30,10 +30,7 @@
 #define OBSTACLE_TRIG_PIN               (0U)
 
 /* HC-SR04 Echo: must be an ODD pin (PWM channel B), because its PWM slice
- * times the echo pulse in hardware.  GP1 = PWM slice 0 channel B.
- * The sensor is powered from Grove 1's 3.3 V, so Echo is 3.3 V and connects
- * directly.  If the sensor is ever powered from 5 V, Echo MUST go through
- * a divider (1k series, 2k to GND): 5 V damages the Pico. */
+ * times the echo pulse in hardware.  Feed it through a divider to 3.3 V. */
 #define OBSTACLE_ECHO_PIN               (1U)
 
 /* ------------------------------------------------------------------------ *

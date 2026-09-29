@@ -11,12 +11,15 @@ void motion_config_default(motion_config_t *config)
     config->left_motor_b = 9U;
     config->right_motor_a = 10U;
     config->right_motor_b = 11U;
-    config->left_encoder_a = 4U;
-    config->left_encoder_b = 5U;
-    /* Keep the physical cable pin 2 -> GP7, pin 3 -> GP6.  The logical
-       A/B order is intentionally inverted so vehicle-forward counts positive. */
-    config->right_encoder_a = 6U;
-    config->right_encoder_b = 7U;
+    /* Physical six-pin motor/encoder harness:
+       left pin 2 -> GP16, left pin 3 -> GP17;
+       right pin 2 -> GP4, right pin 3 -> GP5. */
+    /* Decode the left phases in reverse logical order so vehicle-forward
+       motion is positive without changing the documented harness wiring. */
+    config->left_encoder_a = 17U;
+    config->left_encoder_b = 16U;
+    config->right_encoder_a = 4U;
+    config->right_encoder_b = 5U;
     /* These are deliberately provisional until the motor datasheet is signed off. */
     /* Bench calibration: ten manual forward revolutions, latest run. */
     config->left_counts_per_wheel_rev = 2489;
