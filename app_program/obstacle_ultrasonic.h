@@ -18,6 +18,14 @@ bool obstacle_ultrasonic_init(void);
 /* Take one measurement.  Blocks the calling task for 40..110 ms. */
 void obstacle_ultrasonic_measure(obstacle_range_t * p_range);
 
+/* Bench diagnosis only: trigger once and sample the Echo pin directly.
+ * Busy-waits for 50 ms, so never call it on the running car. */
+void obstacle_ultrasonic_probe(obstacle_probe_t * p_probe);
+
+/* Bench diagnosis only: hold Trig high ~10 ms and read both pins back.
+ * Use with a Trig-to-Echo jumper to test the board without the sensor. */
+void obstacle_ultrasonic_pin_test(obstacle_pin_test_t * p_test);
+
 #endif /* OBSTACLE_ULTRASONIC_H */
 
 /*** end of file ***/

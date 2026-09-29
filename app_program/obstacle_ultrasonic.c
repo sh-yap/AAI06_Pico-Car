@@ -43,6 +43,9 @@
 
 #define ULTRA_US_PER_MS           (1000U)
 #define ULTRA_PING_PERIOD_US      (OBSTACLE_PING_PERIOD_MS * ULTRA_US_PER_MS)
+#define ULTRA_PROBE_WINDOW_US     (50000U)  /* Longer than any echo.    */
+#define ULTRA_PIN_TEST_HOLD_MS    (10)      /* TMO: Trig high phase.    */
+#define ULTRA_PIN_TEST_TIMER_MS   (100)     /* TMO: timer rate check.   */
 
 static bool     b_ready = false;
 static bool     b_pinged_before = false;
@@ -221,6 +224,136 @@ obstacle_ultrasonic_measure(obstacle_range_t * p_range)
         else
         {
             p_range->distance_mm = 0U;
+        }
+    }
+}
+
+/*!
+ * @brief Bench diagnosis: trigger once and watch the Echo pin directly.
+ *
+ * Arms the hardware counter exactly as a normal measurement does, then
+ * busy-polls the Echo pin level for ULTRA_PROBE_WINDOW_US.  Comparing the
+ * two separates wiring/power faults (the pin never rises) from echo-timing
+ * faults (the pin rises but the counter stays at zero).
+ *
+ * Blocks the CPU for 50 ms: test programs only.
+ *
+ * @param[out] p_probe What the pin did, and what the counter measured.
+ */
+void
+obstacle_ultrasonic_probe(obstacle_probe_t * p_probe)
+{
+    uint32_t start_us;
+    uint32_t elapsed_us = 0U;
+    bool     b_level;
+
+    if (NULL != p_probe)
+    {
+        p_probe->b_high_before = false;
+        p_probe->b_rose = false;
+        p_probe->b_fell = false;
+        p_probe->rise_us = 0U;
+        p_probe->fall_us = 0U;
+        p_probe->counter_us = 0U;
+
+        if (b_ready)
+        {
+            ultra_wait_ping_period();
+            p_probe->b_high_before = (0U != gpio_get_val(OBSTACLE_ECHO_PIN));
+
+            start_us = ultra_send_ping();
+
+            while (elapsed_us < ULTRA_PROBE_WINDOW_US)
+            {
+                elapsed_us = ultra_time_us() - start_us;
+                b_level = (0U != gpio_get_val(OBSTACLE_ECHO_PIN));
+
+                if (b_level && (!p_probe->b_rose))
+                {
+                    p_probe->b_rose = true;
+                    p_probe->rise_us = elapsed_us;
+                }
+                else if ((!b_level) && p_probe->b_rose && (!p_probe->b_fell))
+                {
+                    p_probe->b_fell = true;
+                    p_probe->fall_us = elapsed_us;
+                }
+                else
+                {
+                    /* No new edge. */
+                }
+            }
+
+            p_probe->counter_us = in_w(slice_base + PWM_CHx_CTR)
+                                  & ULTRA_PWM_CTR_MASK;
+            out_w(slice_base + PWM_CHx_CSR, ULTRA_PWM_CSR_DIV_LEVEL);
+
+            last_ping_us = start_us;
+            b_pinged_before = true;
+        }
+    }
+}
+
+/*!
+ * @brief Bench diagnosis: hold Trig high and read both pins back.
+ *
+ * Temporarily enables the Trig pad's input buffer so the real pin level
+ * can be read, holds Trig high for about ULTRA_PIN_TEST_HOLD_MS with the
+ * echo counter armed, then drives it low.  Also measures how many timer
+ * microseconds pass during a 100 ms kernel sleep (should be ~100000).
+ *
+ * With a jumper from Trig to Echo, every flag should be true and the
+ * counter about 10000.  With the sensor attached it merely causes one
+ * ping.  Test programs only.
+ *
+ * @param[out] p_test Pin levels, counter value and timer rate.
+ */
+void
+obstacle_ultrasonic_pin_test(obstacle_pin_test_t * p_test)
+{
+    uint32_t start_us;
+
+    if (NULL != p_test)
+    {
+        p_test->b_trig_high_ok = false;
+        p_test->b_trig_low_ok = false;
+        p_test->b_echo_high = false;
+        p_test->b_echo_low = false;
+        p_test->counter_us = 0U;
+        p_test->timer_us_per_100ms = 0U;
+
+        start_us = ultra_time_us();
+        (void)tk_dly_tsk(ULTRA_PIN_TEST_TIMER_MS);
+        p_test->timer_us_per_100ms = ultra_time_us() - start_us;
+
+        if (b_ready)
+        {
+            /* Let the Trig pad's input buffer see the driven level. */
+            set_w(GPIO(OBSTACLE_TRIG_PIN), GPIO_IE);
+
+            out_w(slice_base + PWM_CHx_CSR, ULTRA_PWM_CSR_DIV_LEVEL);
+            out_w(slice_base + PWM_CHx_CTR, 0U);
+            out_w(slice_base + PWM_CHx_CSR,
+                  ULTRA_PWM_CSR_DIV_LEVEL | ULTRA_PWM_CSR_EN);
+
+            (void)gpio_set_val(OBSTACLE_TRIG_PIN, 1U);
+            (void)tk_dly_tsk(ULTRA_PIN_TEST_HOLD_MS);
+            p_test->b_trig_high_ok = (0U != gpio_get_val(OBSTACLE_TRIG_PIN));
+            p_test->b_echo_high = (0U != gpio_get_val(OBSTACLE_ECHO_PIN));
+
+            (void)gpio_set_val(OBSTACLE_TRIG_PIN, 0U);
+            (void)tk_dly_tsk(ULTRA_PIN_TEST_HOLD_MS);
+            p_test->b_trig_low_ok = (0U == gpio_get_val(OBSTACLE_TRIG_PIN));
+            p_test->b_echo_low = (0U == gpio_get_val(OBSTACLE_ECHO_PIN));
+
+            p_test->counter_us = in_w(slice_base + PWM_CHx_CTR)
+                                 & ULTRA_PWM_CTR_MASK;
+            out_w(slice_base + PWM_CHx_CSR, ULTRA_PWM_CSR_DIV_LEVEL);
+
+            clr_w(GPIO(OBSTACLE_TRIG_PIN), GPIO_IE);
+
+            last_ping_us = ultra_time_us();
+            b_pinged_before = true;
         }
     }
 }

@@ -20,12 +20,21 @@
 /* Servo signal.  S1 = GP12, S2 = GP13, S3 = GP14, S4 = GP15. */
 #define OBSTACLE_SERVO_PIN              (12U)
 
+/* HC-SR04 on Grove 1 (GP0/GP1), the only Grove port free on the car.
+ * These are the UART0 console pins at boot; obstacle_ultrasonic_init()
+ * takes them over, so only the UART copy of the console is lost (the USB
+ * console is unaffected).  Servo ports S3/S4 were tried first but did not
+ * pass a Trig-to-Echo loopback test, so they may be output-only. */
+
 /* HC-SR04 Trigger: any free GPIO. */
-#define OBSTACLE_TRIG_PIN               (16U)
+#define OBSTACLE_TRIG_PIN               (0U)
 
 /* HC-SR04 Echo: must be an ODD pin (PWM channel B), because its PWM slice
- * times the echo pulse in hardware.  Feed it through a divider to 3.3 V. */
-#define OBSTACLE_ECHO_PIN               (17U)
+ * times the echo pulse in hardware.  GP1 = PWM slice 0 channel B.
+ * The sensor is powered from Grove 1's 3.3 V, so Echo is 3.3 V and connects
+ * directly.  If the sensor is ever powered from 5 V, Echo MUST go through
+ * a divider (1k series, 2k to GND): 5 V damages the Pico. */
+#define OBSTACLE_ECHO_PIN               (1U)
 
 /* ------------------------------------------------------------------------ *
  * Ultrasonic (HC-SR04)
