@@ -21,11 +21,11 @@
 #define OBSTACLE_SERVO_PIN              (12U)
 
 /* HC-SR04 Trigger: any free GPIO. */
-#define OBSTACLE_TRIG_PIN               (16U)
+#define OBSTACLE_TRIG_PIN               (0U)
 
 /* HC-SR04 Echo: must be an ODD pin (PWM channel B), because its PWM slice
  * times the echo pulse in hardware.  Feed it through a divider to 3.3 V. */
-#define OBSTACLE_ECHO_PIN               (17U)
+#define OBSTACLE_ECHO_PIN               (1U)
 
 /* ------------------------------------------------------------------------ *
  * Ultrasonic (HC-SR04)

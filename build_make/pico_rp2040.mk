@@ -23,6 +23,7 @@ SMP ?= 0
 # build select a reproducible entry point without duplicating the kernel tree.
 APP ?= demo
 BOARD ?= pico
+UART_MIRROR := 1
 
 ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test ultrasonic_test servo_test),$(APP))
 $(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, ultrasonic_test or servo_test)
@@ -41,9 +42,17 @@ endif
 #
 # Defaults to uart because it remains the early/panic and core qualification
 # profile.  The optional Phase 11 SMP USB-CDC profile is also qualified; it
-# retains UART as a mirror and adds a core-0-owned service task plus an SMP-safe
-# producer ring.
+# retains UART as a mirror on the general Pico profile and adds a core-0-owned
+# service task plus an SMP-safe producer ring.  The Robo-Pico robot profile
+# disables that mirror because GP0/GP1 belong to the ultrasonic sensor.
 CONSOLE ?= uart
+
+ifeq ($(BOARD),robo_pico_robot)
+ifneq ($(CONSOLE),usb_cdc)
+$(error BOARD=robo_pico_robot reserves GP0/GP1 for ultrasonic; use CONSOLE=usb_cdc)
+endif
+UART_MIRROR := 0
+endif
 
 # Optional Pico W radio profile.  The default remains byte-compatible with
 # the qualified release; WIFI=cyw43 adds the core-0-owned polling service and
@@ -257,6 +266,7 @@ endif
 ifeq ($(BOARD),robo_pico_robot)
 CFLAGS += -DBOARD_ROBO_PICO_ROBOT=1
 endif
+CFLAGS += -DTM_CONSOLE_UART=$(UART_MIRROR)
 
 ################################################################################
 # Console selection
@@ -285,7 +295,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)
 PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

@@ -11,7 +11,7 @@ EXPORT INT usermain(void)
     uint8_t left_level;
     uint8_t right_level;
     motion_config_default(&config);
-    tm_printf((UB *)"[motion-encoder] init=%d prc=%d (GP4/5 left, GP6/7 right; verify voltage first)\n",
+    tm_printf((UB *)"[motion-encoder] init=%d prc=%d (GP16/17 left, GP4/5 right; verify voltage first)\n",
               motion_encoder_init(&config), tk_get_prc());
     for (;;) {
         motion_encoder_get_snapshot(&snapshot);

@@ -15,6 +15,7 @@
 #define GPIO_PROC0_INTF (IO_BANK0_BASE + 0x110U)
 #define GPIO_PROC0_INTS (IO_BANK0_BASE + 0x120U)
 #define GPIO_EDGE_MASK 0xCU
+#define GPIO_IRQ_BANK_COUNT 4U
 
 static volatile int32_t encoder_counts[2];
 static volatile uint32_t encoder_invalid[2];
@@ -24,11 +25,18 @@ static motion_config_t encoder_config;
 static volatile uint8_t encoder_previous[2];
 static bool encoder_ready;
 static uint32_t encoder_proc_inte;
+static uint32_t encoder_irq_masks[GPIO_IRQ_BANK_COUNT];
 
 static uint8_t read_pair(uint8_t pin_a, uint8_t pin_b)
 {
     uint32_t input = in_w(GPIO_IN);
     return (uint8_t)(((input >> pin_a) & 1U) | (((input >> pin_b) & 1U) << 1U));
+}
+
+static void add_irq_pin(uint8_t pin)
+{
+    uint32_t bank = pin / 8U;
+    encoder_irq_masks[bank] |= GPIO_EDGE_MASK << ((pin & 7U) * 4U);
 }
 #endif
 
@@ -37,15 +45,23 @@ static void motion_encoder_isr(UINT intno)
 {
     uint8_t current;
     int8_t delta;
-    uint32_t intr_addr;
+    uint32_t bank;
     uint32_t pending;
+    bool encoder_pending = false;
     if (!encoder_ready) return;
-    intr_addr = GPIO_INTR_BASE + ((encoder_config.left_encoder_a / 8U) * 4U);
-    pending = in_w(intr_addr);
-    /* Acknowledge the actual edge bits before doing any decoding.  This
-     * prevents a burst of quadrature edges from starving the scheduler. */
-    if (pending != 0U) {
-        out_w(intr_addr, pending);
+    for (bank = 0U; bank < GPIO_IRQ_BANK_COUNT; ++bank) {
+        uint32_t intr_addr = GPIO_INTR_BASE + (bank * 4U);
+        pending = in_w(intr_addr) & encoder_irq_masks[bank];
+        /* Acknowledge only Buddy 2's GPIO edge bits.  The encoders may be
+         * split across different groups of eight GPIOs. */
+        if (pending != 0U) {
+            out_w(intr_addr, pending);
+            encoder_pending = true;
+        }
+    }
+    if (!encoder_pending) {
+        ClearInt(intno);
+        return;
     }
     ++motion_encoder_irq_count;
     current = read_pair(encoder_config.left_encoder_a, encoder_config.left_encoder_b);
@@ -70,13 +86,16 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
     return MOTION_RESULT_HARDWARE;
 #else
     T_DINT dint;
-    uint32_t enable_mask = 0U;
+    uint32_t bank;
     encoder_config = *config;
     encoder_counts[0] = 0;
     encoder_counts[1] = 0;
     encoder_invalid[0] = 0U;
     encoder_invalid[1] = 0U;
     motion_encoder_irq_count = 0U;
+    for (bank = 0U; bank < GPIO_IRQ_BANK_COUNT; ++bank) {
+        encoder_irq_masks[bank] = 0U;
+    }
     gpio_set_pin(encoder_config.left_encoder_a, GPIO_MODE_IN);
     gpio_set_pin(encoder_config.left_encoder_b, GPIO_MODE_IN);
     gpio_set_pin(encoder_config.right_encoder_a, GPIO_MODE_IN);
@@ -91,18 +110,24 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
     out_w(GPIO(encoder_config.right_encoder_b), GPIO_IE | GPIO_PUE | GPIO_SHEMITT);
     encoder_previous[0] = read_pair(encoder_config.left_encoder_a, encoder_config.left_encoder_b);
     encoder_previous[1] = read_pair(encoder_config.right_encoder_a, encoder_config.right_encoder_b);
-    enable_mask |= GPIO_EDGE_MASK << ((encoder_config.left_encoder_a & 7U) * 4U);
-    enable_mask |= GPIO_EDGE_MASK << ((encoder_config.left_encoder_b & 7U) * 4U);
-    enable_mask |= GPIO_EDGE_MASK << ((encoder_config.right_encoder_a & 7U) * 4U);
-    enable_mask |= GPIO_EDGE_MASK << ((encoder_config.right_encoder_b & 7U) * 4U);
-    out_w(GPIO_INTR_BASE + ((encoder_config.left_encoder_a / 8U) * 4U), enable_mask);
+    add_irq_pin(encoder_config.left_encoder_a);
+    add_irq_pin(encoder_config.left_encoder_b);
+    add_irq_pin(encoder_config.right_encoder_a);
+    add_irq_pin(encoder_config.right_encoder_b);
     encoder_proc_inte = GPIO_PROC0_INTE;
 #if TK_SUPPORT_SMP
     if (tk_get_prc() == 2) {
         encoder_proc_inte = GPIO_PROC1_INTE;
     }
 #endif
-    out_w(encoder_proc_inte + ((encoder_config.left_encoder_a / 8U) * 4U), enable_mask);
+    for (bank = 0U; bank < GPIO_IRQ_BANK_COUNT; ++bank) {
+        if (encoder_irq_masks[bank] != 0U) {
+            /* Clear stale edge flags, then enable without disturbing GPIO
+             * interrupt users in another pin group. */
+            out_w(GPIO_INTR_BASE + (bank * 4U), encoder_irq_masks[bank]);
+            set_w(encoder_proc_inte + (bank * 4U), encoder_irq_masks[bank]);
+        }
+    }
     dint.intatr = TA_HLNG;
     dint.inthdr = (FP)motion_encoder_isr;
     if (tk_def_int(MOTION_GPIO_IRQ, &dint) < E_OK) return MOTION_RESULT_HARDWARE;

@@ -123,7 +123,7 @@ failed; the corrected run passed.
 | Dynamic affinity | Task-to-processor assignment is static. |
 | Partitioned scheduling, EDF | Not implemented. |
 | Memory protection, execution budgets, temporal/fault isolation | Not implemented. |
-| On-board LED | The Pico W's LED is on the CYW43439 radio, not an RP2040 pin, so the liveness indicator is an external LED on `BOARD_LED_PIN` (GP16 by default, in `include/sys/sysdepend/pico_rp2040/sysdef.h`). GP23, GP24, GP25 and GP29 are reserved by the radio. |
+| On-board LED | The Pico W's LED is on the CYW43439 radio, not an RP2040 pin, so the liveness indicator is an external LED on `BOARD_LED_PIN` (GP19 by default, in `include/sys/sysdepend/pico_rp2040/sysdef.h`). GP16/GP17 are reserved for the left encoder; GP23, GP24, GP25 and GP29 are reserved by the radio. |
 
 ---
 
@@ -148,7 +148,7 @@ These are part of the qualification boundary, not optional tuning advice.
 5. **Any flash operation that disables or disrupts XIP must first park the other core** in SRAM-safe code. Flash erase/program was not exercised by this qualification and must not be added without that protocol.
 6. **Treat serial, I2C, ADC, DMA, PWM and other shared blocks as single-owner resources** unless an SMP-safe driver supplies its own serialization and interrupt-ownership policy. The UART qualification covers the synchronous monitor path used by this release, not arbitrary concurrent driver use.
 7. **Preserve the RP2040 core-1 NMI-mask/watchdog caution** from the datasheet: do not assume core 1 has the same NMI behaviour as core 0, and coordinate watchdog/reset actions across both processors.
-8. **On Pico W the CYW43439 remains powered down** in the qualified profiles. GP23, GP24, GP25 and GP29 are radio-connected and reserved; the external liveness LED defaults to GP16.
+8. **On Pico W the CYW43439 remains powered down** in the qualified profiles. GP23, GP24, GP25 and GP29 are radio-connected and reserved; the external liveness LED defaults to GP19.
 9. **TinyUSB state and USBCTRL interrupt delivery are owned by processor 1** (physical core 0). Producers on either processor may use `tm_printf`, but must not call TinyUSB directly. The whole-call console lock masks local interrupts, making `tm_printf` diagnostic output rather than hard-real-time.
 
 ---

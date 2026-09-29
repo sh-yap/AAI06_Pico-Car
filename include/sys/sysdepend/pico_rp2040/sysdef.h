@@ -81,7 +81,7 @@
  * BOARD_LED_PIN is the external LED used as the liveness indicator.  Change
  * it to any free GPIO that has an LED attached.
  */
-#define	BOARD_LED_PIN		16
+#define	BOARD_LED_PIN		19
 
 /*
  * Startup checkpoint diagnostic.
