@@ -199,7 +199,7 @@ endif
 endif
 
 #
-# Images are named after the profile they were built with.  Every image is
+# Images are named after the profile they were built with. Every image is
 # flashed by hand from a downloads folder, so identically-named artifacts are
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
@@ -285,8 +285,8 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)
-PROFILE_FILE := .build_profile
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)
+PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
 $(info Build profile is now $(PROFILE_ID); discarding objects built for another profile.)
