@@ -19,6 +19,10 @@ config/wifi_credentials.h
 config/network_config.h
 config/udp_test_config.h
 config/tcp_test_config.h
+config/telemetry_config.h
+
+# Local Buddy 4 telemetry captures.
+evidence/buddy4/*.csv
 
 # Python
 __pycache__/

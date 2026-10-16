@@ -37,7 +37,8 @@ typedef enum
     B4_FAULT_INVALID_SAMPLE,
     B4_FAULT_STALE_SAMPLE,
     B4_FAULT_READ_TIMEOUT,
-    B4_FAULT_REPEATED_READ
+    B4_FAULT_REPEATED_READ,
+    B4_FAULT_MAGNETOMETER
 } b4_types_fault_t;
 
 /** @brief Sensor and processing health levels.
@@ -103,12 +104,45 @@ typedef struct
     bool b_valid;
 } b4_types_sample_t;
 
+/** @brief One magnetometer sample in sensor counts.
+ *
+ * The timestamp is monotonic milliseconds since boot. The validity flag is
+ * false when the acquisition layer cannot use the sample, so a failed read
+ * never looks like a real magnetic measurement.
+ */
+typedef struct
+{
+    uint32_t timestamp_ms;
+    int16_t mag_x;
+    int16_t mag_y;
+    int16_t mag_z;
+    bool b_valid;
+} b4_types_mag_sample_t;
+
+/** @brief Turning classification from the sensed magnetic heading change.
+ *
+ * B4_TURN_UNKNOWN is reported when the magnetometer is missing, invalid, or
+ * stale, so an unavailable direction is never presented as a real one.
+ */
+typedef enum
+{
+    B4_TURN_UNKNOWN = 0,
+    B4_TURN_STRAIGHT,
+    B4_TURN_LEFT,
+    B4_TURN_RIGHT
+} b4_types_turn_t;
+
 /** @brief Public status snapshot for the latest processed sample.
  *
  * Axis samples retain sensor coordinates after offset calibration. Filtered
- * axes and vertical deviation are in milli-g. Hump peaks are absolute vertical
- * acceleration deviations, not physical height. Event flags describe the
- * latest processed sample and are not latched. Tilt uses configured signs.
+ * axes and vertical deviation are in milli-g. NOTE: roll_mg and
+ * roll_baseline_mg keep their names for the existing diagnostic formats but
+ * carry the filtered incline of the configured hump axis, which is pitch
+ * when the caster climbs the ramp. Hump peaks are absolute incline
+ * amplitudes in milli-g. A hump height estimate is a support-height
+ * difference in micrometres, valid only after a settled window was measured
+ * during that hump. Event flags describe the latest processed sample and are
+ * not latched. Tilt and turn use configured signs.
  */
 typedef struct
 {
@@ -117,13 +151,22 @@ typedef struct
     b4_types_tilt_t tilt;
     b4_types_motion_t motion;
     b4_types_hump_state_t hump_state;
+    b4_types_turn_t turn;
     b4_types_sample_t sample;
+    b4_types_mag_sample_t mag_sample;
     int32_t filtered_x_mg;
     int32_t filtered_y_mg;
     int32_t filtered_z_mg;
     int32_t vertical_deviation_mg;
+    int32_t roll_mg;
+    int32_t roll_baseline_mg;
+    int32_t turn_cross;
     uint32_t current_hump_peak_mg;
     uint32_t highest_hump_peak_mg;
+    uint32_t hump_peak_height_um;
+    uint32_t highest_hump_height_um;
+    bool b_hump_height_valid;
+    bool b_mag_valid;
     bool b_sample_stale;
     bool b_impact_event;
     bool b_hump_started_event;

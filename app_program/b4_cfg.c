@@ -21,6 +21,7 @@
 #define B4_CFG_ACCEL_ADDRESS_HIGH        0x19U
 #define B4_CFG_ACCEL_DATA_RATE_HZ          100U
 #define B4_CFG_ACCEL_RANGE_G                 2U
+#define B4_CFG_MAG_ADDRESS                0x1EU
 #define B4_CFG_MAX_SAMPLE_MG              2000
 #define B4_CFG_MAX_THRESHOLD_MG           6000U
 #define B4_CFG_MIN_CAL_SAMPLES                4U
@@ -28,6 +29,14 @@
 #define B4_CFG_MIN_FILTER_DIVISOR             1U
 #define B4_CFG_MAX_FILTER_DIVISOR            16U
 #define B4_CFG_MAX_AXIS                       2U
+#define B4_CFG_MIN_HUMP_LEVER_UM          50000U
+#define B4_CFG_MAX_HUMP_LEVER_UM         300000U
+#define B4_CFG_MAX_SETTLE_BAND_MG           500U
+#define B4_CFG_MIN_SETTLE_SAMPLES             2U
+#define B4_CFG_MAX_BASELINE_DIVISOR         100U
+#define B4_CFG_MAX_TURN_THRESHOLD     100000000U
+#define B4_CFG_MIN_TURN_WINDOW                2U
+#define B4_CFG_MAX_TURN_WINDOW              100U
 
 /** @brief Return an absolute milli-g value without signed overflow.
  *
@@ -105,26 +114,44 @@ b4_cfg_default (void)
     config.accel_i2c_address = B4_CFG_ACCEL_ADDRESS_HIGH;
     config.accel_data_rate_hz = B4_CFG_ACCEL_DATA_RATE_HZ;
     config.accel_range_g = B4_CFG_ACCEL_RANGE_G;
+    config.mag_i2c_address = B4_CFG_MAG_ADDRESS;
+    config.mag_data_rate_hz = B4_CFG_MAG_RATE_30_HZ;
     config.i2c_frequency_hz = B4_CFG_I2C_FREQUENCY_HZ;
     config.forward_axis = B4_CFG_AXIS_Y;
     config.lateral_axis = B4_CFG_AXIS_X;
     config.vertical_axis = B4_CFG_AXIS_Z;
+    /* NOTE: Only the front caster meets the ramp (user decision,
+     * 2026-10-17), so the hump pitches the car about the rear axle. */
+    config.hump_axis = B4_CFG_AXIS_Y;
     config.forward_sign = 1;
     config.lateral_sign = 1;
     config.vertical_sign = 1;
+    config.turn_sign = 1;
     config.gravity_reference_mg = 1000U;
     config.stale_after_ms = 100U;
+    config.mag_stale_after_ms = 500U;
     config.motion_threshold_mg = 120U;
     config.tilt_threshold_mg = 250U;
     config.impact_delta_threshold_mg = 700U;
     config.impact_refractory_ms = 200U;
-    config.hump_start_threshold_mg = 100U;
-    config.hump_hysteresis_mg = 40U;
-    config.hump_complete_threshold_mg = 60U;
+    config.hump_start_threshold_mg = 50U;
+    config.hump_hysteresis_mg = 25U;
+    config.hump_complete_threshold_mg = 25U;
     config.calibration_noise_limit_mg = 35U;
+    /* Rear axle to caster contact, measured by ruler as about 80 mm. */
+    config.hump_lever_um = 80000U;
+    config.height_settle_band_mg = 20U;
+    config.height_baseline_gate_mg = 25U;
+    config.turn_cross_threshold = 20000U;
     config.filter_divisor = 4U;
-    config.hump_confirm_samples = 2U;
-    config.hump_complete_samples = 3U;
+    config.height_settle_samples = 30U;
+    config.height_baseline_divisor = 8U;
+    config.turn_window_samples = 20U;
+    /* WARNING: Ten samples is about 0.3 s at the measured 31 Hz loop. Motor
+     * start and stop jolts on flat ground stayed under six samples, so
+     * retune this count if the acquisition rate changes. */
+    config.hump_confirm_samples = 10U;
+    config.hump_complete_samples = 5U;
     config.max_consecutive_read_failures = 3U;
 
     return (config);
@@ -153,12 +180,15 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (b4_cfg_axis_is_valid(p_config->forward_axis)) &&
             (b4_cfg_axis_is_valid(p_config->lateral_axis)) &&
             (b4_cfg_axis_is_valid(p_config->vertical_axis)) &&
+            (b4_cfg_axis_is_valid(p_config->hump_axis)) &&
+            (p_config->hump_axis != p_config->vertical_axis) &&
             (p_config->forward_axis != p_config->lateral_axis) &&
             (p_config->forward_axis != p_config->vertical_axis) &&
             (p_config->lateral_axis != p_config->vertical_axis) &&
             (b4_cfg_sign_is_valid(p_config->forward_sign)) &&
             (b4_cfg_sign_is_valid(p_config->lateral_sign)) &&
-            (b4_cfg_sign_is_valid(p_config->vertical_sign));
+            (b4_cfg_sign_is_valid(p_config->vertical_sign)) &&
+            (b4_cfg_sign_is_valid(p_config->turn_sign));
 
         b_addresses_valid =
             (B4_CFG_ACCEL_ADDRESS_LOW == p_config->accel_i2c_address) ||
@@ -174,6 +204,9 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (p_config->accel_data_rate_hz !=
              B4_CFG_ACCEL_DATA_RATE_HZ) ||
             (p_config->accel_range_g != B4_CFG_ACCEL_RANGE_G) ||
+            (p_config->mag_i2c_address != B4_CFG_MAG_ADDRESS) ||
+            ((p_config->mag_data_rate_hz != B4_CFG_MAG_RATE_30_HZ) &&
+             (p_config->mag_data_rate_hz != B4_CFG_MAG_RATE_75_HZ)) ||
             (0U == p_config->gravity_reference_mg) ||
             (p_config->gravity_reference_mg >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
@@ -184,6 +217,7 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (b4_cfg_abs_mg(p_config->bias_z_mg) >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
             (0U == p_config->stale_after_ms) ||
+            (0U == p_config->mag_stale_after_ms) ||
             (0U == p_config->motion_threshold_mg) ||
             (p_config->motion_threshold_mg >
              B4_CFG_MAX_THRESHOLD_MG) ||
@@ -206,8 +240,26 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (0U == p_config->calibration_noise_limit_mg) ||
             (p_config->calibration_noise_limit_mg >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
+            (p_config->hump_lever_um < B4_CFG_MIN_HUMP_LEVER_UM) ||
+            (p_config->hump_lever_um > B4_CFG_MAX_HUMP_LEVER_UM) ||
+            (0U == p_config->height_settle_band_mg) ||
+            (p_config->height_settle_band_mg > B4_CFG_MAX_SETTLE_BAND_MG) ||
+            (p_config->height_baseline_gate_mg <
+             p_config->height_settle_band_mg) ||
+            (p_config->height_baseline_gate_mg >
+             B4_CFG_MAX_SETTLE_BAND_MG) ||
+            (0U == p_config->turn_cross_threshold) ||
+            (p_config->turn_cross_threshold >
+             B4_CFG_MAX_TURN_THRESHOLD) ||
             (p_config->filter_divisor < B4_CFG_MIN_FILTER_DIVISOR) ||
             (p_config->filter_divisor > B4_CFG_MAX_FILTER_DIVISOR) ||
+            (p_config->height_settle_samples < B4_CFG_MIN_SETTLE_SAMPLES) ||
+            (p_config->height_settle_samples > B4_CFG_MAX_SETTLE_SAMPLES) ||
+            (0U == p_config->height_baseline_divisor) ||
+            (p_config->height_baseline_divisor >
+             B4_CFG_MAX_BASELINE_DIVISOR) ||
+            (p_config->turn_window_samples < B4_CFG_MIN_TURN_WINDOW) ||
+            (p_config->turn_window_samples > B4_CFG_MAX_TURN_WINDOW) ||
             (p_config->hump_confirm_samples < 2U) ||
             (0U == p_config->hump_complete_samples) ||
             (0U == p_config->max_consecutive_read_failures))

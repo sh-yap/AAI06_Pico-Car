@@ -20,6 +20,13 @@ b4_proc_init (const b4_cfg_config_t * p_config);
 b4_types_result_t
 b4_proc_process (const b4_types_sample_t * p_sample);
 
+/** Process one magnetometer sample and update turning classification.
+ *
+ * Pass an invalid sample after a failed read so the classifier reports an
+ * unavailable direction instead of reusing the last one. */
+b4_types_result_t
+b4_proc_process_magnetometer (const b4_types_mag_sample_t * p_mag_sample);
+
 /** Copy the latest status and mark it stale when its age exceeds the limit. */
 b4_types_result_t
 b4_proc_get_status (uint32_t now_ms, b4_types_status_t * p_status);
