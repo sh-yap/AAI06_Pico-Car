@@ -15,6 +15,13 @@
 #define B4_CFG_AXIS_Y 1U
 #define B4_CFG_AXIS_Z 2U
 
+/** Supported magnetometer data output rates in hertz. */
+#define B4_CFG_MAG_RATE_30_HZ 30U
+#define B4_CFG_MAG_RATE_75_HZ 75U
+
+/** Largest accepted settled-window sample count. */
+#define B4_CFG_MAX_SETTLE_SAMPLES 100U
+
 /** @brief ROBO-PICO hardware, calibration, and processing configuration.
  *
  * The ROBO-PICO IMU uses Grove port 2, which maps I2C1 to SDA=GP2 and
@@ -22,11 +29,13 @@
  * units in their names.
  *
  * I2C units are zero-based. SDA and SCL fields contain GPIO numbers. The
- * address uses the seven-bit accelerometer form. Rates are in hertz and the
- * accelerometer range uses g.
+ * accelerometer and magnetometer addresses use the seven-bit form. Rates are
+ * in hertz and the accelerometer range uses g. The magnetometer rate must be
+ * one the sensor can produce, 30 or 75 Hz.
  *
  * Axis fields use B4_CFG_AXIS_X, B4_CFG_AXIS_Y, or B4_CFG_AXIS_Z. Each sign
  * is +1 or -1; positive maps to forward, right, or up for the chosen axis.
+ * The turn sign maps the sensed cross product to left or right.
  *
  * Bias fields are in milli-g. A bias is the stationary residual of one axis
  * in sensor coordinates, measured minus expected, so a positive bias means
@@ -37,7 +46,16 @@
  *
  * Processing thresholds are in milli-g. Sample age and event intervals are
  * in milliseconds. Sample counts are consecutive samples. A filter divisor
- * of one passes each input directly.
+ * of one passes each input directly. hump_axis selects the sensor axis
+ * whose inclination a hump changes, the forward axis when the caster climbs
+ * the ramp. hump_lever_um is the distance in micrometres from the pivot
+ * contacts to the raised contact, the rear axle to caster contact for a
+ * caster hump. height_settle_band_mg is the largest peak-to-peak incline
+ * spread that still counts as settled. height_baseline_gate_mg is the
+ * incline deviation above which the flat-ground baseline stops adapting.
+ * hump_confirm_samples is the number of consecutive samples above the start
+ * threshold before a hump is accepted, so a brief motor jolt is rejected.
+ * turn_cross_threshold is in squared magnetometer counts.
  */
 typedef struct
 {
@@ -47,18 +65,23 @@ typedef struct
     uint8_t accel_i2c_address;
     uint8_t accel_data_rate_hz;
     uint8_t accel_range_g;
+    uint8_t mag_i2c_address;
+    uint8_t mag_data_rate_hz;
     uint32_t i2c_frequency_hz;
     uint8_t forward_axis;
     uint8_t lateral_axis;
     uint8_t vertical_axis;
+    uint8_t hump_axis;
     int8_t forward_sign;
     int8_t lateral_sign;
     int8_t vertical_sign;
+    int8_t turn_sign;
     int32_t bias_x_mg;
     int32_t bias_y_mg;
     int32_t bias_z_mg;
     uint32_t gravity_reference_mg;
     uint32_t stale_after_ms;
+    uint32_t mag_stale_after_ms;
     uint32_t motion_threshold_mg;
     uint32_t tilt_threshold_mg;
     uint32_t impact_delta_threshold_mg;
@@ -67,7 +90,14 @@ typedef struct
     uint32_t hump_hysteresis_mg;
     uint32_t hump_complete_threshold_mg;
     uint32_t calibration_noise_limit_mg;
+    uint32_t hump_lever_um;
+    uint32_t height_settle_band_mg;
+    uint32_t height_baseline_gate_mg;
+    uint32_t turn_cross_threshold;
     uint8_t filter_divisor;
+    uint8_t height_settle_samples;
+    uint8_t height_baseline_divisor;
+    uint8_t turn_window_samples;
     uint8_t hump_confirm_samples;
     uint8_t hump_complete_samples;
     uint8_t max_consecutive_read_failures;
