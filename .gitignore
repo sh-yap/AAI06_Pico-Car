@@ -23,6 +23,7 @@ config/telemetry_config.h
 
 # Local Buddy 4 telemetry captures.
 evidence/buddy4/*.csv
+config/mqtt_config.h
 
 # Python
 __pycache__/

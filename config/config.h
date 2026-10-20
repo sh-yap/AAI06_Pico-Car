@@ -46,7 +46,7 @@
 #define CNF_MAX_FLGID		16	/* Event flag */
 #define CNF_MAX_MBXID		4	/* Mailbox*/
 #define CNF_MAX_MTXID		4	/* Mutex */
-#define CNF_MAX_MBFID		4	/* Message buffer */
+#define CNF_MAX_MBFID		8	/* Message buffer (demo 1 + comms 2 + team) */
 #define CNF_MAX_MPLID		4	/* Memory pool */
 #define CNF_MAX_MPFID		4	/* Fixed size memory pool */
 #define CNF_MAX_CYCID		4	/* Cyclic handler */

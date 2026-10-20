@@ -1,0 +1,44 @@
+MQTT log report: 20260927_010815_T2_run.log
+Duration: 210.0 s   messages: 801   avg rate: 3.8 msg/s   payload: 301 B/s
+
+topic                        count     msg/s  avg bytes
+robot/command                    6      0.03          5
+robot/event/barcode             11      0.05         47
+robot/event/command              6      0.03         39
+robot/event/hump                 8      0.04         43
+robot/event/obstacle             5      0.02        116
+robot/event/run                  1      0.00         31
+robot/heartbeat                210      1.00         68
+robot/info                       2      0.01         48
+robot/state                     26      0.12         49
+robot/status                     1      0.00          6
+robot/summary                    2      0.01        103
+robot/telemetry/line            96      0.46         53
+robot/telemetry/motion         356      1.70         94
+robot/telemetry/terrain         71      0.34         98
+
+Heartbeat: 210 received, 0 missing in 0 gap(s), 0 reboot(s), longest silence 3.6 s
+Heartbeat interval by the Pico's own clock: max 1.02 s (1.00 = sent on time)
+  01:11:05.055  no heartbeat arrived for 3.6 s
+Command acknowledgement: 6 commands, avg 72 ms, max 107 ms (laptop -> Pico -> laptop)
+Events dropped on the robot (max ev_drop): 0
+
+Timeline:
+  01:08:17.626  status: online
+  01:08:17.627  SUMMARY: {"v":1,"t":92730,"run_ms":27060,"dist_mm":4920,"max_hump_mm":41,"humps":3,"barcodes":4,"obstacles":2}
+  01:08:17.627  firmware: {"v":1,"t":5530,"build":"Sep 27 2026 01:06:54"}
+  01:09:12.751  command sent: hello
+  01:09:12.858  command ack (107 ms): {"v":1,"t":77150,"cmd":"unknown","ok":0}
+  01:09:21.456  command sent: status
+  01:09:21.477  command ack (21 ms): {"v":1,"t":85770,"cmd":"status","ok":1}
+  01:09:21.497  firmware: {"v":1,"t":85770,"build":"Sep 27 2026 01:06:54"}
+  01:09:27.667  command sent: start
+  01:09:27.697  command ack (30 ms): {"v":1,"t":91990,"cmd":"start","ok":1}
+  01:09:27.817  run: {"v":1,"t":92070,"run":"BEGIN"}
+  01:09:35.015  command sent: start
+  01:09:35.099  command ack (84 ms): {"v":1,"t":99330,"cmd":"start","ok":1}
+  01:10:31.400  command sent: stop
+  01:10:31.490  command ack (90 ms): {"v":1,"t":155750,"cmd":"stop","ok":1}
+  01:10:31.529  SUMMARY: {"v":1,"t":155760,"run_ms":63690,"dist_mm":11580,"max_hump_mm":48,"humps":8,"barcodes":11,"obstacles":5}
+  01:10:33.437  command sent: stop
+  01:10:33.538  command ack (101 ms): {"v":1,"t":157750,"cmd":"stop","ok":1}

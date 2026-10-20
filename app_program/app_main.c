@@ -47,6 +47,10 @@
 
 #include "usb_console_compat.h"
 #include "demo_tasks.h"
+#include "comms.h"
+#include "comms_demo.h"
+#include "build_info.h"
+#include "timing_probe.h"
 
 #if TM_WIFI_CYW43
 /* Plain C types on purpose - see the note in cyw43_utk.h. */
@@ -199,6 +203,7 @@ LOCAL void monitor_task(INT stacd, void *exinf)
 	tk_dly_tsk(500);
 
 	tm_printf((UB *)"\n=== uT-Kernel 3.0 / RP2040 demo ===\n");
+	tm_printf((UB *)"build %s\n", g_build_id);
 #if TK_SUPPORT_SMP
 	tm_printf((UB *)"SMP build: %d processors\n", TK_MAX_CORE);
 #else
@@ -272,6 +277,16 @@ LOCAL void wifi_status_task(INT stacd, void *exinf)
 	UW			stalled_polls = 0;
 	UW			shown_session = 0xffffffffU;
 	UW			summarised = 0xffffffffU;
+	UW			last_rejoin = 0;
+	UW			last_losses = 0;
+	UB			last_ip[4] = {0, 0, 0, 0};
+	BOOL			have_ip = FALSE;
+#if TM_WIFI_MQTT
+	UW			last_mqtt_state = 0xffffffffU;
+	UW			last_cmd_count = 0;
+	UW			last_hb_report = 0;
+	UW			waiting_polls = 0;
+#endif
 	INT			i;
 
 	(void)stacd; (void)exinf;
@@ -301,6 +316,34 @@ LOCAL void wifi_status_task(INT stacd, void *exinf)
 			}
 		}
 
+		/* Address changes after the first lease (e.g. after a rejoin);
+		   the first one is reported by the DHCP line below. */
+		if(st.dhcp_complete
+		   && (st.netif_ip[0] != last_ip[0] || st.netif_ip[1] != last_ip[1]
+		       || st.netif_ip[2] != last_ip[2] || st.netif_ip[3] != last_ip[3])) {
+			if(have_ip) {
+				fmt_ipv4(ip, st.netif_ip);
+				tm_printf((UB *)"[wifi] address now %s\n", ip);
+			}
+			for(i = 0; i < 4; i++) last_ip[i] = st.netif_ip[i];
+			have_ip = 1;
+		}
+
+		/* Rejoin attempts after a lost (or failed) association. */
+		if(st.link_losses != last_losses) {
+			last_losses = st.link_losses;
+			tm_printf((UB *)"[wifi] not associated (status %d),"
+				       " rejoining in %u ms\n",
+				  st.link_status, st.rejoin_delay_ms);
+		}
+		if(st.rejoin_attempts != last_rejoin) {
+			last_rejoin = st.rejoin_attempts;
+			tm_printf((UB *)"[wifi] rejoin attempt %u (status %d),"
+				       " next try in %u ms\n",
+				  st.rejoin_attempts, st.link_status,
+				  st.rejoin_delay_ms);
+		}
+
 		/* DHCP completes some time after the link comes up, so report it
 		   on its own transition.  Without this the address is only ever
 		   printed in the rare case it lands in the same poll as link-up,
@@ -316,6 +359,70 @@ LOCAL void wifi_status_task(INT stacd, void *exinf)
 					  ip, gw, dns);
 			}
 		}
+
+#if TM_WIFI_MQTT
+		/* MQTT session: report state changes, every command received,
+		   and a heartbeat count now and then. */
+		if(st.mqtt_state != last_mqtt_state) {
+			last_mqtt_state = st.mqtt_state;
+			fmt_ipv4(ip, st.mqtt_broker);
+			if(st.mqtt_state == CYW43_MQTT_CONNECTING) {
+				tm_printf((UB *)"[mqtt] connecting to %s:%u (attempt %u)\n",
+					  ip, st.mqtt_port, st.mqtt_connect_attempts);
+			} else if(st.mqtt_state == CYW43_MQTT_CONNECTED) {
+				tm_printf((UB *)"[mqtt] CONNECTED to %s:%u\n",
+					  ip, st.mqtt_port);
+			} else if(st.mqtt_state == CYW43_MQTT_BACKOFF) {
+				tm_printf((UB *)"[mqtt] not connected (err=%d), retry in %u ms\n",
+					  st.mqtt_last_error, st.mqtt_retry_delay_ms);
+			}
+		}
+		/* While not connected, say every ~10 s exactly what is missing,
+		   so a stalled connection is never silent. */
+		if(st.mqtt_state == CYW43_MQTT_CONNECTED) {
+			waiting_polls = 0;
+		} else if(++waiting_polls >= 50U) {	/* 50 x 200 ms */
+			waiting_polls = 0;
+			fmt_ipv4(ip, st.netif_ip);
+			tm_printf((UB *)"[net] waiting: join=%d link=%u ip=%s"
+				       " dhcp=%u/%u mqtt_state=%u err=%d"
+				       " attempts=%u\n",
+				  st.link_status, st.netif_link_up, ip,
+				  st.dhcp_state, st.dhcp_tries, st.mqtt_state,
+				  st.mqtt_last_error, st.mqtt_connect_attempts);
+			tm_printf((UB *)"[net]   radio: polls=%u js=%u jc=%u jres=%d"
+				       " rj=%u losses=%u tries=%u\n",
+				  st.poll_count, st.join_started, st.join_complete,
+				  st.join_result, st.rejoin_active, st.link_losses,
+				  st.rejoin_attempts);
+		}
+		if(st.mqtt_cmd_count != last_cmd_count) {
+			UB	cmd[CYW43_MQTT_CMD_MAX + 1];
+			UW	n = st.mqtt_cmd_len;
+
+			last_cmd_count = st.mqtt_cmd_count;
+			if(n > CYW43_MQTT_CMD_MAX) n = CYW43_MQTT_CMD_MAX;
+			for(i = 0; i < (INT)n; i++) cmd[i] = st.mqtt_cmd_payload[i];
+			cmd[n] = '\0';
+			tm_printf((UB *)"[mqtt] command #%u: \"%s\"\n",
+				  st.mqtt_cmd_count, cmd);
+		}
+		if(st.mqtt_published >= last_hb_report + 50U) {
+			comms_stats_t	cs;
+
+			comms_get_stats(&cs);
+			last_hb_report = st.mqtt_published;
+			tm_printf((UB *)"[mqtt] published=%u errors=%u"
+				       "  telemetry=%u events=%u dropped=%u\n",
+				  st.mqtt_published, st.mqtt_publish_errors,
+				  cs.telemetry_sent, cs.events_sent,
+				  cs.events_dropped);
+		}
+		if(!st.udp_enabled) {
+			tk_dly_tsk(WIFI_BUSY_MS);
+			continue;
+		}
+#endif
 
 		if(!st.udp_enabled) {
 			tk_dly_tsk(WIFI_IDLE_MS);
@@ -511,7 +618,14 @@ EXPORT INT usermain(void)
 	semid = tk_cre_sem(&csem); if(!made("sem", semid)) return 1;
 	flgid = tk_cre_flg(&cflg); if(!made("flg", flgid)) return 1;
 
-	tid = tk_cre_tsk(&ctsk_blink);    if(made("tsk(blink)",    tid)) tk_sta_tsk(tid, 0);
+	/* Communication API: before any task that may report telemetry. */
+	if(!comms_init()) tm_printf((UB *)"[init] comms_init failed\n");
+#if COMMS_DEMO
+	if(!comms_demo_start()) tm_printf((UB *)"[init] comms demo failed\n");
+	if(!timing_probe_start()) tm_printf((UB *)"[init] timing probe failed\n");
+#endif
+
+	tid = tk_cre_tsk(&ctsk_blink);   if(made("tsk(blink)",    tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_monitor);  if(made("tsk(monitor)",  tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_consumer); if(made("tsk(consumer)", tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_producer); if(made("tsk(producer)", tid)) tk_sta_tsk(tid, 0);

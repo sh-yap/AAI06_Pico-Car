@@ -31,6 +31,9 @@
 #if TM_WIFI_STATIC || TM_WIFI_DHCP
 #include "lwip_utk_ipv4.h"
 #endif
+#if TM_WIFI_MQTT
+#include "lwip_utk_mqtt.h"
+#endif
 #if TM_WIFI_STATIC
 #include "network_config.h"
 #endif
@@ -42,6 +45,18 @@
 #define CYW43_JOIN_TIMEOUT_US 30000000ULL
 #define CYW43_DHCP_TIMEOUT_US 30000000ULL
 #define CYW43_DNS_TIMEOUT_US  30000000ULL
+/* Rejoin back-off: first retry soon after the loss, then double up to the
+ * ceiling.  The minimum spacing is longer than a normal WPA2 join so a
+ * retry never interrupts an attempt that is still in progress. */
+#define CYW43_REJOIN_FIRST_MS 2000U
+#define CYW43_REJOIN_MIN_MS   5000U
+#define CYW43_REJOIN_MAX_MS   15000U
+/* When the AP vanishes the driver reports link-down but keeps its join
+ * state ACTIVE, and the radio firmware retries on its own (a 34 s hotspot
+ * outage recovered this way on hardware), and a join started with the AP
+ * absent can sit in that state indefinitely.  Only if neither has worked
+ * after this long do we step in and force a fresh join. */
+#define CYW43_LINK_STUCK_US   20000000ULL
 
 #if TM_WIFI_JOIN
 #include "wifi_credentials.h"
@@ -102,6 +117,7 @@ static T_CYW43_UTK_STATUS radio_status = {
     .ipv4_config_result = -6,
     .ping_send_result = -6,
     .ping_result = -3,
+    .mqtt_enabled = TM_WIFI_MQTT,
 };
 
 static void status_publish_begin(void)
@@ -133,6 +149,10 @@ static void update_netif_status(void)
     for(unsigned int i = 0; i < sizeof(radio_status.netif_mac); i++) {
         radio_status.netif_mac[i] = netif->hwaddr[i];
     }
+    radio_status.netif_ip[0] = ip4_addr1(netif_ip4_addr(netif));
+    radio_status.netif_ip[1] = ip4_addr2(netif_ip4_addr(netif));
+    radio_status.netif_ip[2] = ip4_addr3(netif_ip4_addr(netif));
+    radio_status.netif_ip[3] = ip4_addr4(netif_ip4_addr(netif));
     radio_status.link_up = radio_status.netif_link_up;
 }
 #endif
@@ -278,6 +298,40 @@ static void update_bulk_status(void)
 }
 #endif
 
+#if TM_WIFI_MQTT
+typedef char cyw43_mqtt_cmd_size_matches[
+	(LWIP_UTK_MQTT_CMD_MAX == CYW43_MQTT_CMD_MAX
+	 && LWIP_UTK_MQTT_CONNECTED == CYW43_MQTT_CONNECTED
+	 && LWIP_UTK_MQTT_BACKOFF == CYW43_MQTT_BACKOFF) ? 1 : -1];
+
+static void update_mqtt_status(void)
+{
+    lwip_utk_mqtt_status_t status;
+
+    lwip_utk_mqtt_get_status(&status);
+    radio_status.mqtt_state = status.state;
+    radio_status.mqtt_last_error = status.last_error;
+    radio_status.mqtt_connect_attempts = status.connect_attempts;
+    radio_status.mqtt_connects = status.connects;
+    radio_status.mqtt_disconnects = status.disconnects;
+    radio_status.mqtt_retry_delay_ms = status.retry_delay_ms;
+    radio_status.mqtt_published = status.published;
+    radio_status.mqtt_publish_errors = status.publish_errors;
+    radio_status.mqtt_port = status.port;
+    for(unsigned int i = 0; i < sizeof(status.broker); i++) {
+        radio_status.mqtt_broker[i] = status.broker[i];
+    }
+    /* Copy the payload only when a new command has arrived. */
+    if(status.cmd_count != radio_status.mqtt_cmd_count) {
+        for(unsigned int i = 0; i < status.cmd_len; i++) {
+            radio_status.mqtt_cmd_payload[i] = status.cmd_payload[i];
+        }
+        radio_status.mqtt_cmd_len = status.cmd_len;
+        radio_status.mqtt_cmd_count = status.cmd_count;
+    }
+}
+#endif
+
 #if TM_WIFI_DNS
 static void copy_ip4(uint8_t dst[4], const ip4_addr_t *src);
 static uint64_t dns_started_us;
@@ -386,7 +440,10 @@ static void update_dhcp_status(void)
     uint64_t now = time_us_64();
 
     radio_status.dhcp_started = (dhcp != NULL);
-    if(dhcp != NULL) radio_status.dhcp_tries = dhcp->tries;
+    if(dhcp != NULL) {
+        radio_status.dhcp_tries = dhcp->tries;
+        radio_status.dhcp_state = dhcp->state;
+    }
     if(radio_status.netif_link_up && dhcp_started_us == 0) {
         dhcp_started_us = now;
     }
@@ -432,6 +489,97 @@ void cyw43_utk_link_state_changed(int up)
     if(!up) radio_status.link_status = CYW43_LINK_DOWN;
     mp_memory_barrir();
 }
+
+#if TM_WIFI_JOIN
+static uint64_t rejoin_next_us;
+static uint64_t rssi_read_us;
+#define CYW43_RSSI_PERIOD_US  5000000ULL
+#if TM_WIFI_NETIF
+static uint64_t link_down_since_us;
+#endif
+
+/* Keeps the station associated after the one-shot boot join has finished.
+ * Called on every poll; costs a status read unless a rejoin is due.  The
+ * netif and DHCP need nothing extra: lwIP restarts DHCP on link-up. */
+static void service_rejoin(uint64_t now)
+{
+    int32_t link = cyw43_wifi_link_status(&cyw43_state, CYW43_ITF_STA);
+    bool connected;
+    bool stuck = false;
+
+    radio_status.link_status = link;
+    /* The driver reports CYW43_LINK_JOIN from the moment a join is
+     * *started*, so on its own it cannot tell success from an attempt in
+     * progress.  With a netif, the link-up callback is the real proof. */
+#if TM_WIFI_NETIF
+    connected = (link == CYW43_LINK_JOIN) && radio_status.netif_link_up;
+    /* Joined as far as the driver knows, but no link: give the radio
+     * firmware (or our own join) CYW43_LINK_STUCK_US to finish first. */
+    if(link == CYW43_LINK_JOIN && !radio_status.netif_link_up) {
+        if(link_down_since_us == 0) link_down_since_us = now;
+        stuck = (now - link_down_since_us) >= CYW43_LINK_STUCK_US;
+    } else {
+        link_down_since_us = 0;
+    }
+#else
+    connected = (link == CYW43_LINK_JOIN);
+#endif
+    if(connected) {
+        if(radio_status.rejoin_active) {
+            radio_status.rejoin_active = 0;
+            radio_status.rejoins++;
+        }
+        /* Refresh the signal level now and then.  Rate-limited: a read is
+           a blocking ioctl, and when it fails (seen after a quick replug)
+           retrying on every 2 ms poll slowed the whole radio loop so much
+           that heartbeats stretched from 1.0 s to 1.7 s. */
+        if(now - rssi_read_us >= CYW43_RSSI_PERIOD_US) {
+            int32_t rssi;
+
+            rssi_read_us = now;
+            if(cyw43_wifi_get_rssi(&cyw43_state, &rssi) == 0) {
+                radio_status.link_rssi = rssi;
+            }
+        }
+        radio_status.rejoin_delay_ms = 0;
+        return;
+    }
+
+    if(!radio_status.rejoin_active) {
+        /* Not connected, but a join may still be under way: only a
+         * reported failure, or a link stuck down for too long, counts
+         * as lost. */
+        if(link == CYW43_LINK_JOIN && !stuck) return;
+        /* Just noticed the loss (or the boot join failed). */
+        radio_status.rejoin_active = 1;
+        radio_status.link_losses++;
+        radio_status.rejoin_delay_ms = CYW43_REJOIN_FIRST_MS;
+        rejoin_next_us = now + (uint64_t)CYW43_REJOIN_FIRST_MS * 1000ULL;
+        return;
+    }
+
+    if(now < rejoin_next_us) return;
+
+    /* Work out the next wait before joining: the join call blocks on the
+     * radio bus, and a reader copying the status meanwhile should already
+     * see this attempt's number together with its wait. */
+    if(radio_status.rejoin_delay_ms < CYW43_REJOIN_MIN_MS) {
+        radio_status.rejoin_delay_ms = CYW43_REJOIN_MIN_MS;
+    } else if(radio_status.rejoin_delay_ms < CYW43_REJOIN_MAX_MS) {
+        radio_status.rejoin_delay_ms *= 2U;
+        if(radio_status.rejoin_delay_ms > CYW43_REJOIN_MAX_MS) {
+            radio_status.rejoin_delay_ms = CYW43_REJOIN_MAX_MS;
+        }
+    }
+    rejoin_next_us = now + (uint64_t)radio_status.rejoin_delay_ms * 1000ULL;
+    radio_status.rejoin_attempts++;
+
+    (void)cyw43_wifi_join(&cyw43_state,
+                          sizeof(wifi_ssid) - 1, wifi_ssid,
+                          sizeof(wifi_password) - 1, wifi_password,
+                          UTK_WIFI_AUTH, NULL, CYW43_CHANNEL_NONE);
+}
+#endif
 
 static int scan_result(void *env, const cyw43_ev_scan_result_t *result)
 {
@@ -546,6 +694,14 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
         lwip_utk_ipv4_poll(&cyw43_state.netif[CYW43_ITF_STA]);
         update_ipv4_status();
 #endif
+#if TM_WIFI_MQTT
+        /* Not gated on dhcp_complete: that flag is one-shot and records a
+         * timeout for good if the first lease is slow (e.g. the AP was off
+         * at boot), which would keep MQTT off forever.  The session checks
+         * link and address itself on every poll instead. */
+        lwip_utk_mqtt_poll(&cyw43_state.netif[CYW43_ITF_STA]);
+        update_mqtt_status();
+#endif
         radio_status.poll_count++;
         radio_status.scan_active = cyw43_wifi_scan_active(&cyw43_state);
         if(was_scanning && !radio_status.scan_active) {
@@ -595,6 +751,8 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
                 mp_memory_barrir();
                 radio_status.join_complete = 1;
             }
+        } else if(radio_status.join_complete) {
+            service_rejoin(time_us_64());
         }
 #endif
         status_publish_end();
