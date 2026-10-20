@@ -53,13 +53,15 @@ make -C tests/motion test
 | --- | --- |
 | Motor 1 A/B | GP8 / GP9 |
 | Motor 2 A/B | GP10 / GP11 |
-| Left encoder A/B | GP4 / GP5 |
-| Right encoder A/B | GP6 / GP7 |
+| Left encoder A/B | GP16 / GP17 |
+| Right encoder A/B | GP4 / GP5 |
 | Proposed I2C1 | GP2 / GP3 |
 | PWM | 10 kHz, TOP 12499, divider 1 |
 
 Encoder voltage/output type, motor voltage/current and PH2.0-6P orientation
-must be verified before applying power. The `robo_pico_robot` profile releases
+must be verified before applying power. GP16/GP17 are dedicated to the left
+encoder in the robot profile; the status LED is on GP19 and the ultrasonic
+pair is GP6/GP7. The `robo_pico_robot` profile releases
 PWM reset and avoids assigning GP8/GP9 to startup I2C0; the normal `pico`
 startup remains unchanged.
 

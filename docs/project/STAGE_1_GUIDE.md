@@ -16,9 +16,9 @@ do not establish hardware qualification of the newer versions.
 
 - Use a USB data cable and the Pico W's micro-USB connection.
 - Disconnect external motors, servos, and sensor wiring for this platform test.
-- Do not fit an ESP-01 module on GP16/GP17 during the demo: GP16 is its liveness
-  output and Pico W already has an onboard radio.
-- The Pico W onboard LED is not the demo LED. An external GP16 LED plus series
+- Do not fit an ESP-01 module on GP16/GP17 during the demo: those pins are
+  reserved for the left wheel encoder in the final robot configuration.
+- The Pico W onboard LED is not the demo LED. An external GP19 LED plus series
   resistor is optional; serial output is the required observation here.
 - Assign each physical bench board an ID and record its carrier revision.
 

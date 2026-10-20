@@ -46,7 +46,9 @@ typedef struct {
 LOCAL const UW module_tbl[] = {
 	RESETS_RESET_IO_BANK0,		/* IO_BANK0 */
 	RESETS_RESET_PADS_BANK0,	/* PADS_BANK0 */
+#if TM_CONSOLE_UART
 	RESETS_RESET_UART0,		/* UART0 */
+#endif
 
 #if TM_WIFI_CYW43
 	/* The Pico W radio transport runs a PIO state machine with two DMA
@@ -66,12 +68,12 @@ LOCAL const UW module_tbl[] = {
 	/* Buddy 2 owns PWM directly; this does not enable the physical-timer
 	 * subsystem, it only releases the PWM peripheral from reset. */
 	RESETS_RESET_PWM,
-	RESETS_RESET_I2C1,
 #endif
 
 #if USE_SDEV_DRV	// Do not use sample device driver
 	RESETS_RESET_ADC,		/* A/DC */
-	RESETS_RESET_I2C0,		/* I2C0 */
+	RESETS_RESET_I2C0,		/* I2C0, default board pin pair GP8/GP9 */
+	RESETS_RESET_I2C1,		/* I2C1, ROBO-PICO sensor bus */
 #endif /* USE_SDEV_DRV */
 	0
 };
@@ -83,9 +85,13 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 	/* External LED */
 	{GPIO_CTRL(BOARD_LED_PIN),	GPIO_CTRL_FUNCSEL_SIO},	/* LED pin GPIO */
 	{GPIO_OE, (1<<BOARD_LED_PIN)},				/* LED pin output enable */
-	/* P0,P1 : UART0 */
+
+#if TM_CONSOLE_UART
+	/* P0,P1 : UART0.  The Robo-Pico robot USB profile leaves these pins
+	 * untouched for the HC-SR04 Trigger/Echo signals. */
 	{GPIO_CTRL(0),	GPIO_CTRL_FUNCSEL_UART},	/* P0 UART0-TX */
 	{GPIO_CTRL(1),	GPIO_CTRL_FUNCSEL_UART},	/* P1 UART0-RX */
+#endif
 
 #if USE_SDEV_DRV	// Do not use sample device driver
 	/* P26 : ADC0 */
@@ -96,7 +102,7 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 	{GPIO_CTRL(27),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(27), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
 
-	/* P28 : ADC2 */
+	/* P28 : ADC2, configured in every profile */
 	{GPIO_CTRL(28),	GPIO_CTRL_FUNCSEL_NULL},
 	{GPIO(28), GPIO_DRIVE_4MA | GPIO_SHEMITT},	/* Disable input & pull-up & pull-down */
 
@@ -113,7 +119,7 @@ LOCAL const T_SETUP_REG pinfnc_tbl[] = {
 #endif /* USE_SDEV_DRV */
 
 #if defined(BOARD_ROBO_PICO_ROBOT)
-	/* Proposed team I2C1 bus; GP8/9 remain available for motor PWM. */
+	/* Grove port 2: I2C1 SDA=GP2 and SCL=GP3, with GP8/9 left for motor PWM. */
 	{GPIO_CTRL(2),	GPIO_CTRL_FUNCSEL_I2C},
 	{GPIO(2), GPIO_IE | GPIO_DRIVE_4MA | GPIO_PUE | GPIO_SHEMITT},
 	{GPIO_CTRL(3),	GPIO_CTRL_FUNCSEL_I2C},
