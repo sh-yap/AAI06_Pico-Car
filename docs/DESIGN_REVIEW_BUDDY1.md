@@ -63,9 +63,9 @@ Shared-resource notes for the other buddies:
 - GP23, GP24, GP25 and GP29 are wired inside the Pico W and are not on
   the header, so no car wiring uses them; they are listed so the pin map
   is complete.  **Buddy 1 uses no header pins.**
-- The kernel's liveness LED is on GP16 (`BOARD_LED_PIN` in
-  `include/sys/sysdepend/pico_rp2040/sysdef.h`); it can be moved or
-  dropped if another subsystem needs GP16.
+- The kernel's liveness LED is on GP19 (`BOARD_LED_PIN` in
+  `include/sys/sysdepend/pico_rp2040/sysdef.h`), moved from GP16 so it
+  no longer clashes with the left wheel encoder.
 
 ---
 
@@ -122,25 +122,27 @@ publishes them; received commands flow back the other way.
 | Subsystem name | Communication subsystem: WiFi link + MQTT session |
 | Related RTOS task(s) | Radio Service Task (`cyw43_utk_task`); `comms` API used by all subsystem tasks |
 | Purpose | Keep the robot connected to the WiFi network and MQTT broker, recover automatically from outages, and publish telemetry/events and receive commands without ever blocking the control tasks. |
-| Reason a statechart is needed | Connection handling is event-driven with timeouts and retries (join failures, link loss, broker refusal, back-off timers).  Two interacting machines, WiFi link and MQTT session, must be explicit so every failure has a defined recovery path. |
+| Reason a statechart is needed | Connection handling is event-driven with timeouts and retries (join failures, hotspot loss, broker refusal, back-off timers).  The statechart makes every failure's recovery path explicit, and the WIFI_CONNECTED super-state shows that losing the hotspot is handled the same way from every connected state. |
 
 Insert `docs/img/comms_statechart.png`.
 
 **Brief explanation of states, events and fault handling:**
-*WiFi link:* after boot the radio scans and joins (JOINING).  On link up
-it is CONNECTED and DHCP supplies an address.  If the access point
-disappears (LINK_LOST) the radio firmware first retries on its own; if the
-link is still down after 20 s, or the join fails outright (e.g. hotspot off
-at boot), REJOINING calls the join again with growing waits (2, 5, 10,
-15 s cap) until the link returns.  *MQTT session:* IDLE until the link is up
-with a valid IP, then CONNECTING (TCP + MQTT CONNECT with a last-will
-message).  In CONNECTED it announces `online`, subscribes to
-`robot/command`, and every 20 ms publishes up to 4 queued messages.  Any
-refusal, timeout (~9 s), link loss or broker loss leads to BACKOFF, which
-waits 1, 2, 4 ... 30 s before retrying, and retries immediately when the
-network comes back.  During any outage the car keeps running; telemetry
-is simply not sent (latest values are resent on reconnect) and events
-wait in the queue.
+After start-up, INITIALISING starts the WiFi chip and network stack, and
+CONNECTING_WIFI joins the hotspot and gets an IP address (FR-B1-01).
+Inside the WIFI_CONNECTED super-state, CONNECTING_BROKER opens the MQTT
+session with a last-will message of "offline" (FR-B1-06).  In ONLINE the
+robot announces "online", subscribes to commands, and sends live data
+(max 5 per second), queued events and a 1 s heartbeat (FR-B1-02, 03, 06).
+Commands are acknowledged within 200 ms and start/stop are passed to the
+Vehicle Controller (FR-B1-05); at the end of a run a summary with the
+highest hump is published and kept on the broker (FR-B1-04).  Faults: if
+the broker refuses or does not reply within 9 s, or the connection is
+lost, BROKER_LOST retries after 1, 2, 4 ... 30 s (at once if the network
+returns); if the hotspot disappears in any connected state, WIFI_LOST
+retries after 2, 5, 10, then every 15 s (FR-B1-07).  While offline, events
+wait in a 16-slot queue and are dropped and counted only if it fills
+(NFR-B1-06).  The car keeps driving in every state; Buddy 1 never controls
+the motors.
 
 ---
 
