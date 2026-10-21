@@ -60,28 +60,43 @@
 /* 50 Hz frame. */
 #define OBSTACLE_SERVO_PERIOD_US        (20000U)
 
-/* Absolute pulse limits, never exceeded even in raw calibration mode. */
-#define OBSTACLE_SERVO_PULSE_MIN_US     (500U)
-#define OBSTACLE_SERVO_PULSE_MAX_US     (2500U)
+/* Absolute pulse limits, never exceeded even in raw calibration mode.
+ * Bench test 2026-10-21 on the car: the sensor mount tilts from 1050 us
+ * and the servo stalls (buzzes) at 950 us and 1950 us, so the limits sit
+ * where it moved freely.  Widen them only after re-testing the mount. */
+#define OBSTACLE_SERVO_PULSE_MIN_US     (1100U)
+#define OBSTACLE_SERVO_PULSE_MAX_US     (1900U)
 
-/* Pulse widths that put the horn at 0, 90 and 180 degrees.  Calibrate. */
-#define OBSTACLE_SERVO_PULSE_0_US       (600U)
-#define OBSTACLE_SERVO_PULSE_90_US      (1500U)
-#define OBSTACLE_SERVO_PULSE_180_US     (2400U)
+/* Pulse widths that put the horn at 0, 90 and 180 degrees.  90 deg
+ * (straight ahead) was measured at 1540 us; 0 and 180 deg use the SG90's
+ * nominal 10 us/deg about it until the angles are measured properly.
+ * Low pulses point right, high pulses point left. */
+#define OBSTACLE_SERVO_PULSE_0_US       (640U)
+#define OBSTACLE_SERVO_PULSE_90_US      (1540U)
+#define OBSTACLE_SERVO_PULSE_180_US     (2440U)
 
-/* Angles accepted by obstacle_servo_set_angle().  Kept away from the end
- * stops until servo_test has measured the real safe range. */
-#define OBSTACLE_SERVO_ANGLE_MIN_DEG    (15U)
-#define OBSTACLE_SERVO_ANGLE_MAX_DEG    (165U)
+/* Angles accepted by obstacle_servo_set_angle().  The sensor bracket hits
+ * the Pico board beyond about +-30 deg from straight ahead, so the range
+ * is 60..120 deg (1240..1840 us) instead of the brief's 30..150 deg.
+ * Pending a mount change agreed with the professor. */
+#define OBSTACLE_SERVO_ANGLE_MIN_DEG    (60U)
+#define OBSTACLE_SERVO_ANGLE_MAX_DEG    (120U)
 
-/* Settling estimate: SG90 is about 0.1 s per 60 deg at 4.8 V, plus margin
- * for the horn to stop wobbling.  Calibrate with servo_test 't'. */
-#define OBSTACLE_SERVO_MS_PER_DEG       (2U)
-#define OBSTACLE_SERVO_SETTLE_MARGIN_MS (60U)
+/* Settling estimate: travel * MS_PER_DEG + MARGIN.  Bench test 2026-10-21
+ * ('t', 60 -> 120 deg): readings wandered (315/284/310 mm) until 290 ms
+ * and were steady from 410 ms, so a 60 deg swing is allowed 400 ms.  The
+ * SG90 datasheet figure (2 ms/deg + 60 ms) was too optimistic. */
+#define OBSTACLE_SERVO_MS_PER_DEG       (4U)
+#define OBSTACLE_SERVO_SETTLE_MARGIN_MS (160U)
 
 /* ------------------------------------------------------------------------ *
  * Build-time checks
  * ------------------------------------------------------------------------ */
+
+#if ((OBSTACLE_SERVO_PULSE_90_US <= OBSTACLE_SERVO_PULSE_MIN_US) || \
+     (OBSTACLE_SERVO_PULSE_90_US >= OBSTACLE_SERVO_PULSE_MAX_US))
+#error "Servo centre pulse must lie inside the pulse limits"
+#endif
 
 #if ((OBSTACLE_ECHO_PIN % 2U) == 0U)
 #error "OBSTACLE_ECHO_PIN must be odd (PWM channel B input)"

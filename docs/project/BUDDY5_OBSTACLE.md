@@ -4,8 +4,9 @@ Buddy 5 owns the HC-SR04 ultrasonic sensor and the SG90 scan servo. It
 reports distances and, later, obstacle profiles and bypass recommendations to
 the Vehicle Controller. It never drives the motors; Buddy 2 does.
 
-Current stage: **Stage 3 / 7A–7B bring-up**. Drivers and two bench test
-programs build; they have not yet been run on hardware.
+Current stage: **Stage 3 / 7A–7B bring-up**. Both drivers have been tested
+on the car (2026-10-21) and the servo is calibrated. The calibrated values
+are in `obstacle_config.h`, with the measurements in its comments.
 
 ## Files
 
@@ -26,16 +27,18 @@ programs build; they have not yet been run on hardware.
 | Signal | Connection |
 | --- | --- |
 | Servo | Servo port **S1 = GP12** (brown GND, red V+, orange signal) |
-| HC-SR04 Trig | **GP0** |
-| HC-SR04 Echo | **GP1 through a divider**: Echo → 1 kΩ → GP1, GP1 → 2 kΩ → GND |
-| HC-SR04 VCC / GND | V+ and GND of a spare servo port (about 4.6 V on USB power) |
+| HC-SR04 Trig | **Grove 1, GP0** |
+| HC-SR04 Echo | **Grove 1, GP1** |
+| HC-SR04 VCC / GND | Grove 1 3.3 V and GND |
 
 - The `robo_pico_robot` profile is USB-CDC-console-only. It disables the UART0
   mirror so that startup does not drive GP0 or claim GP1.
-- Grove ports only supply 3.3 V; the HC-SR04 needs 5 V. Powered at 5 V its
-  Echo output is 5 V, so the divider is required before GP1.
-- Use the Grove port wired to GP0/GP1 for the two signal wires, or jumper
-  them. Check the board labels, not the wire colours.
+- The sensor runs at 3.3 V, so Echo is already 3.3 V and needs no divider.
+  The datasheet asks for 5 V; at 3.3 V it gave 10/10 valid readings at about
+  500 mm, which is well beyond the 250 mm stop distance. Longer range is not
+  tested yet.
+- Servo ports S3/S4 (GP14/GP15) were tried first, but Echo never registered
+  there; they may be output-only on the Robo-Pico.
 - To move a pin, change it in `obstacle_config.h` only. The build rejects
   invalid choices: Echo must be an odd GPIO, and neither pin may share a PWM
   slice with the other or with the drive motors (GP8–GP11).
@@ -52,7 +55,7 @@ programs build; they have not yet been run on hardware.
   `NOT_READY`. A non-`OK` reading is never reported as a distance.
 - **Servo:** 50 Hz PWM on slice 6, 1 µs resolution. Angles map linearly
   through the calibrated 0/90/180° pulse widths and are clamped to the safe
-  range; raw pulse commands are clamped to 500–2500 µs.
+  range (60–120° for now); raw pulse commands are clamped to 1100–1900 µs.
 
 ## Build, test, flash
 
@@ -100,8 +103,14 @@ Keys: `b` batch of 10, `p` pause or resume, `h` help. Output is CSV:
 
 ### 2. `servo_test` (Stage 7B)
 
-Keys: `a`/`d` ±5°, `A`/`D` ±1°, `c` centre, `1`–`5` = 30/60/90/120/150°,
+Keys: `a`/`d` ±5°, `A`/`D` ±1°, `c` centre, `1`–`5` = 60/75/90/105/120°,
 `[`/`]` ±10 µs raw, `{`/`}` ±50 µs raw, `s` coarse scan, `t` settle test.
+
+> **Known limitation (2026-10-21):** the sensor bracket hits the Pico board
+> beyond about ±30° from straight ahead. The servo stalls at 950 µs and
+> 1950 µs, so the pulse limits are 1100–1900 µs and the scan is 60–120°
+> instead of the brief's 30–150°. Centre is 1540 µs. This waits on a mount
+> change agreed with the professor.
 
 1. **Centre:** at start-up the servo goes to 90°. If the sensor isn't facing
    straight ahead, refit the horn one spline tooth at a time, then fine-tune
@@ -151,8 +160,10 @@ follow it yet.
 
 ## Next steps
 
-1. Run the two tests above on hardware and commit the calibration values.
+1. Repeat the distance calibration on a fixed rig (200–1500 mm), measure the
+   real servo angles, and settle the mount question (60–120° limit).
 2. Stage 7C–7E: coarse and fine scan, obstacle profile (position, width,
-   closest point, left/right clearance).
+   closest point, left/right clearance). A `TIMEOUT` counts as unknown,
+   never as clear: an angled flat surface gives no echo.
 3. Stage 7F–7G: bypass recommendation and line-recovery plan, handed to the
    Vehicle Controller (not to Buddy 2 directly).

@@ -4,8 +4,10 @@
  *
  * Run with:  make -C tests/obstacle test
  *
- * Expected values use the defaults in obstacle_config.h (343 m/s, servo
- * pulses 600 / 1500 / 2400 us).  Update them if those defaults change.
+ * Expected values assume 343 m/s and the settle constants in
+ * obstacle_config.h.  Servo checks use their own calibration and compare
+ * clamped results with the configured pulse limits, so recalibrating the
+ * servo does not break them.
  */
 
 #include <stdio.h>
@@ -68,6 +70,12 @@ test_echo_to_mm(void)
     check_u32("mm clamp", obstacle_calc_echo_to_mm(100000U), 11239U);
 }
 
+/* The interpolation checks below expect 1200..1800 us to be unclamped. */
+#if ((OBSTACLE_SERVO_PULSE_MIN_US > 1200U) || \
+     (OBSTACLE_SERVO_PULSE_MAX_US < 1800U))
+#error "Pulse limits too narrow for these tests; adjust the test points"
+#endif
+
 static void
 test_angle_to_pulse(void)
 {
@@ -75,41 +83,51 @@ test_angle_to_pulse(void)
     obstacle_servo_cal_t const reversed = { 2400U, 1500U, 600U };
     obstacle_servo_cal_t const extreme = { 0U, 1500U, 3000U };
 
-    check_u32("pulse 0", obstacle_calc_angle_to_pulse(0U, &normal), 600U);
-    check_u32("pulse 45", obstacle_calc_angle_to_pulse(45U, &normal), 1050U);
+    check_u32("pulse 60", obstacle_calc_angle_to_pulse(60U, &normal),
+              1200U);
     check_u32("pulse 90", obstacle_calc_angle_to_pulse(90U, &normal), 1500U);
-    check_u32("pulse 135", obstacle_calc_angle_to_pulse(135U, &normal),
-              1950U);
-    check_u32("pulse 180", obstacle_calc_angle_to_pulse(180U, &normal),
-              2400U);
+    check_u32("pulse 120", obstacle_calc_angle_to_pulse(120U, &normal),
+              1800U);
+    check_u32("pulse 0 clamps", obstacle_calc_angle_to_pulse(0U, &normal),
+              OBSTACLE_SERVO_PULSE_MIN_US);
     check_u32("pulse 200 clamps", obstacle_calc_angle_to_pulse(200U, &normal),
-              2400U);
+              OBSTACLE_SERVO_PULSE_MAX_US);
     check_u32("pulse NULL cal", obstacle_calc_angle_to_pulse(30U, NULL),
-              1500U);
-    check_u32("pulse reversed 0",
-              obstacle_calc_angle_to_pulse(0U, &reversed), 2400U);
-    check_u32("pulse reversed 180",
-              obstacle_calc_angle_to_pulse(180U, &reversed), 600U);
+              OBSTACLE_SERVO_PULSE_90_US);
+    check_u32("pulse reversed 60",
+              obstacle_calc_angle_to_pulse(60U, &reversed), 1800U);
+    check_u32("pulse reversed 120",
+              obstacle_calc_angle_to_pulse(120U, &reversed), 1200U);
     check_u32("pulse limit low",
-              obstacle_calc_angle_to_pulse(0U, &extreme), 500U);
+              obstacle_calc_angle_to_pulse(0U, &extreme),
+              OBSTACLE_SERVO_PULSE_MIN_US);
     check_u32("pulse limit high",
-              obstacle_calc_angle_to_pulse(180U, &extreme), 2500U);
+              obstacle_calc_angle_to_pulse(180U, &extreme),
+              OBSTACLE_SERVO_PULSE_MAX_US);
 }
 
 static void
 test_clamp_pulse(void)
 {
-    check_u32("clamp low", obstacle_calc_clamp_pulse(100U), 500U);
-    check_u32("clamp high", obstacle_calc_clamp_pulse(3000U), 2500U);
+    check_u32("clamp low", obstacle_calc_clamp_pulse(100U),
+              OBSTACLE_SERVO_PULSE_MIN_US);
+    check_u32("clamp high", obstacle_calc_clamp_pulse(3000U),
+              OBSTACLE_SERVO_PULSE_MAX_US);
     check_u32("clamp pass", obstacle_calc_clamp_pulse(1500U), 1500U);
 }
 
 static void
 test_settle_ms(void)
 {
-    check_u32("settle 30->150", obstacle_calc_settle_ms(30U, 150U), 300U);
-    check_u32("settle 150->30", obstacle_calc_settle_ms(150U, 30U), 300U);
-    check_u32("settle none", obstacle_calc_settle_ms(90U, 90U), 60U);
+    uint32_t const swing_ms = (120U * OBSTACLE_SERVO_MS_PER_DEG)
+                              + OBSTACLE_SERVO_SETTLE_MARGIN_MS;
+
+    check_u32("settle 30->150", obstacle_calc_settle_ms(30U, 150U),
+              swing_ms);
+    check_u32("settle 150->30", obstacle_calc_settle_ms(150U, 30U),
+              swing_ms);
+    check_u32("settle none", obstacle_calc_settle_ms(90U, 90U),
+              OBSTACLE_SERVO_SETTLE_MARGIN_MS);
 }
 
 static void

@@ -7,15 +7,16 @@
  *
  * Keys on the USB console:
  *   a / d    angle -5 / +5 deg        A / D    angle -1 / +1 deg
- *   c        centre (90 deg)          1..5     30 / 60 / 90 / 120 / 150 deg
+ *   c        centre (90 deg)          1..5     60 / 75 / 90 / 105 / 120 deg
  *   [ / ]    raw pulse -10 / +10 us   { / }    raw pulse -50 / +50 us
- *   s        coarse scan 30..150 deg with the ultrasonic sensor
- *   t        settle test: swing 30 -> 150 deg and range every ping
+ *   s        coarse scan 60..120 deg with the ultrasonic sensor
+ *   t        settle test: swing 60 -> 120 deg and range every ping
  *   h        help
  *
- * Angle keys respect the safe range in obstacle_config.h.  Raw pulse keys
- * ignore it (absolute limits still apply) and are for calibration only:
- * step slowly and stop as soon as the servo buzzes at an end stop.
+ * Angle keys, s and t respect the safe range in obstacle_config.h, so
+ * angles outside it are clamped (rows print the angle actually used).
+ * Raw pulse keys ignore the angle range but not the pulse limits; they
+ * are for calibration only.
  */
 
 #include <stdint.h>
@@ -37,15 +38,16 @@
 #define TEST_STEP_SMALL_US      (10U)
 #define TEST_STEP_LARGE_US      (50U)
 #define TEST_CENTRE_DEG         (90U)
-#define TEST_SETTLE_FROM_DEG    (30U)
-#define TEST_SETTLE_TO_DEG      (150U)
+#define TEST_SETTLE_FROM_DEG    (60U)
+#define TEST_SETTLE_TO_DEG      (120U)
 #define TEST_SETTLE_PARK_MS     (1000)  /* TMO: rest before the swing.   */
 #define TEST_SETTLE_WINDOW_MS   (1000U) /* How long to range after swing. */
 #define TEST_IDLE_POLL_MS       (20)    /* TMO: key polling.             */
-#define TEST_US_PER_MS          (1000U)
 
-/* Coarse scan angles from the project brief, also reached by keys 1..5. */
-static uint32_t const scan_angles[] = { 30U, 60U, 90U, 120U, 150U };
+/* Coarse scan angles, also reached by keys 1..5.  The brief asks for
+ * 30..150 deg, but the sensor bracket hits the Pico board beyond about
+ * +-30 deg, so the scan is narrowed until the mount is changed. */
+static uint32_t const scan_angles[] = { 60U, 75U, 90U, 105U, 120U };
 
 #define TEST_SCAN_COUNT (sizeof(scan_angles) / sizeof(scan_angles[0]))
 
@@ -60,7 +62,7 @@ static UB const msg_servo_failed[] =
 static UB const msg_ultra_failed[] =
     "[servo] ultrasonic init FAILED; s and t will report NOT_READY.\n";
 static UB const msg_help[] =
-    "[servo] keys: a/d -+5deg  A/D -+1deg  c centre  1..5 30..150deg\n"
+    "[servo] keys: a/d -+5deg  A/D -+1deg  c centre  1..5 60..120deg\n"
     "[servo]       [/] -+10us  {/} -+50us (raw, calibration only)\n"
     "[servo]       s coarse scan  t settle test  h help\n";
 static UB const msg_angle[] = "[servo] angle=%u deg pulse=%u us settle~%u ms\n";
@@ -69,6 +71,7 @@ static UB const msg_scan_header[] = "scan,angle_deg,distance_mm,status\n";
 static UB const msg_scan_row[] = "scan,%u,%u,%s\n";
 static UB const msg_settle_header[] =
     "[servo] settle test: park %u deg, swing to %u deg (predicted %u ms)\n"
+    "[servo] t_ms from the kernel tick (10 ms steps)\n"
     "settle,t_ms,distance_mm,status\n";
 static UB const msg_settle_row[] = "settle,%u,%u,%s\n";
 
@@ -182,25 +185,37 @@ static void
 test_settle(void)
 {
     obstacle_range_t range;
+    SYSTIM           now;
     uint32_t         predicted_ms = 0U;
-    uint32_t         start_us;
+    uint32_t         park_deg;
+    uint32_t         start_ms;
     uint32_t         elapsed_ms = 0U;
 
     (void)obstacle_servo_set_angle(TEST_SETTLE_FROM_DEG, NULL);
+    park_deg = obstacle_servo_get_angle();
     (void)tk_dly_tsk(TEST_SETTLE_PARK_MS);
 
+    /* Timed with the kernel tick, not the microsecond TIMER: the TIMER
+     * runs at the wrong rate after some boots (see ultrasonic_test 'd'). */
     (void)obstacle_servo_set_angle(TEST_SETTLE_TO_DEG, &predicted_ms);
-    start_us = in_w(TIMER_TIMERAWL);
+    (void)tk_get_otm(&now);
 
+    /* Cast to uint32_t: only the low word is needed for differences. */
+    start_ms = (uint32_t)now.lo;
+
+    /* Print the clamped angles actually used, not the requested ones. */
     (void)tm_printf(msg_settle_header,
-                    TEST_SETTLE_FROM_DEG,
-                    TEST_SETTLE_TO_DEG,
+                    park_deg,
+                    obstacle_servo_get_angle(),
                     predicted_ms);
 
     while (elapsed_ms < TEST_SETTLE_WINDOW_MS)
     {
         obstacle_ultrasonic_measure(&range);
-        elapsed_ms = (range.timestamp_us - start_us) / TEST_US_PER_MS;
+        (void)tk_get_otm(&now);
+
+        /* Cast to uint32_t: as above. */
+        elapsed_ms = (uint32_t)now.lo - start_ms;
         (void)tm_printf(msg_settle_row,
                         elapsed_ms,
                         range.distance_mm,

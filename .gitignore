@@ -25,6 +25,8 @@ config/telemetry_config.h
 evidence/buddy4/*.csv
 config/mqtt_config.h
 
+evidence/ultrasonic/
+
 # Python
 __pycache__/
 *.pyc
