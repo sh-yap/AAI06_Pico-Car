@@ -56,7 +56,7 @@ static vc_outputs_t g_out;
 static void
 reset (uint32_t start_ms)
 {
-    vc_init(&g_vc);
+    vc_init(&g_vc, start_ms);
     memset(&g_in, 0, sizeof(g_in));
     memset(&g_out, 0, sizeof(g_out));
     g_in.now_ms       = start_ms;
@@ -183,16 +183,15 @@ test_barcode_turn (void)
 
     g_in.line = VC_LINE_JUNCTION;
     step();
-    CHECK_STATE(VC_STATE_HANDLE_JUNCTION);
-
-    g_in.line = VC_LINE_CENTRE;
-    step();
-    CHECK_STATE(VC_STATE_TURNING);
+    CHECK_STATE(VC_STATE_TURNING);            /* Decided in the same step. */
+    CHECK(g_out.b_state_changed);
     CHECK(VC_MOTION_TURN == g_out.motion);
     CHECK(VC_NAV_LEFT == g_out.turn);
 
+    g_in.line = VC_LINE_CENTRE;
     step();
     CHECK_STATE(VC_STATE_TURNING);            /* Turn still running. */
+    CHECK(VC_MOTION_NONE == g_out.motion);    /* Command sent only once. */
 
     g_in.b_motion_done = true;
     step();
@@ -201,9 +200,10 @@ test_barcode_turn (void)
     /* The stored command was used up: the next junction goes straight. */
     g_in.line = VC_LINE_JUNCTION;
     step();
-    g_in.line = VC_LINE_CENTRE;
-    step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(g_out.b_state_changed);             /* Via HANDLE_JUNCTION. */
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
+    CHECK(0 == g_out.steer);
 }
 
 static void
@@ -216,16 +216,14 @@ test_junction_straight_and_uturn (void)
     step();
     g_in.line = VC_LINE_JUNCTION;
     step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* Straight is not a turn. */
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
     g_in.line = VC_LINE_CENTRE;
     step();
-    CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* Straight is not a turn. */
-    CHECK(VC_MOTION_TURN != g_out.motion);
 
     g_in.barcode = VC_NAV_UTURN;
     step();
     g_in.line = VC_LINE_JUNCTION;
-    step();
-    g_in.line = VC_LINE_CENTRE;
     step();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_NAV_UTURN == g_out.turn);
@@ -241,9 +239,8 @@ test_turn_failures (void)
     step();
     g_in.line = VC_LINE_JUNCTION;
     step();
-    g_in.line = VC_LINE_CENTRE;
-    step();
     CHECK_STATE(VC_STATE_TURNING);
+    g_in.line = VC_LINE_CENTRE;
 
     wait_ms(VC_TURN_TIMEOUT_MS - 100U);
     CHECK_STATE(VC_STATE_TURNING);            /* Not yet timed out. */
@@ -260,7 +257,6 @@ test_turn_failures (void)
     g_in.line = VC_LINE_JUNCTION;
     step();
     g_in.line = VC_LINE_CENTRE;
-    step();
     g_in.b_motion_failed = true;
     step();
     CHECK_STATE(VC_STATE_EMERGENCY_STOP);
@@ -359,20 +355,61 @@ test_obstacle_retry_and_stop (void)
     g_in.b_scan_done    = true;
     g_in.recommendation = VC_AVOID_REVERSE_RETRY;
     step();
-    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);      /* Retry 1. */
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);      /* Retry 1: reverse first. */
     CHECK(VC_MOTION_REVERSE == g_out.motion);
-    CHECK(VC_OBST_SCAN_REQUEST == g_out.obstacle);
+    CHECK(VC_OBST_SCAN_REQUEST != g_out.obstacle);  /* Not while reversing. */
+
+    step();
+    CHECK(VC_OBST_SCAN_REQUEST != g_out.obstacle);  /* Still reversing. */
+
+    g_in.b_scan_done    = true;               /* Stale result: ignored. */
+    g_in.recommendation = VC_AVOID_CONTINUE;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+
+    g_in.b_motion_done = true;                /* Reverse finished. */
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(VC_OBST_SCAN_REQUEST == g_out.obstacle);  /* Now rescan. */
 
     g_in.b_scan_done    = true;
     g_in.recommendation = VC_AVOID_REVERSE_RETRY;
     step();
-    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);      /* Retry 2. */
+    CHECK(VC_MOTION_REVERSE == g_out.motion); /* Retry 2. */
+    g_in.b_motion_done = true;
+    step();
+    CHECK(VC_OBST_SCAN_REQUEST == g_out.obstacle);
 
     g_in.b_scan_done    = true;
     g_in.recommendation = VC_AVOID_REVERSE_RETRY;
     step();
     CHECK_STATE(VC_STATE_EMERGENCY_STOP);     /* Retries used up. */
     CHECK(VC_OBST_ABORT == g_out.obstacle);
+
+    /* Reverse fails -> emergency. */
+    go_to_obstacle_scan();
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_REVERSE_RETRY;
+    step();
+    g_in.b_motion_failed = true;
+    step();
+    CHECK_STATE(VC_STATE_EMERGENCY_STOP);
+    CHECK(VC_OBST_ABORT == g_out.obstacle);
+
+    /* Reverse never finishes -> emergency. */
+    go_to_obstacle_scan();
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_REVERSE_RETRY;
+    step();
+    wait_ms(VC_SCAN_TIMEOUT_MS + 40U);
+    CHECK_STATE(VC_STATE_EMERGENCY_STOP);
+
+    /* Unknown recommendation -> emergency (fail safe). */
+    go_to_obstacle_scan();
+    g_in.b_scan_done    = true;
+    g_in.recommendation = (vc_avoid_t) 99;
+    step();
+    CHECK_STATE(VC_STATE_EMERGENCY_STOP);
 
     go_to_obstacle_scan();
     g_in.b_scan_done    = true;
@@ -391,6 +428,8 @@ test_obstacle_retry_and_stop (void)
     wait_ms(VC_SCAN_TIMEOUT_MS - 200U);
     g_in.b_scan_done    = true;
     g_in.recommendation = VC_AVOID_REVERSE_RETRY;
+    step();
+    g_in.b_motion_done = true;
     step();
     wait_ms(500U);
     CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
@@ -452,9 +491,8 @@ test_stop_command (void)
     step();
     g_in.line = VC_LINE_JUNCTION;
     step();
-    g_in.line = VC_LINE_CENTRE;
-    step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* No old turn executed. */
+    CHECK(VC_MOTION_TURN != g_out.motion);
 }
 
 static void
@@ -552,11 +590,138 @@ test_names_and_null (void)
     CHECK(0 == strcmp("FOLLOW_LINE", vc_state_name(VC_STATE_FOLLOW_LINE)));
     CHECK(0 == strcmp("UNKNOWN", vc_state_name(VC_STATE_COUNT)));
 
-    vc_init(NULL);                            /* Must not crash. */
+    vc_init(NULL, 0U);                        /* Must not crash. */
     vc_step(NULL, &g_in, &g_out);
     vc_step(&g_vc, NULL, &g_out);
     vc_step(&g_vc, &g_in, NULL);
     CHECK(true);
+}
+
+static void
+test_junction_edge (void)
+{
+    printf("junction handled once, however long it is seen\n");
+
+    go_to_follow_line(0U);
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* No barcode: straight on. */
+
+    g_in.barcode = VC_NAV_LEFT;               /* Next junction's barcode. */
+    step();                                   /* Still over junction 1.   */
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_state_changed);            /* Not re-triggered.        */
+    CHECK(0 == g_out.steer);
+    wait_ms(200U);
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+
+    g_in.line = VC_LINE_CENTRE;               /* Leave junction 1. */
+    step();
+    g_in.line = VC_LINE_JUNCTION;             /* Junction 2. */
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(VC_NAV_LEFT == g_out.turn);         /* Barcode kept for it. */
+}
+
+static void
+test_timeout_vs_success (void)
+{
+    printf("success at the deadline beats the timeout\n");
+
+    go_to_follow_line(0U);
+    g_in.barcode = VC_NAV_LEFT;
+    step();
+    g_in.line = VC_LINE_JUNCTION;
+    step();                                   /* Turn starts here. */
+    g_in.line = VC_LINE_CENTRE;
+    wait_ms(VC_TURN_TIMEOUT_MS - VC_PERIOD_MS);
+    CHECK_STATE(VC_STATE_TURNING);
+    g_in.b_motion_done = true;                /* Exactly at the deadline. */
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+}
+
+static void
+test_init_timeout (void)
+{
+    printf("initialise timeout\n");
+
+    reset(0U);
+    wait_ms(VC_INIT_TIMEOUT_MS - 100U);
+    CHECK_STATE(VC_STATE_INITIALISE);
+    wait_ms(200U);
+    CHECK_STATE(VC_STATE_EMERGENCY_STOP);
+}
+
+static void
+test_obstacle_while_reacquiring (void)
+{
+    printf("obstacle while searching for the line\n");
+
+    go_to_follow_line(0U);
+    g_in.line = VC_LINE_LOST;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    g_in.b_obstacle_ahead = true;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(VC_OBST_SCAN_REQUEST == g_out.obstacle);
+
+    /* During a bypass: a barcode read while searching is kept, and
+     * Buddy 5 is released only once the line is found. */
+    go_to_obstacle_scan();
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_TURN_LEFT;
+    step();
+    g_in.line              = VC_LINE_LOST;
+    g_in.b_obstacle_passed = true;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    g_in.barcode          = VC_NAV_RIGHT;
+    g_in.b_obstacle_ahead = true;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(VC_OBST_ABORT != g_out.obstacle);   /* Still Buddy 5's job. */
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_CONTINUE;
+    g_in.line           = VC_LINE_CENTRE;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_OBST_ABORT == g_out.obstacle);   /* Released once. */
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);            /* Barcode was kept. */
+    CHECK(VC_NAV_RIGHT == g_out.turn);
+}
+
+static void
+test_invalid_inputs (void)
+{
+    printf("invalid input values fail safe\n");
+
+    /* Unknown line code counts as LOST. */
+    go_to_follow_line(0U);
+    g_in.line = (vc_line_t) 77;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+
+    /* Unknown command and barcode codes are ignored. */
+    go_to_follow_line(0U);
+    g_in.cmd     = (vc_cmd_t) 9;
+    g_in.barcode = (vc_nav_t) 9;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* No turn from bad barcode. */
+
+    /* Corrupted controller state goes to emergency. */
+    go_to_follow_line(0U);
+    g_vc.state = (vc_state_t) 200;
+    step();
+    CHECK_STATE(VC_STATE_EMERGENCY_STOP);
+    CHECK(VC_MOTION_STOP == g_out.motion);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -579,6 +744,11 @@ main (void)
     test_finished();
     test_timer_wraparound();
     test_names_and_null();
+    test_junction_edge();
+    test_timeout_vs_success();
+    test_init_timeout();
+    test_obstacle_while_reacquiring();
+    test_invalid_inputs();
 
     printf("\n%u checks, %u failed\n", (unsigned) g_checks,
            (unsigned) g_failures);

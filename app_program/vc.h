@@ -26,6 +26,7 @@
  * ------------------------------------------------------------------------ */
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
+#define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
 #define VC_SPEED_NORMAL_MM_S    (200)    /* TBC with Buddy 2.                */
 #define VC_SPEED_HUMP_MM_S      (100)    /* 50 % cap while on a hump.        */
 #define VC_SPEED_SEARCH_MM_S    (80)     /* Slow forward while searching.    */
@@ -157,14 +158,16 @@ typedef struct
     vc_nav_t   stored_nav;         /* Barcode command waiting for junction. */
     uint8_t    rescans;            /* Reverse + rescan attempts so far.   */
     bool       b_obstacle_active;  /* A Buddy 5 request is in progress.   */
+    bool       b_reversing;        /* Reversing before a rescan.          */
+    vc_line_t  prev_line;          /* Line position at the previous step. */
 } vc_t;
 
 /* ------------------------------------------------------------------------ *
  * API
  * ------------------------------------------------------------------------ */
 
-/* Reset the controller to INITIALISE. */
-void vc_init(vc_t * p_vc);
+/* Reset the controller to INITIALISE; now_ms starts the init timeout. */
+void vc_init(vc_t * p_vc, uint32_t now_ms);
 
 /* Run one 20 ms step: read p_in, update p_vc, fill p_out. */
 void vc_step(vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out);

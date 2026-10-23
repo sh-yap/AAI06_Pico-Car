@@ -2,12 +2,13 @@
  *
  * @brief Vehicle Controller state machine (pure logic, host-testable).
  *
- * One call to vc_step() handles one 20 ms cycle.  Rules are checked in
- * the Week 6 arbitration order:
- *   1. safety     - a serious fault in any state -> EMERGENCY_STOP;
- *   2. command    - laptop STOP in any running state -> READY;
- *   3. the current state's own transitions (obstacle before junction
- *      before line loss in FOLLOW_LINE).
+ * One call to vc_step() handles one 20 ms cycle, in this order:
+ *   1. safety   - a serious fault in any state -> EMERGENCY_STOP;
+ *   2. command  - laptop STOP in any running state -> READY;
+ *   3. the current state's own transitions (in FOLLOW_LINE: finish, then
+ *      obstacle, then junction, then line loss);
+ *   4. the state's timeout, if no transition happened in step 3, so an
+ *      expected event arriving at the deadline still wins.
  */
 
 #include <stddef.h>     /* NULL.  No kernel headers here, so no clash. */
@@ -16,7 +17,7 @@
 #include "vc.h"
 
 /* ------------------------------------------------------------------------ *
- * Private helpers
+ * Private data
  * ------------------------------------------------------------------------ */
 
 static char const * const g_state_names[VC_STATE_COUNT] =
@@ -26,9 +27,28 @@ static char const * const g_state_names[VC_STATE_COUNT] =
     "FINISHED"
 };
 
+/* Time allowed in each state before EMERGENCY_STOP; 0 = no limit.
+ * One table, so every timeout from the rules table is in one place. */
+static uint32_t const g_state_timeout_ms[VC_STATE_COUNT] =
+{
+    VC_INIT_TIMEOUT_MS,         /* INITIALISE                              */
+    0U,                         /* READY: waits for START indefinitely     */
+    0U,                         /* FOLLOW_LINE                             */
+    0U,                         /* HANDLE_JUNCTION: decided immediately    */
+    VC_TURN_TIMEOUT_MS,         /* TURNING                                 */
+    VC_SCAN_TIMEOUT_MS,         /* OBSTACLE_SCAN (incl. reverse + rescan)  */
+    VC_BYPASS_TIMEOUT_MS,       /* BYPASS                                  */
+    VC_REACQUIRE_TIMEOUT_MS,    /* REACQUIRE_LINE                          */
+    0U,                         /* EMERGENCY_STOP: latched until ack       */
+    0U                          /* FINISHED                                */
+};
+
 static void step_checked(vc_t * p_vc, vc_inputs_t const * p_in,
                          vc_outputs_t * p_out);
 
+/* ------------------------------------------------------------------------ *
+ * Private helpers
+ * ------------------------------------------------------------------------ */
 
 /* True in the states where the car is (or may be) moving on a mission. */
 static bool
@@ -39,13 +59,28 @@ is_running (vc_state_t state)
 }
 
 
-/* True in the states that use Buddy 5 (an obstacle request may be active). */
+/* True in the states that belong to the obstacle sequence. */
 static bool
 is_obstacle_state (vc_state_t state)
 {
     return ((VC_STATE_OBSTACLE_SCAN == state)
             || (VC_STATE_BYPASS == state)
             || (VC_STATE_REACQUIRE_LINE == state));
+}
+
+
+/* Line position with out-of-range codes treated as LOST (fail safe). */
+static vc_line_t
+line_of (vc_inputs_t const * p_in)
+{
+    vc_line_t line = VC_LINE_LOST;
+
+    if (VC_LINE_JUNCTION >= p_in->line)
+    {
+        line = p_in->line;
+    }
+
+    return line;
 }
 
 
@@ -71,8 +106,9 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
         p_vc->b_obstacle_active = false;
     }
 
-    p_vc->state      = next;
-    p_vc->entry_ms   = now_ms;
+    p_vc->state            = next;
+    p_vc->entry_ms         = now_ms;
+    p_vc->b_reversing      = false;
     p_out->b_state_changed = true;
 
     switch (next)
@@ -80,7 +116,7 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
         case VC_STATE_READY:
         case VC_STATE_EMERGENCY_STOP:
         case VC_STATE_FINISHED:
-            p_out->motion   = VC_MOTION_STOP;   /* Brake first, always. */
+            p_out->motion    = VC_MOTION_STOP;  /* Brake first, always. */
             p_vc->stored_nav = VC_NAV_NONE;
             break;
 
@@ -88,6 +124,7 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
             p_out->motion   = VC_MOTION_STOP;   /* Stopped while scanning. */
             p_out->obstacle = VC_OBST_SCAN_REQUEST;
             p_vc->b_obstacle_active = true;
+            p_vc->rescans   = 0U;
             break;
 
         default:
@@ -97,50 +134,25 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
 }
 
 
-/* FOLLOW_LINE: steer along the line; watch for obstacle, junction, loss. */
+/* Remember a decoded barcode until the next junction. */
 static void
-step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
+store_barcode (vc_t * p_vc, vc_inputs_t const * p_in)
 {
-    /* A barcode is only remembered here; it is acted on at the junction. */
-    if (VC_NAV_NONE != p_in->barcode)
+    if ((VC_NAV_NONE != p_in->barcode) && (VC_NAV_UTURN >= p_in->barcode))
     {
         p_vc->stored_nav = p_in->barcode;
-    }
-
-    if (p_in->b_finish)
-    {
-        enter_state(p_vc, VC_STATE_FINISHED, p_in->now_ms, p_out);
-    }
-    else if (p_in->b_obstacle_ahead)
-    {
-        p_vc->rescans = 0U;
-        enter_state(p_vc, VC_STATE_OBSTACLE_SCAN, p_in->now_ms, p_out);
-    }
-    else if (VC_LINE_JUNCTION == p_in->line)
-    {
-        enter_state(p_vc, VC_STATE_HANDLE_JUNCTION, p_in->now_ms, p_out);
-    }
-    else if (VC_LINE_LOST == p_in->line)
-    {
-        enter_state(p_vc, VC_STATE_REACQUIRE_LINE, p_in->now_ms, p_out);
-    }
-    else
-    {
-        p_out->motion     = VC_MOTION_DRIVE;
-        p_out->speed_mm_s = p_in->b_hump ? VC_SPEED_HUMP_MM_S
-                                         : VC_SPEED_NORMAL_MM_S;
-        p_out->steer      = p_in->line_error;
     }
 }
 
 
-/* HANDLE_JUNCTION: use the stored barcode command, then clear it. */
+/* HANDLE_JUNCTION: use the stored barcode command, then clear it.
+ * Runs in the same step the junction is reached, so no cycle is lost. */
 static void
-step_handle_junction (vc_t * p_vc, vc_inputs_t const * p_in,
-                      vc_outputs_t * p_out)
+handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 {
     vc_nav_t const nav = p_vc->stored_nav;
 
+    enter_state(p_vc, VC_STATE_HANDLE_JUNCTION, p_in->now_ms, p_out);
     p_vc->stored_nav = VC_NAV_NONE;
 
     if ((VC_NAV_LEFT == nav) || (VC_NAV_RIGHT == nav)
@@ -154,6 +166,50 @@ step_handle_junction (vc_t * p_vc, vc_inputs_t const * p_in,
     {
         /* STRAIGHT, no stored command or invalid barcode: carry on. */
         enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
+        p_out->motion     = VC_MOTION_DRIVE;
+        p_out->speed_mm_s = p_in->b_hump ? VC_SPEED_HUMP_MM_S
+                                         : VC_SPEED_NORMAL_MM_S;
+        p_out->steer      = 0;                  /* Straight across. */
+    }
+}
+
+
+/* FOLLOW_LINE: steer along the line; watch for obstacle, junction, loss. */
+static void
+step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
+{
+    vc_line_t const line = line_of(p_in);
+
+    /* A barcode is only remembered here; it is acted on at the junction. */
+    store_barcode(p_vc, p_in);
+
+    if (p_in->b_finish)
+    {
+        enter_state(p_vc, VC_STATE_FINISHED, p_in->now_ms, p_out);
+    }
+    else if (p_in->b_obstacle_ahead)
+    {
+        enter_state(p_vc, VC_STATE_OBSTACLE_SCAN, p_in->now_ms, p_out);
+    }
+    else if ((VC_LINE_JUNCTION == line)
+             && (VC_LINE_JUNCTION != p_vc->prev_line))
+    {
+        /* Edge-triggered: one decision per junction, however long the
+         * sensors stay over it. */
+        handle_junction(p_vc, p_in, p_out);
+    }
+    else if (VC_LINE_LOST == line)
+    {
+        enter_state(p_vc, VC_STATE_REACQUIRE_LINE, p_in->now_ms, p_out);
+    }
+    else
+    {
+        p_out->motion     = VC_MOTION_DRIVE;
+        p_out->speed_mm_s = p_in->b_hump ? VC_SPEED_HUMP_MM_S
+                                         : VC_SPEED_NORMAL_MM_S;
+        /* Over a junction already handled: drive straight across. */
+        p_out->steer      = (VC_LINE_JUNCTION == line) ? 0
+                                                       : p_in->line_error;
     }
 }
 
@@ -162,8 +218,7 @@ step_handle_junction (vc_t * p_vc, vc_inputs_t const * p_in,
 static void
 step_turning (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 {
-    if (p_in->b_motion_failed
-        || (time_in_state(p_vc, p_in->now_ms) >= VC_TURN_TIMEOUT_MS))
+    if (p_in->b_motion_failed)
     {
         enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
     }
@@ -178,14 +233,37 @@ step_turning (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 }
 
 
+/* OBSTACLE_SCAN, while reversing before a rescan: wait for the reverse
+ * to finish, and only then ask Buddy 5 for a new scan. */
+static void
+step_rescan_reverse (vc_t * p_vc, vc_inputs_t const * p_in,
+                     vc_outputs_t * p_out)
+{
+    if (p_in->b_motion_failed)
+    {
+        enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
+    }
+    else if (p_in->b_motion_done)
+    {
+        p_vc->b_reversing = false;
+        p_vc->entry_ms    = p_in->now_ms;      /* Fresh scan time budget. */
+        p_out->obstacle   = VC_OBST_SCAN_REQUEST;
+    }
+    else
+    {
+        /* Still reversing; any scan result now would be stale. */
+    }
+}
+
+
 /* OBSTACLE_SCAN: act on Buddy 5's recommendation. */
 static void
 step_obstacle_scan (vc_t * p_vc, vc_inputs_t const * p_in,
                     vc_outputs_t * p_out)
 {
-    if (time_in_state(p_vc, p_in->now_ms) >= VC_SCAN_TIMEOUT_MS)
+    if (p_vc->b_reversing)
     {
-        enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
+        step_rescan_reverse(p_vc, p_in, p_out);
     }
     else if (p_in->b_scan_done)
     {
@@ -207,9 +285,9 @@ step_obstacle_scan (vc_t * p_vc, vc_inputs_t const * p_in,
                 if (VC_MAX_RESCANS > p_vc->rescans)
                 {
                     p_vc->rescans++;
-                    p_vc->entry_ms  = p_in->now_ms;  /* Restart scan timer. */
-                    p_out->motion   = VC_MOTION_REVERSE;
-                    p_out->obstacle = VC_OBST_SCAN_REQUEST;
+                    p_vc->b_reversing = true;
+                    p_vc->entry_ms    = p_in->now_ms;  /* Time the reverse. */
+                    p_out->motion     = VC_MOTION_REVERSE;
                 }
                 else
                 {
@@ -220,6 +298,7 @@ step_obstacle_scan (vc_t * p_vc, vc_inputs_t const * p_in,
 
             case VC_AVOID_STOP:
             default:
+                /* STOP, or an unknown recommendation: fail safe. */
                 enter_state(p_vc, VC_STATE_EMERGENCY_STOP,
                             p_in->now_ms, p_out);
                 break;
@@ -236,8 +315,7 @@ step_obstacle_scan (vc_t * p_vc, vc_inputs_t const * p_in,
 static void
 step_bypass (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 {
-    if (p_in->b_motion_failed
-        || (time_in_state(p_vc, p_in->now_ms) >= VC_BYPASS_TIMEOUT_MS))
+    if (p_in->b_motion_failed)
     {
         enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
     }
@@ -257,13 +335,16 @@ static void
 step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
                      vc_outputs_t * p_out)
 {
-    if (VC_LINE_LOST != p_in->line)
+    store_barcode(p_vc, p_in);
+
+    if (p_in->b_obstacle_ahead)
+    {
+        /* Something in the way while creeping: stop and scan again. */
+        enter_state(p_vc, VC_STATE_OBSTACLE_SCAN, p_in->now_ms, p_out);
+    }
+    else if (VC_LINE_LOST != line_of(p_in))
     {
         enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
-    }
-    else if (time_in_state(p_vc, p_in->now_ms) >= VC_REACQUIRE_TIMEOUT_MS)
-    {
-        enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
     }
     else
     {
@@ -274,20 +355,96 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
 }
 
 
+/* Rule 3: the current state's own transitions. */
+static void
+step_state (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
+{
+    switch (p_vc->state)
+    {
+        case VC_STATE_INITIALISE:
+            if (p_in->b_init_failed)
+            {
+                enter_state(p_vc, VC_STATE_EMERGENCY_STOP,
+                            p_in->now_ms, p_out);
+            }
+            else if (p_in->b_init_ok)
+            {
+                enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
+            }
+            else
+            {
+                /* Still initialising. */
+            }
+            break;
+
+        case VC_STATE_READY:
+            if (VC_CMD_START == p_in->cmd)
+            {
+                enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
+            }
+            break;
+
+        case VC_STATE_FOLLOW_LINE:
+            step_follow_line(p_vc, p_in, p_out);
+            break;
+
+        case VC_STATE_TURNING:
+            step_turning(p_vc, p_in, p_out);
+            break;
+
+        case VC_STATE_OBSTACLE_SCAN:
+            step_obstacle_scan(p_vc, p_in, p_out);
+            break;
+
+        case VC_STATE_BYPASS:
+            step_bypass(p_vc, p_in, p_out);
+            break;
+
+        case VC_STATE_REACQUIRE_LINE:
+            step_reacquire_line(p_vc, p_in, p_out);
+            break;
+
+        case VC_STATE_EMERGENCY_STOP:
+            /* Latched: exit only when the fault is cleared, the car is
+             * still, AND the operator acknowledges with STOP ("restart
+             * permitted").  Timeouts raise no fault bit, so without the
+             * acknowledgement the emergency would end after one step. */
+            if ((0U == p_in->serious_faults) && p_in->b_stationary
+                && (VC_CMD_STOP == p_in->cmd))
+            {
+                enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
+            }
+            break;
+
+        case VC_STATE_HANDLE_JUNCTION:  /* Transient: never seen here.    */
+        case VC_STATE_FINISHED:
+            /* Remain where we are. */
+            break;
+
+        default:
+            /* Corrupted state value: fail safe. */
+            enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
+            break;
+    }
+}
+
+
 /* ------------------------------------------------------------------------ *
  * Public API
  * ------------------------------------------------------------------------ */
 
 void
-vc_init (vc_t * p_vc)
+vc_init (vc_t * p_vc, uint32_t now_ms)
 {
     if (NULL != p_vc)
     {
-        p_vc->state      = VC_STATE_INITIALISE;
-        p_vc->entry_ms   = 0U;
-        p_vc->stored_nav = VC_NAV_NONE;
-        p_vc->rescans    = 0U;
+        p_vc->state             = VC_STATE_INITIALISE;
+        p_vc->entry_ms          = now_ms;
+        p_vc->stored_nav        = VC_NAV_NONE;
+        p_vc->rescans           = 0U;
         p_vc->b_obstacle_active = false;
+        p_vc->b_reversing       = false;
+        p_vc->prev_line         = VC_LINE_LOST;
     }
 }
 
@@ -306,6 +463,8 @@ vc_step (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 static void
 step_checked (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 {
+    uint32_t timeout_ms;
+
     /* Default: no change, no new actions. */
     p_out->b_state_changed = false;
     p_out->motion          = VC_MOTION_NONE;
@@ -327,79 +486,24 @@ step_checked (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     {
         enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
     }
-    /* Rule 3: the current state's own transitions. */
     else
     {
-        switch (p_vc->state)
+        /* Rule 3: the state's own transitions. */
+        step_state(p_vc, p_in, p_out);
+
+        /* Rule 4: the state's timeout, only if nothing else happened.
+         * step_state() has already replaced any out-of-range state. */
+        timeout_ms = g_state_timeout_ms[p_vc->state];
+
+        if ((!p_out->b_state_changed) && (0U != timeout_ms)
+            && (time_in_state(p_vc, p_in->now_ms) >= timeout_ms))
         {
-            case VC_STATE_INITIALISE:
-                if (p_in->b_init_failed)
-                {
-                    enter_state(p_vc, VC_STATE_EMERGENCY_STOP,
-                                p_in->now_ms, p_out);
-                }
-                else if (p_in->b_init_ok)
-                {
-                    enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
-                }
-                else
-                {
-                    /* Still initialising. */
-                }
-                break;
-
-            case VC_STATE_READY:
-                if (VC_CMD_START == p_in->cmd)
-                {
-                    enter_state(p_vc, VC_STATE_FOLLOW_LINE,
-                                p_in->now_ms, p_out);
-                }
-                break;
-
-            case VC_STATE_FOLLOW_LINE:
-                step_follow_line(p_vc, p_in, p_out);
-                break;
-
-            case VC_STATE_HANDLE_JUNCTION:
-                step_handle_junction(p_vc, p_in, p_out);
-                break;
-
-            case VC_STATE_TURNING:
-                step_turning(p_vc, p_in, p_out);
-                break;
-
-            case VC_STATE_OBSTACLE_SCAN:
-                step_obstacle_scan(p_vc, p_in, p_out);
-                break;
-
-            case VC_STATE_BYPASS:
-                step_bypass(p_vc, p_in, p_out);
-                break;
-
-            case VC_STATE_REACQUIRE_LINE:
-                step_reacquire_line(p_vc, p_in, p_out);
-                break;
-
-            case VC_STATE_EMERGENCY_STOP:
-                /* Latched: exit only when the fault is cleared, the car is
-                 * still, AND the operator acknowledges with STOP ("restart
-                 * permitted").  Timeouts raise no fault bit, so without the
-                 * acknowledgement the emergency would end after one step. */
-                if ((0U == p_in->serious_faults) && p_in->b_stationary
-                    && (VC_CMD_STOP == p_in->cmd))
-                {
-                    enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
-                }
-                break;
-
-            case VC_STATE_FINISHED:
-            default:
-                /* Remain stopped. */
-                break;
+            enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
         }
     }
 
-    p_out->state = p_vc->state;
+    p_vc->prev_line = line_of(p_in);
+    p_out->state    = p_vc->state;
 }
 
 
