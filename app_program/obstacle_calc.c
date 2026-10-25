@@ -28,6 +28,30 @@
 #define CALC_PWM_PINS_PER_SLICE (2U)
 #define CALC_PWM_SLICE_COUNT    (8U)
 
+/* Packed status word layout (see obstacle_calc.h). */
+#define CALC_ST_DIST_SHIFT      (0U)
+#define CALC_ST_DIST_MASK       (0xFFFU)
+#define CALC_ST_RANGE_SHIFT     (12U)
+#define CALC_ST_RANGE_MASK      (0x7U)
+#define CALC_ST_STATE_SHIFT     (15U)
+#define CALC_ST_STATE_MASK      (0x7U)
+#define CALC_ST_SEQ_SHIFT       (18U)
+#define CALC_ST_SEQ_MASK        (0xFFU)
+#define CALC_ST_RESERVED        (0xFC000000UL)
+
+/* Packed profile word layout (see obstacle_calc.h). */
+#define CALC_PR_DIST_SHIFT      (0U)
+#define CALC_PR_ANGLE_SHIFT     (12U)
+#define CALC_PR_WIDTH_SHIFT     (20U)
+#define CALC_PR_LEFT_SHIFT      (30U)
+#define CALC_PR_RIGHT_SHIFT     (42U)
+#define CALC_PR_ACTION_SHIFT    (54U)
+#define CALC_PR_MM_MASK         (0xFFFU)   /* Every 12-bit distance field. */
+#define CALC_PR_ANGLE_MASK      (0xFFU)
+#define CALC_PR_WIDTH_MASK      (0x3FFU)
+#define CALC_PR_ACTION_MASK     (0x7U)
+#define CALC_PR_RESERVED        (0xFE00000000000000ULL)
+
 
 /*!
  * @brief Classify a raw echo pulse width.
@@ -262,6 +286,189 @@ uint32_t
 obstacle_calc_pwm_slice(uint32_t gpio_pin)
 {
     return ((gpio_pin / CALC_PWM_PINS_PER_SLICE) % CALC_PWM_SLICE_COUNT);
+}
+
+/*!
+ * @brief Limit a value to the largest number a packed field can hold.
+ *
+ * @param[in] value     Value to pack.
+ * @param[in] field_max Largest value of the field (all bits set).
+ *
+ * @return value, or field_max if value is larger.
+ */
+static uint32_t
+calc_saturate(uint32_t value, uint32_t field_max)
+{
+    uint32_t result = value;
+
+    if (result > field_max)
+    {
+        result = field_max;
+    }
+
+    return (result);
+}
+
+/*!
+ * @brief Pack the latest reading and task state into one 32-bit word.
+ *
+ * One aligned 32-bit store is atomic on the Cortex-M0+, so a reader on the
+ * other core never sees half an update.  The distance is forced to 0
+ * unless the range status is OK, so an invalid reading can never be
+ * decoded as a distance.
+ *
+ * @param[in] p_status Values to pack.
+ *
+ * @return The packed word.  A NULL pointer or an out-of-range state or
+ *         status packs as NOT_READY with every other field 0.
+ */
+uint32_t
+obstacle_calc_pack_status(obstacle_status_t const * p_status)
+{
+    uint32_t word = ((uint32_t)OBSTACLE_RANGE_NOT_READY
+                     << CALC_ST_RANGE_SHIFT);  /* Cast: enum to field. */
+    uint32_t distance_mm = 0U;
+
+    if ((NULL != p_status) &&
+        (p_status->range_status <= OBSTACLE_RANGE_NOT_READY) &&
+        (p_status->state < OBSTACLE_STATE_COUNT))
+    {
+        if (OBSTACLE_RANGE_OK == p_status->range_status)
+        {
+            distance_mm = calc_saturate(p_status->distance_mm,
+                                        CALC_ST_DIST_MASK);
+        }
+
+        /* Casts to uint32_t: both enums were range-checked above. */
+        word = (distance_mm << CALC_ST_DIST_SHIFT)
+               | ((uint32_t)p_status->range_status << CALC_ST_RANGE_SHIFT)
+               | ((uint32_t)p_status->state << CALC_ST_STATE_SHIFT)
+               | ((p_status->seq & CALC_ST_SEQ_MASK) << CALC_ST_SEQ_SHIFT);
+    }
+
+    return (word);
+}
+
+/*!
+ * @brief Decode a packed status word.
+ *
+ * @param[in]  word     Word from obstacle_calc_pack_status().
+ * @param[out] p_status Decoded values; written only when the word is valid.
+ *
+ * @return false if p_status is NULL or the word is malformed: reserved
+ *         bits set, an unknown state or status code, or a distance with a
+ *         status other than OK.
+ */
+bool
+obstacle_calc_unpack_status(uint32_t word, obstacle_status_t * p_status)
+{
+    bool     b_valid = false;
+    uint32_t distance_mm = (word >> CALC_ST_DIST_SHIFT) & CALC_ST_DIST_MASK;
+    uint32_t range = (word >> CALC_ST_RANGE_SHIFT) & CALC_ST_RANGE_MASK;
+    uint32_t state = (word >> CALC_ST_STATE_SHIFT) & CALC_ST_STATE_MASK;
+
+    if ((NULL != p_status) &&
+        (0U == (word & CALC_ST_RESERVED)) &&
+        (range <= (uint32_t)OBSTACLE_RANGE_NOT_READY) &&  /* Cast: enum. */
+        (state < (uint32_t)OBSTACLE_STATE_COUNT) &&       /* Cast: enum. */
+        ((0U == distance_mm) ||
+         ((uint32_t)OBSTACLE_RANGE_OK == range)))         /* Cast: enum. */
+    {
+        /* Casts to the enums: both codes were range-checked above. */
+        p_status->distance_mm  = distance_mm;
+        p_status->range_status = (obstacle_range_status_t)range;
+        p_status->state        = (obstacle_state_t)state;
+        p_status->seq          = (word >> CALC_ST_SEQ_SHIFT)
+                                 & CALC_ST_SEQ_MASK;
+        b_valid = true;
+    }
+
+    return (b_valid);
+}
+
+/*!
+ * @brief Pack a scan result into one 64-bit word.
+ *
+ * A 64-bit store is not atomic on the Cortex-M0+: the obstacle task must
+ * hand this word over through a message or under a lock, not as a plain
+ * shared variable.
+ *
+ * @param[in] p_profile Values to pack.  Distances and the width saturate
+ *                      at their field maximum; the angle is limited to 180.
+ *
+ * @return The packed word.  A NULL pointer or an unknown action packs as
+ *         0: no valid distance and action STOP, the safe default.
+ */
+uint64_t
+obstacle_calc_pack_profile(obstacle_profile_t const * p_profile)
+{
+    uint64_t word = 0U;
+
+    if ((NULL != p_profile) && (p_profile->action < OBSTACLE_ACTION_COUNT))
+    {
+        /* Casts to uint64_t: each field is shifted past bit 31. */
+        word = ((uint64_t)calc_saturate(p_profile->distance_mm,
+                                        CALC_PR_MM_MASK)
+                << CALC_PR_DIST_SHIFT)
+               | ((uint64_t)calc_saturate(p_profile->angle_deg,
+                                          CALC_HALF_TURN_DEG)
+                  << CALC_PR_ANGLE_SHIFT)
+               | ((uint64_t)calc_saturate(p_profile->width_mm,
+                                          CALC_PR_WIDTH_MASK)
+                  << CALC_PR_WIDTH_SHIFT)
+               | ((uint64_t)calc_saturate(p_profile->clear_left_mm,
+                                          CALC_PR_MM_MASK)
+                  << CALC_PR_LEFT_SHIFT)
+               | ((uint64_t)calc_saturate(p_profile->clear_right_mm,
+                                          CALC_PR_MM_MASK)
+                  << CALC_PR_RIGHT_SHIFT)
+               | ((uint64_t)p_profile->action << CALC_PR_ACTION_SHIFT);
+    }
+
+    return (word);
+}
+
+/*!
+ * @brief Decode a packed profile word.
+ *
+ * @param[in]  word      Word from obstacle_calc_pack_profile().
+ * @param[out] p_profile Decoded values; written only when the word is
+ *                       valid.
+ *
+ * @return false if p_profile is NULL or the word is malformed: reserved
+ *         bits set, an angle above 180 or an unknown action.
+ */
+bool
+obstacle_calc_unpack_profile(uint64_t word, obstacle_profile_t * p_profile)
+{
+    bool     b_valid = false;
+
+    /* Casts to uint32_t: each value is masked to 12 bits or fewer. */
+    uint32_t angle_deg = (uint32_t)((word >> CALC_PR_ANGLE_SHIFT)
+                                    & CALC_PR_ANGLE_MASK);
+    uint32_t action = (uint32_t)((word >> CALC_PR_ACTION_SHIFT)
+                                 & CALC_PR_ACTION_MASK);
+
+    if ((NULL != p_profile) &&
+        (0U == (word & CALC_PR_RESERVED)) &&
+        (angle_deg <= CALC_HALF_TURN_DEG) &&
+        (action < (uint32_t)OBSTACLE_ACTION_COUNT))       /* Cast: enum. */
+    {
+        /* Casts as above; the action code was range-checked. */
+        p_profile->distance_mm    = (uint32_t)((word >> CALC_PR_DIST_SHIFT)
+                                               & CALC_PR_MM_MASK);
+        p_profile->angle_deg      = angle_deg;
+        p_profile->width_mm       = (uint32_t)((word >> CALC_PR_WIDTH_SHIFT)
+                                               & CALC_PR_WIDTH_MASK);
+        p_profile->clear_left_mm  = (uint32_t)((word >> CALC_PR_LEFT_SHIFT)
+                                               & CALC_PR_MM_MASK);
+        p_profile->clear_right_mm = (uint32_t)((word >> CALC_PR_RIGHT_SHIFT)
+                                               & CALC_PR_MM_MASK);
+        p_profile->action         = (obstacle_action_t)action;
+        b_valid = true;
+    }
+
+    return (b_valid);
 }
 
 /*** end of file ***/

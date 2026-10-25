@@ -35,6 +35,31 @@ uint32_t obstacle_calc_median(uint32_t * p_values, uint32_t count);
 /* RP2040 PWM slice (0..7) that drives a GPIO pin. */
 uint32_t obstacle_calc_pwm_slice(uint32_t gpio_pin);
 
+/* Minimum-bit wire formats (Tribunal 1 change requirement).
+ *
+ * Status word, 32 bits:
+ *   bits  0..11  distance_mm   0 = no valid reading, saturates at 4095
+ *   bits 12..14  range_status  obstacle_range_status_t
+ *   bits 15..17  state         obstacle_state_t
+ *   bits 18..25  seq           modulo 256
+ *   bits 26..31  reserved, 0
+ *
+ * Profile word, 64 bits:
+ *   bits  0..11  distance_mm     saturates at 4095
+ *   bits 12..19  angle_deg       0..180
+ *   bits 20..29  width_mm        saturates at 1023 (= 1023 mm or wider)
+ *   bits 30..41  clear_left_mm   0 = unknown, saturates at 4095
+ *   bits 42..53  clear_right_mm  0 = unknown, saturates at 4095
+ *   bits 54..56  action          obstacle_action_t
+ *   bits 57..63  reserved, 0
+ */
+uint32_t obstacle_calc_pack_status(obstacle_status_t const * p_status);
+bool     obstacle_calc_unpack_status(uint32_t            word,
+                                     obstacle_status_t * p_status);
+uint64_t obstacle_calc_pack_profile(obstacle_profile_t const * p_profile);
+bool     obstacle_calc_unpack_profile(uint64_t             word,
+                                      obstacle_profile_t * p_profile);
+
 #endif /* OBSTACLE_CALC_H */
 
 /*** end of file ***/
