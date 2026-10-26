@@ -18,12 +18,14 @@ else ifeq ($(APP),motion_closed_loop_test)
 APP_ENTRY_SRC := ../app_program/motion_closed_loop_test_main.c
 else ifeq ($(APP),ultrasonic_test)
 APP_ENTRY_SRC := ../app_program/ultrasonic_test_main.c
+else ifeq ($(APP),vc_car)
+APP_ENTRY_SRC := ../app_program/vc_car_main.c
 else ifeq ($(APP),servo_test)
 APP_ENTRY_SRC := ../app_program/servo_test_main.c
 endif
 
 TEMP_ALL_SRCS := $(wildcard ../app_program/*.c)
-TEMP_COMMON_SRCS := $(filter-out ../app_program/app_main.c ../app_program/motion_sim_test_main.c ../app_program/motion_motor_test_main.c ../app_program/motion_encoder_test_main.c ../app_program/motion_closed_loop_test_main.c ../app_program/ultrasonic_test_main.c ../app_program/servo_test_main.c,$(TEMP_ALL_SRCS))
+TEMP_COMMON_SRCS := $(filter-out ../app_program/app_main.c ../app_program/motion_sim_test_main.c ../app_program/motion_motor_test_main.c ../app_program/motion_encoder_test_main.c ../app_program/motion_closed_loop_test_main.c ../app_program/ultrasonic_test_main.c ../app_program/servo_test_main.c ../app_program/vc_car_main.c,$(TEMP_ALL_SRCS))
 TEMP_SRCS = $(TEMP_COMMON_SRCS) $(APP_ENTRY_SRC)
 TEMP_OBJS = $(TEMP_SRCS:.c=.o)
 TEMP_DEPS = $(TEMP_SRCS:.c=.d)
