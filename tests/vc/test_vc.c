@@ -696,6 +696,56 @@ test_obstacle_while_reacquiring (void)
 }
 
 static void
+test_reacquire_on_junction (void)
+{
+    printf("line found again on a junction\n");
+
+    /* After a plain line loss: the stored turn happens at THIS junction. */
+    go_to_follow_line(0U);
+    g_in.barcode = VC_NAV_LEFT;
+    step();
+    g_in.line = VC_LINE_LOST;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(VC_MOTION_TURN == g_out.motion);
+    CHECK(VC_NAV_LEFT == g_out.turn);
+    CHECK(VC_OBST_ABORT != g_out.obstacle);   /* Buddy 5 not involved. */
+
+    /* No stored barcode: straight across, and only once. */
+    go_to_follow_line(0U);
+    g_in.line = VC_LINE_LOST;
+    step();
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
+    CHECK(0 == g_out.steer);
+    step();                                   /* Still over it. */
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_state_changed);
+
+    /* After a bypass: turn, and Buddy 5 is released. */
+    go_to_obstacle_scan();
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_TURN_RIGHT;
+    step();
+    g_in.line              = VC_LINE_LOST;
+    g_in.b_obstacle_passed = true;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    g_in.barcode = VC_NAV_RIGHT;
+    step();
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(VC_NAV_RIGHT == g_out.turn);
+    CHECK(VC_OBST_ABORT == g_out.obstacle);
+}
+
+static void
 test_invalid_inputs (void)
 {
     printf("invalid input values fail safe\n");
@@ -748,6 +798,7 @@ main (void)
     test_timeout_vs_success();
     test_init_timeout();
     test_obstacle_while_reacquiring();
+    test_reacquire_on_junction();
     test_invalid_inputs();
 
     printf("\n%u checks, %u failed\n", (unsigned) g_checks,

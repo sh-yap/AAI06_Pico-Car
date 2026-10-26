@@ -134,6 +134,14 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
 }
 
 
+/* Line-following speed: capped while on a hump. */
+static int16_t
+follow_speed (vc_inputs_t const * p_in)
+{
+    return p_in->b_hump ? VC_SPEED_HUMP_MM_S : VC_SPEED_NORMAL_MM_S;
+}
+
+
 /* Remember a decoded barcode until the next junction. */
 static void
 store_barcode (vc_t * p_vc, vc_inputs_t const * p_in)
@@ -167,8 +175,7 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         /* STRAIGHT, no stored command or invalid barcode: carry on. */
         enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
         p_out->motion     = VC_MOTION_DRIVE;
-        p_out->speed_mm_s = p_in->b_hump ? VC_SPEED_HUMP_MM_S
-                                         : VC_SPEED_NORMAL_MM_S;
+        p_out->speed_mm_s = follow_speed(p_in);
         p_out->steer      = 0;                  /* Straight across. */
     }
 }
@@ -205,8 +212,7 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     else
     {
         p_out->motion     = VC_MOTION_DRIVE;
-        p_out->speed_mm_s = p_in->b_hump ? VC_SPEED_HUMP_MM_S
-                                         : VC_SPEED_NORMAL_MM_S;
+        p_out->speed_mm_s = follow_speed(p_in);
         /* Over a junction already handled: drive straight across. */
         p_out->steer      = (VC_LINE_JUNCTION == line) ? 0
                                                        : p_in->line_error;
@@ -335,6 +341,8 @@ static void
 step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
                      vc_outputs_t * p_out)
 {
+    vc_line_t const line = line_of(p_in);
+
     store_barcode(p_vc, p_in);
 
     if (p_in->b_obstacle_ahead)
@@ -342,7 +350,13 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
         /* Something in the way while creeping: stop and scan again. */
         enter_state(p_vc, VC_STATE_OBSTACLE_SCAN, p_in->now_ms, p_out);
     }
-    else if (VC_LINE_LOST != line_of(p_in))
+    else if (VC_LINE_JUNCTION == line)
+    {
+        /* Found the line on a junction: act on it now, or it would be
+         * skipped and its barcode used at the next junction instead. */
+        handle_junction(p_vc, p_in, p_out);
+    }
+    else if (VC_LINE_LOST != line)
     {
         enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
     }

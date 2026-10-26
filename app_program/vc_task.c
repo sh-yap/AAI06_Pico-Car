@@ -123,6 +123,15 @@ abs_i32 (int32_t value)
 }
 
 
+/* Motion was only busy or full: worth trying again next step. */
+static bool
+is_retryable (motion_result_t result)
+{
+    return (MOTION_RESULT_BUSY == result)
+           || (MOTION_RESULT_QUEUE_FULL == result);
+}
+
+
 /* Next Motion sequence id; 0 is reserved by Motion as invalid. */
 static uint32_t
 next_seq (void)
@@ -258,12 +267,26 @@ line_from_buddy3 (line_state_t state)
 
     switch (state)
     {
-        case LINE_LEFT:     line = VC_LINE_LEFT;     break;
-        case LINE_CENTRE:   line = VC_LINE_CENTRE;   break;
-        case LINE_RIGHT:    line = VC_LINE_RIGHT;    break;
-        case LINE_JUNCTION: line = VC_LINE_JUNCTION; break;
+        case LINE_LEFT:
+            line = VC_LINE_LEFT;
+            break;
+
+        case LINE_CENTRE:
+            line = VC_LINE_CENTRE;
+            break;
+
+        case LINE_RIGHT:
+            line = VC_LINE_RIGHT;
+            break;
+
+        case LINE_JUNCTION:
+            line = VC_LINE_JUNCTION;
+            break;
+
         case LINE_LOST:
-        default:            line = VC_LINE_LOST;     break;
+        default:
+            line = VC_LINE_LOST;
+            break;
     }
 
     return line;
@@ -277,12 +300,26 @@ nav_from_buddy3 (nav_command_t nav)
 
     switch (nav)
     {
-        case NAV_LEFT:     out = VC_NAV_LEFT;     break;
-        case NAV_RIGHT:    out = VC_NAV_RIGHT;    break;
-        case NAV_STRAIGHT: out = VC_NAV_STRAIGHT; break;
-        case NAV_UTURN:    out = VC_NAV_UTURN;    break;
+        case NAV_LEFT:
+            out = VC_NAV_LEFT;
+            break;
+
+        case NAV_RIGHT:
+            out = VC_NAV_RIGHT;
+            break;
+
+        case NAV_STRAIGHT:
+            out = VC_NAV_STRAIGHT;
+            break;
+
+        case NAV_UTURN:
+            out = VC_NAV_UTURN;
+            break;
+
         case NAV_NONE:
-        default:           out = VC_NAV_NONE;     break;
+        default:
+            out = VC_NAV_NONE;
+            break;
     }
 
     return out;
@@ -452,8 +489,7 @@ drive (int16_t speed_mm_s, int8_t steer)
             g_drive_speed = speed_mm_s;
             g_drive_steer = steer;
         }
-        else if ((MOTION_RESULT_BUSY == result)
-                 || (MOTION_RESULT_QUEUE_FULL == result))
+        else if (is_retryable(result))
         {
             /* Try again next step. */
         }
@@ -487,8 +523,7 @@ service_pending (void)
             g_manoeuvre_seq = g_pending.sequence_id;
             g_b_pending     = false;
         }
-        else if (((MOTION_RESULT_BUSY == result)
-                  || (MOTION_RESULT_QUEUE_FULL == result))
+        else if (is_retryable(result)
                  && (VC_SUBMIT_RETRIES > g_pending_tries))
         {
             g_pending_tries++;
@@ -612,7 +647,6 @@ vc_task_entry (INT stacd, void * p_exinf)
         in.now_ms        = now;
         in.b_init_ok     = g_b_init_ok;
         in.b_init_failed = !g_b_init_ok;
-        in.recommendation = VC_AVOID_STOP;
         read_command(&in);
         read_motion(&in);
         read_line(&in, now);
