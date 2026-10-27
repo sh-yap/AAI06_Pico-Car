@@ -15,13 +15,20 @@
 #define MOTION_STOP_EVENT 1U
 #define MOTION_STACK_SIZE 4096U
 #define MOTION_PI_Q16 205887
-#define MOTION_STARTUP_BOOST_MS 200U
+/* Start-up boost length and stall limit: floor-test values on
+   test_integrate (were 200 ms and 500 ms, tuned unloaded) - Buddy 2 to
+   confirm. */
+#define MOTION_STARTUP_BOOST_MS 400U
+#define MOTION_STALL_MS 1000U
 #define MOTION_ZERO_SPEED_MM_S 20
 
 static motion_config_t motion_config;
 static motion_status_t motion_status;
-static motion_pid_t left_pid = { 0.15f, 0.30f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
-static motion_pid_t right_pid = { 0.15f, 0.30f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
+/* kp/ki were 0.15/0.30 (unloaded): on the floor a slowed wheel gained only
+   ~60 permille per second and stalled (27 Oct closed-loop test).  Faster
+   test_integrate values - Buddy 2 to retune loaded. */
+static motion_pid_t left_pid = { 0.40f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
+static motion_pid_t right_pid = { 0.40f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
 static motion_command_t command_queue[MOTION_QUEUE_DEPTH];
 static uint8_t command_buffer[sizeof(command_queue) + MOTION_QUEUE_DEPTH * 8U];
 static UW motion_stack[MOTION_STACK_SIZE / sizeof(UW)];
@@ -318,7 +325,7 @@ static void motion_loop(void)
             } else {
                 right_stall_ms = 0U;
             }
-            if (left_stall_ms >= 500U || right_stall_ms >= 500U) {
+            if (left_stall_ms >= MOTION_STALL_MS || right_stall_ms >= MOTION_STALL_MS) {
                 motion_fault(MOTION_FAULT_STALL);
             }
         }

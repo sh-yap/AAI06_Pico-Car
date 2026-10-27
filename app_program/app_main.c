@@ -51,6 +51,7 @@
 #include "comms_demo.h"
 #include "build_info.h"
 #include "timing_probe.h"
+#include "buddy3_task.h" 
 
 #if TM_WIFI_CYW43
 /* Plain C types on purpose - see the note in cyw43_utk.h. */
@@ -564,6 +565,13 @@ LOCAL T_CTSK ctsk_blink = {
 	.tskatr		= TA_HLNG | TA_RNG3,
 };
 
+LOCAL T_CTSK ctsk_buddy3 = {          
+	.itskpri	= 5,
+	.stksz		= STACK_SZ,
+	.task		= buddy3_task,
+	.tskatr		= TA_HLNG | TA_RNG3,
+};
+
 LOCAL T_CMPF cmpf = {
 	.mpfatr		= TA_TFIFO | TA_RNG3,
 	.mpfcnt		= N_RECORDS,
@@ -617,6 +625,7 @@ EXPORT INT usermain(void)
 	mbfid = tk_cre_mbf(&cmbf); if(!made("mbf", mbfid)) return 1;
 	semid = tk_cre_sem(&csem); if(!made("sem", semid)) return 1;
 	flgid = tk_cre_flg(&cflg); if(!made("flg", flgid)) return 1;
+	if(!made("mbf(buddy3)", buddy3_output_mbf_create())) return 1;
 
 	/* Communication API: before any task that may report telemetry. */
 	if(!comms_init()) tm_printf((UB *)"[init] comms_init failed\n");
@@ -629,6 +638,7 @@ EXPORT INT usermain(void)
 	tid = tk_cre_tsk(&ctsk_monitor);  if(made("tsk(monitor)",  tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_consumer); if(made("tsk(consumer)", tid)) tk_sta_tsk(tid, 0);
 	tid = tk_cre_tsk(&ctsk_producer); if(made("tsk(producer)", tid)) tk_sta_tsk(tid, 0);
+	tid = tk_cre_tsk(&ctsk_buddy3);   if(made("tsk(buddy3)",   tid)) tk_sta_tsk(tid, 0); 
 #if TM_WIFI_CYW43
 	tid = tk_cre_tsk(&ctsk_wifi);     if(made("tsk(wifi)",     tid)) tk_sta_tsk(tid, 0);
 #endif

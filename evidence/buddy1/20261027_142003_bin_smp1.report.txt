@@ -1,0 +1,32 @@
+MQTT log report: 20261027_142003_bin_smp1.log
+Sizes: bytes on the wire (from 20261027_142003_bin_smp1.log.hex)
+Duration: 97.0 s   messages: 225   avg rate: 2.3 msg/s   payload: 24 B/s
+
+topic                        count     msg/s  avg bytes
+robot/command                    2      0.02          5
+robot/event/barcode              3      0.03          5
+robot/event/command              1      0.01          5
+robot/event/hump                 2      0.02          7
+robot/event/obstacle             1      0.01         12
+robot/event/run                  1      0.01          5
+robot/heartbeat                 64      0.66          9
+robot/info                       1      0.01         20
+robot/state                      8      0.08          6
+robot/status                     2      0.02          7
+robot/telemetry/line            19      0.20          6
+robot/telemetry/motion          85      0.88         14
+robot/telemetry/terrain         36      0.37          9
+
+Heartbeat: 64 received, 0 missing in 0 gap(s), 0 reboot(s), longest silence 2.4 s
+Heartbeat interval by the Pico's own clock: max 1.28 s (1.00 = sent on time)
+Command acknowledgement: 1 commands, avg 94 ms, max 94 ms (laptop -> Pico -> laptop)
+Events dropped on the robot (max ev_drop): 0
+
+Timeline:
+  14:20:05.171  status: online
+  14:20:05.171  firmware: Oct 27 2026 14:02:25
+  14:20:50.248  command sent: start
+  14:20:50.342  command ack (94 ms): {"v":2,"t":88660,"cmd":"start","ok":1}
+  14:20:50.496  run: {"v":2,"t":88770,"run":"BEGIN"}
+  14:21:24.521  status: offline
+  14:21:42.211  command sent: stop

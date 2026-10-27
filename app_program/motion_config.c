@@ -30,12 +30,18 @@ void motion_config_default(motion_config_t *config)
     config->max_speed_mm_s = 300;
     config->max_pwm_permille = 900U;
     config->deadband_permille = 80U;
-    /* Bench motor test showed that a short 200-permille boost starts both wheels. */
-    config->startup_pwm_permille = 200U;
+    /* Bench motor test showed that a short 200-permille boost starts both
+       wheels unloaded.  On the floor (power bank, 27 Oct track test) 200
+       stalled 4 of 5 starts; 350 is a test_integrate value - Buddy 2 to
+       confirm. */
+    config->startup_pwm_permille = 350U;
     /* Initial unloaded affine fits from the measured 80/100-permille runs.
-       Slope units are PWM permille per mm/s, represented in Q10. */
-    config->left_feedforward_offset_permille = 59U;
-    config->right_feedforward_offset_permille = 57U;
+       Slope units are PWM permille per mm/s, represented in Q10.
+       Offsets were 59/57 (unloaded).  On the floor 200 mm/s needed about
+       220-260 permille vs 160 predicted (27 Oct closed-loop test), so the
+       offsets are raised on test_integrate - Buddy 2 to retune loaded. */
+    config->left_feedforward_offset_permille = 120U;
+    config->right_feedforward_offset_permille = 120U;
     config->left_feedforward_slope_q10 = 318U;
     config->right_feedforward_slope_q10 = 301U;
     /* Extra slope above 100 mm/s, derived from the first 200 mm/s run. */

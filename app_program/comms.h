@@ -16,10 +16,12 @@
  *   - Each comms_report_*() function must be called from ONE task only
  *     (the owner of that data).  Events and commands may be used from any
  *     task.
- *   - Units: mm, mm/s, degrees, ms.  No floating point.
+ *   - Units as each owner's own data (see the structs).  No floating point.
  *   - Call comms_init() once from usermain() before starting any task.
  *
- * MQTT topics, payload formats and rates: see docs/MQTT.md.
+ * Payload format: packed binary by default (CR1), or JSON when built with
+ * COMMS_FORMAT=json; fields and bit widths in docs/BINARY_FORMAT.md.  The
+ * laptop decodes both with tools/robot_decode.ps1.
  */
 #ifndef COMMS_H
 #define COMMS_H
@@ -56,21 +58,23 @@ typedef enum
     COMMS_NAV_COUNT
 } comms_nav_t;
 
+/* Same numbering as Buddy 3's line_state_t (docs/DATA_DEFINITIONS.md). */
 typedef enum
 {
-    COMMS_LINE_LOST = 0,
-    COMMS_LINE_LEFT,
+    COMMS_LINE_LEFT = 0,
     COMMS_LINE_CENTRE,
     COMMS_LINE_RIGHT,
+    COMMS_LINE_LOST,
     COMMS_LINE_JUNCTION,
     COMMS_LINE_COUNT
 } comms_line_pos_t;
 
+/* Same numbering as Buddy 4's b4_types_motion_t.  QUIET means the readings
+ * barely changed; it does NOT prove the car is stationary. */
 typedef enum
 {
-    COMMS_MOTION_STATIONARY = 0,
+    COMMS_MOTION_QUIET = 0,
     COMMS_MOTION_ACCELERATING,
-    COMMS_MOTION_TURNING,
     COMMS_MOTION_CLIMBING_HUMP,
     COMMS_MOTION_DESCENDING_HUMP,
     COMMS_MOTION_IMPACT,
@@ -112,18 +116,19 @@ typedef struct
 typedef struct
 {
     comms_line_pos_t position;
-    int32_t          error;     /* signed line error, owner's scale     */
-    uint8_t          sensors;   /* bit0 left, bit1 centre, bit2 right;
-                                   1 = black                           */
+    int32_t          error;     /* -127 (left) .. +127 (right)          */
+    uint8_t          sensors;   /* bit0 centre (GP27), bit1 right
+                                   (GP26); 1 = black.  2 line sensors
+                                   (Buddy 3); GP28 is barcode only.    */
 } comms_line_t;
 
-/* Buddy 4 - IMU / terrain. */
+/* Buddy 4 - IMU / terrain (Buddy 4's own units). */
 typedef struct
 {
     comms_motion_class_t motion;
-    int32_t              pitch_deg;
-    int32_t              roll_deg;
-    int32_t              hump_height_mm;   /* current, 0 on flat ground */
+    int32_t              tilt_mg;    /* pitch, -1000 .. +1000 milli-g   */
+    int32_t              hump_dmm;   /* current hump height, 0.1 mm
+                                        steps, 0 .. 800 (0 .. 80.0 mm)  */
 } comms_terrain_t;
 
 /* Buddy 5 - obstacle profile (sent as an event). */
@@ -155,9 +160,11 @@ bool comms_init(void);
 bool comms_is_connected(void);
 void comms_get_stats(comms_stats_t * p_stats);
 
-/* Vehicle controller. */
+/* Vehicle controller ONLY: these replace the whole state / fault word, so a
+ * second caller would overwrite the controller's value. */
 void comms_set_state(comms_state_t state);
-void comms_set_fault(uint32_t fault_flags);     /* 0 = no fault         */
+void comms_set_fault(uint32_t fault_flags);     /* 0 = no fault; bits 0-15
+                                                   are sent (DATA_DEFS §6) */
 bool comms_begin_run(void);     /* resets the run summary               */
 bool comms_end_run(void);       /* publishes the run summary            */
 bool comms_get_command(comms_cmd_t * p_cmd);    /* true if one waiting  */
@@ -169,7 +176,7 @@ void comms_report_terrain(comms_terrain_t const * p_terrain);
 
 /* Events: queued and sent reliably.  false = queue full, event dropped. */
 bool comms_event_barcode(char code, comms_nav_t command);
-bool comms_event_hump(int32_t peak_height_mm);
+bool comms_event_hump(int32_t peak_dmm);    /* 0.1 mm steps, 0 .. 800   */
 bool comms_event_obstacle(comms_obstacle_t const * p_obstacle);
 bool comms_event_motion(comms_motion_class_t motion);
 

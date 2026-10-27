@@ -52,7 +52,21 @@ $lines  = New-Object System.Collections.Generic.List[string]
 while ($null -ne ($l = $reader.ReadLine())) { $lines.Add($l) }
 $reader.Close()
 
+# Sizes: mqtt_log.ps1 also writes <log>.hex with the raw bytes, one line per
+# message in the same order.  With it, sizes are the bytes actually sent
+# (binary or JSON); without it (older logs), the logged text is counted.
+$hexSizes = $null
+if (Test-Path "$Path.hex") {
+    $hexSizes = New-Object System.Collections.Generic.List[int]
+    foreach ($h in [System.IO.File]::ReadAllLines("$Path.hex")) {
+        $hp = $h.Split(' ', 3)
+        if ($hp.Count -ge 3) { $hexSizes.Add([int]($hp[2].Trim().Length / 2)) } else { $hexSizes.Add(0) }
+    }
+}
+$lineIndex = -1
+
 foreach ($line in $lines) {
+    $lineIndex++
     $parts = $line.Split(' ', 3)
     if (($parts.Count -lt 2) -or ($parts[0].Length -lt 23)) { continue }
 
@@ -66,11 +80,13 @@ foreach ($line in $lines) {
 
     if ($null -eq $first) { $first = $t }
     $last = $t
-    $totalBytes += $payload.Length
+    $size = $payload.Length
+    if (($null -ne $hexSizes) -and ($lineIndex -lt $hexSizes.Count)) { $size = $hexSizes[$lineIndex] }
+    $totalBytes += $size
 
     if (-not $topics.ContainsKey($topic)) { $topics[$topic] = @{ Count = 0; Bytes = 0 } }
     $topics[$topic]["Count"] += 1
-    $topics[$topic]["Bytes"] += $payload.Length
+    $topics[$topic]["Bytes"] += $size
 
     switch -Wildcard ($topic) {
         "robot/heartbeat" {
@@ -126,6 +142,8 @@ $totalMsgs = 0
 foreach ($v in $topics.Values) { $totalMsgs += $v['Count'] }
 
 Out-Line "MQTT log report: $(Split-Path $Path -Leaf)"
+if ($null -ne $hexSizes) { Out-Line "Sizes: bytes on the wire (from $(Split-Path "$Path.hex" -Leaf))" }
+else { Out-Line "Sizes: logged text length (no .hex file)" }
 Out-Line ("Duration: {0:N1} s   messages: {1}   avg rate: {2:N1} msg/s   payload: {3:N0} B/s" -f `
           $duration, $totalMsgs, ($totalMsgs / $duration), ($totalBytes / $duration))
 Out-Line ""
