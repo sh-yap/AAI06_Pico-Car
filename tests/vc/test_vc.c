@@ -696,6 +696,47 @@ test_obstacle_while_reacquiring (void)
 }
 
 static void
+test_search_towards_last_side (void)
+{
+    printf("line search curves towards where the line was last seen\n");
+
+    /* Line drifts off to the left, then lost: search steering left. */
+    go_to_follow_line(0U);
+    g_in.line       = VC_LINE_LEFT;
+    g_in.line_error = -127;
+    step();
+    g_in.line       = VC_LINE_LOST;
+    g_in.line_error = 0;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    step();
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
+    CHECK(VC_SPEED_SEARCH_MM_S == g_out.speed_mm_s);
+    CHECK(-VC_SEARCH_STEER == g_out.steer);
+
+    /* Off to the right: search steering right.  A centred reading in
+     * between keeps the last side. */
+    go_to_follow_line(0U);
+    g_in.line       = VC_LINE_RIGHT;
+    g_in.line_error = 63;
+    step();
+    g_in.line       = VC_LINE_CENTRE;
+    g_in.line_error = 0;
+    step();
+    g_in.line = VC_LINE_LOST;
+    step();
+    step();
+    CHECK(VC_SEARCH_STEER == g_out.steer);
+
+    /* Never seen a side: search straight. */
+    go_to_follow_line(0U);
+    g_in.line = VC_LINE_LOST;
+    step();
+    step();
+    CHECK(0 == g_out.steer);
+}
+
+static void
 test_reacquire_on_junction (void)
 {
     printf("line found again on a junction\n");
@@ -799,6 +840,7 @@ main (void)
     test_init_timeout();
     test_obstacle_while_reacquiring();
     test_reacquire_on_junction();
+    test_search_towards_last_side();
     test_invalid_inputs();
 
     printf("\n%u checks, %u failed\n", (unsigned) g_checks,

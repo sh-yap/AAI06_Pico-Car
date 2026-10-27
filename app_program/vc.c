@@ -125,11 +125,38 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
             p_out->obstacle = VC_OBST_SCAN_REQUEST;
             p_vc->b_obstacle_active = true;
             p_vc->rescans   = 0U;
+            p_vc->last_side = 0;    /* After a bypass, search straight. */
             break;
 
         default:
             /* Other states act in their own step handling. */
             break;
+    }
+}
+
+
+/* Remember which side the line was last seen on (from the sign of a
+ * non-zero line error while the line is visible). */
+static void
+remember_side (vc_t * p_vc, vc_inputs_t const * p_in)
+{
+    vc_line_t const line = line_of(p_in);
+
+    if ((VC_STATE_FOLLOW_LINE == p_vc->state)
+        && (VC_LINE_LOST != line) && (VC_LINE_JUNCTION != line))
+    {
+        if (0 > p_in->line_error)
+        {
+            p_vc->last_side = -1;
+        }
+        else if (0 < p_in->line_error)
+        {
+            p_vc->last_side = 1;
+        }
+        else
+        {
+            /* Centred: keep the last known side. */
+        }
     }
 }
 
@@ -364,7 +391,10 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
     {
         p_out->motion     = VC_MOTION_DRIVE;
         p_out->speed_mm_s = VC_SPEED_SEARCH_MM_S;
-        p_out->steer      = 0;
+        /* Curve towards where the line was last seen (straight if
+         * unknown): the line sensors report a side only briefly before
+         * "lost", so driving straight would miss it on a bend. */
+        p_out->steer      = (int8_t) (p_vc->last_side * VC_SEARCH_STEER);
     }
 }
 
@@ -459,6 +489,7 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->b_obstacle_active = false;
         p_vc->b_reversing       = false;
         p_vc->prev_line         = VC_LINE_LOST;
+        p_vc->last_side         = 0;
     }
 }
 
@@ -516,6 +547,7 @@ step_checked (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         }
     }
 
+    remember_side(p_vc, p_in);
     p_vc->prev_line = line_of(p_in);
     p_out->state    = p_vc->state;
 }

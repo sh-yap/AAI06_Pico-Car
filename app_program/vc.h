@@ -31,6 +31,8 @@
 #define VC_SPEED_HUMP_MM_S      (100)    /* 50 % cap while on a hump.        */
 #define VC_SPEED_SEARCH_MM_S    (120)    /* Slow forward while searching;
                                             80 stalled on the floor.         */
+#define VC_SEARCH_STEER         (60)     /* Steer towards the side the line
+                                            was last seen on (of 127).       */
 #define VC_TURN_TIMEOUT_MS      (3000U)  /* TBC: 2 x expected turn time.     */
 #define VC_SCAN_TIMEOUT_MS      (3000U)  /* 1.5 s scan budget (A7) x 2.      */
 #define VC_BYPASS_TIMEOUT_MS    (6000U)  /* 3 s bypass target x 2.           */
@@ -161,6 +163,8 @@ typedef struct
     bool       b_obstacle_active;  /* A Buddy 5 request is in progress.   */
     bool       b_reversing;        /* Reversing before a rescan.          */
     vc_line_t  prev_line;          /* Line position at the previous step. */
+    int8_t     last_side;          /* -1 line last seen left, +1 right,
+                                      0 unknown: where to search.          */
 } vc_t;
 
 /* ------------------------------------------------------------------------ *
