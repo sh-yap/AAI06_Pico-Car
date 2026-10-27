@@ -7,7 +7,6 @@
 /* Keep Pico SDK types out of translation units that include µT-Kernel. */
 
 #include "tusb.h"
-#include "hardware/irq.h"
 
 uint32_t tusb_time_millis_api(void)
 {
@@ -77,15 +76,6 @@ unsigned tm_tusb_read_available(void)
 int tm_tusb_read_char(void)
 {
     return tud_cdc_read_char();
-}
-
-/* No host: drop off the bus (D+ pull-up off) and mask the USB controller
-   interrupt (USBCTRL_IRQ, number 5 on RP2040), so a powered but silent
-   port - e.g. a power bank - can no longer interrupt the core. */
-void tm_tusb_shutdown(void)
-{
-    tud_disconnect();
-    irq_set_enabled(5u, false);
 }
 
 /*

@@ -94,7 +94,18 @@ start_buddy3 (void)
 
     if (0 < buddy3_output_mbf_create())
     {
+#if TK_SUPPORT_SMP
+        /* Pinned to processor 1: Buddy 3 reads the ADC, whose interrupt is
+         * owned by processor 1, and the port only supports a peripheral
+         * driver used from the processor that owns its interrupt
+         * (docs/PORT_RP2040.md).  Unpinned, the scheduler ran it on
+         * processor 2 and it hard-faulted (pc=0, track test 27 Oct),
+         * stopping the VC and Buddy 5 on that core as well. */
+        ctsk.tskatr  = TA_HLNG | TA_RNG3 | TA_USERBUF | TA_ASSPRC;
+        ctsk.assprc  = TP_PRC1;
+#else
         ctsk.tskatr  = TA_HLNG | TA_RNG3 | TA_USERBUF;
+#endif
         ctsk.task    = buddy3_task;
         ctsk.itskpri = BUDDY3_PRIORITY;
         ctsk.stksz   = (SZ) sizeof(g_buddy3_stack);
