@@ -38,13 +38,17 @@ IMPORT void	tm_tusb_write_flush(void);
 IMPORT void	tm_tusb_discard_input(void);
 IMPORT unsigned	tm_tusb_read_available(void);
 IMPORT int	tm_tusb_read_char(void);
+IMPORT void	tm_tusb_shutdown(void);
 
-/* Was 3 (above the radio and Motion, both 4).  test_integrate: on a power
-   bank (USB powered, no host enumerating) the car's MQTT link stalled for
-   ~59 s every minute and heartbeats stretched to 1.7 s, while on a laptop
-   it was perfect.  Every USB interrupt wakes this task, so below the
-   control and radio tasks it can no longer starve them. */
-#define USB_TASK_PRIORITY	8
+#define USB_TASK_PRIORITY	3
+/* No host has enumerated this long after start (e.g. a power bank, which
+   powers the port but never talks on it): switch the USB device off and
+   mask its interrupt, so USB activity can never take time from the radio
+   and Motion tasks on this core.  test_integrate: on a power bank the MQTT
+   link stalled for ~59 s at a time and heartbeats stretched to 1.7 s,
+   while on a laptop it was perfect.  A console needs the host attached at
+   power-on. */
+#define USB_HEADLESS_MS		10000U
 #if TK_SUPPORT_SMP
 #define USB_TASK_STACK		4096
 #else
@@ -176,6 +180,9 @@ LOCAL void usb_service_task(INT stacd, void *exinf)
 	UB		chunk[USB_TX_CHUNK];
 	UW		count;
 	UINT		intsts;
+	SYSTIM		start;
+	SYSTIM		now;
+	BOOL		host_seen = FALSE;
 
 	(void)stacd;
 	(void)exinf;
@@ -192,6 +199,7 @@ LOCAL void usb_service_task(INT stacd, void *exinf)
 	}
 
 	tm_usb_link_state = 1;
+	(void)tk_get_otm(&start);
 
 	for(;;) {
 		/* Drain the whole event burst before yielding.  Returning to
@@ -204,6 +212,21 @@ LOCAL void usb_service_task(INT stacd, void *exinf)
 		tm_usb_link_state = tm_tusb_mounted()
 				  ? (tm_tusb_connected() ? 3 : 2)
 				  : 1;
+
+		/* Headless: nobody enumerated within USB_HEADLESS_MS of start.
+		   Switch USB off for good and park this task. */
+		if(tm_usb_link_state >= 2) {
+			host_seen = TRUE;
+		} else if(!host_seen) {
+			(void)tk_get_otm(&now);
+			if((UW)(now.lo - start.lo) >= USB_HEADLESS_MS) {
+				tm_tusb_shutdown();
+				tm_usb_link_state = 0;
+				for(;;) {
+					tk_slp_tsk(TMO_FEVR);
+				}
+			}
+		}
 
 		/* Preserve host keystrokes for an optional application test console. */
 		while (tm_tusb_read_available() > 0U) {
