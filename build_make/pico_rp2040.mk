@@ -25,8 +25,8 @@ APP ?= demo
 BOARD ?= pico
 UART_MIRROR := 1
 
-ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test ultrasonic_test servo_test vc_car),$(APP))
-$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, ultrasonic_test, servo_test or vc_car)
+ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test ultrasonic_test servo_test obstacle_task_test vc_car),$(APP))
+$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, ultrasonic_test, servo_test, obstacle_task_test or vc_car)
 endif
 ifneq ($(filter $(BOARD),pico robo_pico_robot),$(BOARD))
 $(error Unknown BOARD '$(BOARD)'; use pico or robo_pico_robot)

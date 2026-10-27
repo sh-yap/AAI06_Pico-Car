@@ -23,6 +23,54 @@ typedef enum
     OBSTACLE_RANGE_NOT_READY     /* Driver not initialised.                */
 } obstacle_range_status_t;
 
+/* Obstacle task states (Week 6 statechart).  The numbers are part of the
+ * packed status word, so add new states at the end; never renumber. */
+typedef enum
+{
+    OBSTACLE_STATE_INIT = 0,
+    OBSTACLE_STATE_MONITOR,
+    OBSTACLE_STATE_SCANNING,
+    OBSTACLE_STATE_SIDE_WATCH,
+    OBSTACLE_STATE_LINE_RECOVERY,
+    OBSTACLE_STATE_SENSOR_FAULT,
+    OBSTACLE_STATE_COUNT
+} obstacle_state_t;
+
+/* Recommended action for the Vehicle Controller.  Same numbers as
+ * comms_avoid_t in comms.h; keep the two lists in step. */
+typedef enum
+{
+    OBSTACLE_ACTION_STOP = 0,
+    OBSTACLE_ACTION_CONTINUE,
+    OBSTACLE_ACTION_TURN_LEFT,
+    OBSTACLE_ACTION_TURN_RIGHT,
+    OBSTACLE_ACTION_REVERSE_RETRY,
+    OBSTACLE_ACTION_COUNT
+} obstacle_action_t;
+
+/* Latest forward reading and task state, before packing into one 32-bit
+ * word with obstacle_calc_pack_status(). */
+typedef struct
+{
+    uint32_t                distance_mm;   /* 0 unless range_status is OK. */
+    obstacle_range_status_t range_status;
+    obstacle_state_t        state;
+    uint32_t                seq;           /* Packed modulo 256.           */
+} obstacle_status_t;
+
+/* Result of a scan, before packing into one 64-bit word with
+ * obstacle_calc_pack_profile().  Distances of 0 mean "no valid reading". */
+typedef struct
+{
+    uint32_t          distance_mm;     /* Closest point.                   */
+    uint32_t          angle_deg;       /* Bearing of the closest point,
+                                        * 90 = straight ahead.             */
+    uint32_t          width_mm;        /* Packed as at most 1023.          */
+    uint32_t          clear_left_mm;   /* 0 = unknown, not "blocked".      */
+    uint32_t          clear_right_mm;  /* 0 = unknown, not "blocked".      */
+    obstacle_action_t action;
+} obstacle_profile_t;
+
 /* One ultrasonic measurement. */
 typedef struct
 {
