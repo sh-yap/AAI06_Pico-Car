@@ -111,6 +111,8 @@ static course_code_t const course_codes[] =
     { 'B', BARCODE_B },
     { 'C', BARCODE_C },
     { 'D', BARCODE_D },
+    { 'F', BARCODE_F },
+    { 'Z', BARCODE_Z },
 };
 
 /* Stored black/white transition data. */
@@ -531,12 +533,19 @@ nav_command_t barcode_get_command(void)
      * Convert the decoded barcode into the
      * corresponding navigation command.
      */
+    /*
+     * COURSE MAPPING - the lecturer gives the meaning of A, F and Z on the
+     * day.  Until then: A = LEFT, F = RIGHT, Z = U-TURN (team choice for
+     * testing).  Change only the A / F / Z lines below.  B, C, D are the
+     * brief's example codes, kept for bench tests.
+     */
     switch (code)
     {
-        case BARCODE_A:
+        case BARCODE_A:                 /* Course code. */
             command = NAV_LEFT;
             break;
 
+        case BARCODE_F:                 /* Course code. */
         case BARCODE_B:
             command = NAV_RIGHT;
             break;
@@ -545,6 +554,7 @@ nav_command_t barcode_get_command(void)
             command = NAV_STRAIGHT;
             break;
 
+        case BARCODE_Z:                 /* Course code. */
         case BARCODE_D:
             command = NAV_UTURN;
             break;

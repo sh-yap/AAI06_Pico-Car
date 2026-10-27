@@ -15,7 +15,9 @@ typedef enum
     BARCODE_B,
     BARCODE_C,
     BARCODE_D,
-    BARCODE_INVALID
+    BARCODE_F,          /* Course uses A, F, Z (lecturer's slide).      */
+    BARCODE_Z,
+    BARCODE_INVALID     /* = 7: same numbers as the MQTT barcode field. */
 } barcode_t;
 
 

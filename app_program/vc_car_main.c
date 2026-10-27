@@ -59,7 +59,10 @@ report_radio (void)
     static uint32_t   s_tick       = 0U;
     static uint32_t   s_last_polls = 0U;
     static uint32_t   s_last_usb   = 0U;
-    T_CYW43_UTK_STATUS st;
+    /* Static: the status is ~2.4 KB and usermain runs on the 1 KB init
+     * task stack.  On the stack it overflowed at the first report and
+     * caused the 27 Oct hard faults. */
+    static T_CYW43_UTK_STATUS st;
     uint32_t          usb_irqs;
 
     s_tick++;

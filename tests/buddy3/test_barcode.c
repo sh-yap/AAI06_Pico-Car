@@ -45,6 +45,7 @@ static uint16_t const PAT_B    = 0x049U;
 static uint16_t const PAT_C    = 0x148U;
 static uint16_t const PAT_D    = 0x019U;
 static uint16_t const PAT_E    = 0x118U;   /* valid Code 39, not used */
+static uint16_t const PAT_F    = 0x058U;   /* course code */
 static uint16_t const PAT_Z    = 0x0D0U;   /* sample *Z* from Barcode Sample.pdf */
 
 /* Element widths used by build(); half size for the small PDF print. */
@@ -192,6 +193,8 @@ test_decodes_each_code(void)
         { PAT_B, BARCODE_B, NAV_RIGHT },
         { PAT_C, BARCODE_C, NAV_STRAIGHT },
         { PAT_D, BARCODE_D, NAV_UTURN },
+        { PAT_F, BARCODE_F, NAV_RIGHT },
+        { PAT_Z, BARCODE_Z, NAV_UTURN },
     };
     uint32_t i;
     uint32_t p;
@@ -257,9 +260,9 @@ test_rejects(void)
     build(PAT_E, false);
     check("unused character E is INVALID", drive(50, 0, 1) == BARCODE_INVALID);
 
-    /* Sample *Z*: read correctly, but not a course code (yet). */
+    /* Sample *Z*: a course code, U-turn for testing. */
     build(PAT_Z, false);
-    check("sample *Z* is INVALID for the course", drive(50, 0, 1) == BARCODE_INVALID);
+    check("sample *Z* is BARCODE_Z", drive(50, 0, 1) == BARCODE_Z);
     check("sample *Z* raw character is 'Z'", last_char == 'Z');
 
     build(PAT_A, false);

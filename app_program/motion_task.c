@@ -51,6 +51,14 @@ static float slewed_left_target;
 static float slewed_right_target;
 static uint32_t left_startup_ms;
 static uint32_t right_startup_ms;
+/* Left-minus-right encoder counts when the current command started.  The
+   counts are never reset, so the straight correction must work from this
+   baseline, not from power-on (test_integrate fix, Buddy 2 to review). */
+static int32_t straight_base_diff;
+/* Encoder counts when the current command started: a turn or move is
+   measured from here, not from power-on (C11, test_integrate fix). */
+static int32_t command_base_left;
+static int32_t command_base_right;
 
 static int32_t motion_abs_i32(int32_t value)
 {
@@ -111,9 +119,27 @@ static void motion_fault(motion_fault_t fault)
 
 static void start_command(const motion_command_t *command)
 {
+    motion_encoder_snapshot_t enc;
+
+    motion_encoder_get_snapshot(&enc);
+    straight_base_diff = enc.left_counts - enc.right_counts;
+    command_base_left  = enc.left_counts;
+    command_base_right = enc.right_counts;
+
     if (command->type == MOTION_COMMAND_SET_VELOCITY) {
-        /* Do not carry stale integral/slew state through a reversal. */
-        reset_velocity_control();
+        /* Do not carry stale integral/slew state through a reversal.  A
+           steering update while already driving the same way keeps it:
+           resetting there restarted the ramp from 0 on every update, so
+           the car crawled and tripped the stall check (test_integrate,
+           27 Oct track test; Buddy 2 to review). */
+        bool continuing = active_command
+            && active_type == MOTION_COMMAND_SET_VELOCITY
+            && motion_status.state == MOTION_STATE_RUNNING
+            && ((motion_status.target_speed_mm_s >= 0)
+                == (command->value.velocity.linear_mm_s >= 0));
+        if (!continuing) {
+            reset_velocity_control();
+        }
         motion_status.active_sequence_id = command->sequence_id;
         motion_status.state = MOTION_STATE_RUNNING;
         motion_status.fault = MOTION_FAULT_NONE;
@@ -226,14 +252,32 @@ static void motion_loop(void)
                 motion_counts_to_mm(motion_abs_i32(enc.right_counts), right_mm_per_count_q16));
         } else {
             /* Small differential correction keeps a straight command centred. */
-            float correction = (float)(enc.left_counts - enc.right_counts) * 0.01f;
+            float correction = (float)(enc.left_counts - enc.right_counts
+                                       - straight_base_diff) * 0.01f;
             left_target_speed -= (int32_t)correction;
             right_target_speed += (int32_t)correction;
         }
-        slewed_left_target = motion_slew_target(slewed_left_target,
-            (float)left_target_speed, 6.0f);
-        slewed_right_target = motion_slew_target(slewed_right_target,
-            (float)right_target_speed, 6.0f);
+        if (active_type == MOTION_COMMAND_SET_VELOCITY) {
+            /* Ramp only the forward speed; apply the steering difference at
+               once.  Ramping each wheel delayed a full left-to-right steer
+               by ~430 ms, so the line-following car weaved (test_integrate,
+               27 Oct track test; Buddy 2 to review).  The difference is
+               capped at the forward speed so no wheel reverses. */
+            float base = motion_slew_target(
+                (slewed_left_target + slewed_right_target) * 0.5f,
+                (float)(left_target_speed + right_target_speed) * 0.5f, 6.0f);
+            float half_diff = (float)(right_target_speed - left_target_speed) * 0.5f;
+            float limit = base < 0.0f ? -base : base;
+            if (half_diff > limit) half_diff = limit;
+            if (half_diff < -limit) half_diff = -limit;
+            slewed_left_target = base - half_diff;
+            slewed_right_target = base + half_diff;
+        } else {
+            slewed_left_target = motion_slew_target(slewed_left_target,
+                (float)left_target_speed, 6.0f);
+            slewed_right_target = motion_slew_target(slewed_right_target,
+                (float)right_target_speed, 6.0f);
+        }
         left_output = motion_pid_step(&left_pid, slewed_left_target,
                                       (float)left_speed, 0.020f);
         right_output = motion_pid_step(&right_pid, slewed_right_target,
@@ -298,9 +342,23 @@ static void motion_loop(void)
             (void)motion_motor_apply(1U, MOTION_MOTOR_REVERSE, (uint16_t)-right_output.output);
         }
         active_elapsed += MOTION_PERIOD_MS;
-        if (motion_status.target_mm != 0 &&
-            ((motion_status.target_mm > 0 && motion_status.travelled_mm >= motion_status.target_mm) ||
-             (motion_status.target_mm < 0 && motion_status.travelled_mm <= motion_status.target_mm))) {
+        /* Progress since this command started.  A turn spins the wheels
+           in opposite directions, so it is measured unsigned against the
+           unsigned target (a left turn has a negative target). */
+        int32_t left_mm = motion_counts_to_mm(enc.left_counts - command_base_left,
+                                              left_mm_per_count_q16);
+        int32_t right_mm = motion_counts_to_mm(enc.right_counts - command_base_right,
+                                               right_mm_per_count_q16);
+        bool done;
+        if (active_type == MOTION_COMMAND_TURN_ANGLE) {
+            done = motion_average(motion_abs_i32(left_mm), motion_abs_i32(right_mm))
+                   >= motion_abs_i32(motion_status.target_mm);
+        } else {
+            int32_t progress_mm = motion_average(left_mm, right_mm);
+            done = (motion_status.target_mm > 0 && progress_mm >= motion_status.target_mm) ||
+                   (motion_status.target_mm < 0 && progress_mm <= motion_status.target_mm);
+        }
+        if (motion_status.target_mm != 0 && done) {
             (void)motion_motor_brake_all();
             motion_status.left_pwm_permille = 0U;
             motion_status.right_pwm_permille = 0U;
@@ -383,12 +441,17 @@ motion_result_t motion_start_task(void)
     T_CTSK task = {0};
     if (!motion_initialised) return MOTION_RESULT_UNINITIALISED;
     if (motion_task_started) return MOTION_RESULT_OK;
+#if TK_SUPPORT_SMP
     task.tskatr = TA_HLNG | TA_RNG3 | TA_ASSPRC | TA_USERBUF;
+    task.assprc = TP_PRC1;
+#else
+    /* Single core: the kernel rejects TA_ASSPRC (E_RSATR). */
+    task.tskatr = TA_HLNG | TA_RNG3 | TA_USERBUF;
+#endif
     task.task = motion_task_entry;
     task.itskpri = 4;
     task.stksz = MOTION_STACK_SIZE;
     task.bufptr = motion_stack;
-    task.assprc = TP_PRC1;
     motion_tid = tk_cre_tsk(&task);
     if (motion_tid <= E_OK || tk_sta_tsk(motion_tid, 0) < E_OK) return MOTION_RESULT_HARDWARE;
     motion_task_started = true;
