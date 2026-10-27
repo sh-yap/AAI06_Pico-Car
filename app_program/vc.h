@@ -29,7 +29,8 @@
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
 #define VC_SPEED_NORMAL_MM_S    (200)    /* TBC with Buddy 2.                */
 #define VC_SPEED_HUMP_MM_S      (100)    /* 50 % cap while on a hump.        */
-#define VC_SPEED_SEARCH_MM_S    (80)     /* Slow forward while searching.    */
+#define VC_SPEED_SEARCH_MM_S    (120)    /* Slow forward while searching;
+                                            80 stalled on the floor.         */
 #define VC_TURN_TIMEOUT_MS      (3000U)  /* TBC: 2 x expected turn time.     */
 #define VC_SCAN_TIMEOUT_MS      (3000U)  /* 1.5 s scan budget (A7) x 2.      */
 #define VC_BYPASS_TIMEOUT_MS    (6000U)  /* 3 s bypass target x 2.           */

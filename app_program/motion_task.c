@@ -24,8 +24,11 @@
 
 static motion_config_t motion_config;
 static motion_status_t motion_status;
-static motion_pid_t left_pid = { 0.15f, 0.30f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
-static motion_pid_t right_pid = { 0.15f, 0.30f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
+/* kp/ki were 0.15/0.30 (unloaded): on the floor a slowed wheel gained only
+   ~60 permille per second and stalled (27 Oct closed-loop test).  Faster
+   test_integrate values - Buddy 2 to retune loaded. */
+static motion_pid_t left_pid = { 0.40f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
+static motion_pid_t right_pid = { 0.40f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
 static motion_command_t command_queue[MOTION_QUEUE_DEPTH];
 static uint8_t command_buffer[sizeof(command_queue) + MOTION_QUEUE_DEPTH * 8U];
 static UW motion_stack[MOTION_STACK_SIZE / sizeof(UW)];
