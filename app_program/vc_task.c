@@ -96,6 +96,7 @@ static int8_t   g_drive_steer;
 static bool     g_b_run_active;
 static uint32_t g_run_start_ms;
 static uint32_t g_overruns;            /* Steps that started late.        */
+static uint16_t g_faults_seen;         /* Faults since the run started.   */
 
 /* VC state -> the state codes comms publishes today (tracker item C5). */
 static comms_state_t const g_comms_state[VC_STATE_COUNT] =
@@ -160,6 +161,30 @@ next_seq (void)
  * Inputs
  * ------------------------------------------------------------------------ */
 
+/* Motion's own fault code -> the shared fault bit, so the laptop shows
+ * which Motion fault stopped the car. */
+static uint16_t
+motion_fault_bit (motion_fault_t fault)
+{
+    uint16_t bit = (uint16_t) VC_FAULT_MOTION_CMD;
+
+    if (MOTION_FAULT_STALL == fault)
+    {
+        bit = (uint16_t) VC_FAULT_STALL;
+    }
+    else if (MOTION_FAULT_ENCODER == fault)
+    {
+        bit = (uint16_t) VC_FAULT_ENCODER;
+    }
+    else
+    {
+        /* Timeout, invalid command, hardware: a command problem. */
+    }
+
+    return bit;
+}
+
+
 /* Motion status -> done / failed / stationary, faults, and telemetry. */
 static void
 read_motion (vc_inputs_t * p_in)
@@ -175,7 +200,7 @@ read_motion (vc_inputs_t * p_in)
 
         if (MOTION_STATE_FAULT == status.state)
         {
-            p_in->serious_faults |= (uint16_t) VC_FAULT_MOTION;
+            p_in->serious_faults |= motion_fault_bit(status.fault);
             p_in->b_motion_failed = (0U != g_manoeuvre_seq);
         }
         else if ((0U != g_manoeuvre_seq)
@@ -200,7 +225,7 @@ read_motion (vc_inputs_t * p_in)
     else
     {
         /* Motion cannot be read: treat as faulty, never as still. */
-        p_in->serious_faults |= (uint16_t) VC_FAULT_MOTION;
+        p_in->serious_faults |= (uint16_t) VC_FAULT_MOTION_CMD;
         p_in->b_stationary    = false;
     }
 
@@ -212,7 +237,7 @@ read_motion (vc_inputs_t * p_in)
 
     if (g_b_rejected)
     {
-        p_in->serious_faults |= (uint16_t) VC_FAULT_MOTION_REJECTED;
+        p_in->serious_faults |= (uint16_t) VC_FAULT_MOTION_CMD;
     }
 }
 
@@ -459,13 +484,13 @@ read_obstacle (vc_inputs_t * p_in, vc_state_t state)
 
         if (0U != (rflg.flgptn & OBSTACLE_EVT_FAULT))
         {
-            p_in->serious_faults |= (uint16_t) VC_FAULT_OBSTACLE;
+            p_in->serious_faults |= (uint16_t) VC_FAULT_ULTRASONIC;
         }
     }
     else
     {
         /* No obstacle task: treat as a sensor fault, never as "clear". */
-        p_in->serious_faults |= (uint16_t) VC_FAULT_OBSTACLE;
+        p_in->serious_faults |= (uint16_t) VC_FAULT_ULTRASONIC;
     }
 }
 
@@ -780,8 +805,26 @@ vc_task_entry (INT stacd, void * p_exinf)
 
         act_on_motion(&out);
         act_on_obstacle(&out);
+
+        /* Faults seen during a run stay in the published word until the
+         * next start, so a fault that lasted one step still shows why the
+         * car stopped.  Set before the state, so the state message that
+         * reports EMERGENCY_STOP already carries the reason. */
+        if ((VC_STATE_READY == before) && (VC_STATE_READY != out.state))
+        {
+            g_faults_seen = 0U;                 /* New run: clean slate. */
+        }
+
+        g_faults_seen = (uint16_t) (g_faults_seen | in.serious_faults);
+        comms_set_fault((uint32_t) g_faults_seen);
+
+        if ((VC_STATE_EMERGENCY_STOP == out.state) && out.b_state_changed)
+        {
+            tm_printf((UB *) "[vc] EMERGENCY_STOP: faults=0x%03x\n",
+                      (UINT) g_faults_seen);
+        }
+
         report_state(before, &out, now);
-        comms_set_fault((uint32_t) in.serious_faults);
 
         /* Fixed 20 ms rate from absolute time, so work time doesn't drift
          * the period; a late step is counted and the schedule resyncs. */

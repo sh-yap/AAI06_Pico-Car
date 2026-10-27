@@ -17,11 +17,15 @@
 #ifndef VC_TASK_H
 #define VC_TASK_H
 
-/* Serious fault bits passed to the VC (and published as robot/state fault).
- * PROPOSED until the team agrees the fault mask (tracker item C3). */
-#define VC_FAULT_MOTION          (1U << 0)  /* Motion reports FAULT.        */
-#define VC_FAULT_MOTION_REJECTED (1U << 1)  /* Motion refused a command.    */
-#define VC_FAULT_OBSTACLE        (1U << 2)  /* Ultrasonic sensor fault.     */
+/* Serious fault bits passed to the VC and published in robot/state and the
+ * heartbeat.  Positions from the team's shared fault table
+ * (docs/DATA_DEFINITIONS.md section 6; still PROPOSED, tracker item C3). */
+#define VC_FAULT_STALL           (1U << 0)  /* Motion: wheel stalled.       */
+#define VC_FAULT_ENCODER         (1U << 1)  /* Motion: encoder fault.       */
+#define VC_FAULT_MOTION_CMD      (1U << 2)  /* Motion: command timed out,
+                                               rejected, invalid, hardware
+                                               or status unreadable.        */
+#define VC_FAULT_ULTRASONIC      (1U << 5)  /* Buddy 5: sensor fault.       */
 
 /* Create and start the VC task.  b_init_ok: every subsystem started
  * (otherwise the VC goes straight to EMERGENCY_STOP).  Call once from
