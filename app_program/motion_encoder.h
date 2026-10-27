@@ -18,7 +18,7 @@ typedef struct {
 motion_result_t motion_encoder_init(const motion_config_t *config);
 void motion_encoder_get_snapshot(motion_encoder_snapshot_t *snapshot);
 void motion_encoder_get_levels(uint8_t *left_level, uint8_t *right_level);
-void motion_encoder_reset(void);
+motion_result_t motion_encoder_reset(void);
 
 extern volatile uint32_t motion_encoder_irq_count;
 

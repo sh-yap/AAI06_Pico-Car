@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "../../app_program/motion_config.h"
 #include "../../app_program/motion_control.h"
 
 static void expect(int condition, const char *name)
@@ -16,6 +17,10 @@ static void expect(int condition, const char *name)
 
 int main(void)
 {
+    motion_command_t command = {0};
+    motion_config_t config;
+    int32_t left_target;
+    int32_t right_target;
     int32_t speed;
     motion_pid_t pid = { 1.0f, 0.5f, 0.0f, 0.0f, 0.0f, 20.0f, -100.0f, 100.0f };
     motion_pid_result_t pid_result;
@@ -27,8 +32,89 @@ int main(void)
            "count-to-speed");
     expect(!motion_speed_from_counts(1, 0, 65536, &speed), "reject zero elapsed time");
     expect(motion_counts_to_mm(100, 65536) == 100, "count-to-mm");
+    expect(motion_relative_mm(1120, 1000, 65536) == 120,
+           "first command relative origin");
+    expect(motion_relative_mm(1250, 1120, 65536) == 130,
+           "second command relative origin");
+    expect(motion_relative_mm(1, -3, 65536) == 4,
+           "relative origin across encoder wrap");
     expect(motion_average(100, 200) == 150, "wheel average");
     expect(motion_turn_wheel_travel_mm(145, 90000) == 113, "turn geometry");
+    expect(motion_turn_wheel_travel_mm(145, -90000) == -113,
+           "negative turn geometry");
+    expect(motion_turn_wheel_travel_mm(145, 180000) == 227,
+           "U-turn geometry");
+    expect(motion_target_reached(113, 113, true), "right turn completion");
+    expect(motion_target_reached(-113, 113, true), "left turn completion magnitude");
+    expect(!motion_target_reached(-100, 99, false), "distance not yet complete");
+    expect(motion_target_reached(-100, -100, false), "reverse distance completion");
+    expect(motion_velocity_targets(0, 90000, 145, 300,
+                                   &left_target, &right_target)
+           && left_target == 113 && right_target == -113,
+           "positive angular rate turns right");
+    expect(motion_velocity_targets(0, -90000, 145, 300,
+                                   &left_target, &right_target)
+           && left_target == -113 && right_target == 113,
+           "negative angular rate turns left");
+    expect(motion_turn_targets(90000, 100, &left_target, &right_target)
+           && left_target == 100 && right_target == -100,
+           "positive discrete turn turns right");
+    expect(motion_turn_targets(-90000, 100, &left_target, &right_target)
+           && left_target == -100 && right_target == 100,
+           "negative discrete turn turns left");
+    expect(!motion_velocity_requires_reset(true, MOTION_COMMAND_SET_VELOCITY,
+                                           200, 200),
+           "same-mode velocity update preserves PID");
+    expect(!motion_velocity_requires_reset(true, MOTION_COMMAND_SET_VELOCITY,
+                                           200, 100),
+           "same-direction speed update preserves PID");
+    expect(motion_velocity_requires_reset(true, MOTION_COMMAND_SET_VELOCITY,
+                                          200, -100),
+           "velocity reversal resets PID");
+    expect(motion_velocity_requires_reset(false, MOTION_COMMAND_SET_VELOCITY,
+                                          0, 100),
+           "velocity start resets PID");
+
+    command.sequence_id = 1U;
+    command.type = MOTION_COMMAND_SET_VELOCITY;
+    command.value.velocity.linear_mm_s = 200;
+    command.value.velocity.angular_mdeg_s = 0;
+    expect(motion_command_is_valid(&command, 300, 145, 360000),
+           "valid velocity command");
+    command.value.velocity.angular_mdeg_s = 360000;
+    expect(!motion_command_is_valid(&command, 300, 145, 360000),
+           "reject excessive derived wheel speed");
+    command.type = MOTION_COMMAND_MOVE_DISTANCE;
+    command.value.distance.distance_mm = -100;
+    command.value.distance.speed_mm_s = 80;
+    expect(!motion_command_is_valid(&command, 300, 145, 360000),
+           "reject mismatched distance and speed signs");
+    command.value.distance.speed_mm_s = -80;
+    expect(motion_command_is_valid(&command, 300, 145, 360000),
+           "accept reverse distance command");
+    command.type = MOTION_COMMAND_TURN_ANGLE;
+    command.value.turn.angle_mdeg = -90000;
+    command.value.turn.wheel_speed_mm_s = -100;
+    expect(!motion_command_is_valid(&command, 300, 145, 360000),
+           "reject negative turn-speed magnitude");
+    command.value.turn.wheel_speed_mm_s = 100;
+    expect(motion_command_is_valid(&command, 300, 145, 360000),
+           "accept negative-angle left turn");
+
+    expect(motion_encoder_delta_plausible(100, 20U, 5275, 300),
+           "accept plausible encoder delta");
+    expect(!motion_encoder_delta_plausible(1000, 20U, 5275, 300),
+           "reject impossible encoder delta");
+    expect(motion_speed_from_counts(100, 40U, 5275, &speed)
+           && speed == 201,
+           "delayed control period uses measured time");
+
+    motion_config_default(&config);
+    expect(config.left_counts_per_wheel_rev == 2536,
+           "measured left encoder calibration");
+    expect(config.right_counts_per_wheel_rev == 2529,
+           "measured right encoder calibration");
+    expect(motion_config_validate(&config), "default motion configuration");
     expect(motion_feedforward_permille(100, 57U, 318U, 225U, 100U, 6U, 80U, 900U) == 88,
            "left feedforward");
     expect(motion_feedforward_permille(-100, 55U, 301U, 246U, 100U, 6U, 80U, 900U) == -90,

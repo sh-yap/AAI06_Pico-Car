@@ -19,11 +19,18 @@
 
 static volatile int32_t encoder_counts[2];
 static volatile uint32_t encoder_invalid[2];
+static volatile uint32_t encoder_snapshot_sequence;
 EXPORT volatile uint32_t motion_encoder_irq_count;
+
+static void encoder_memory_barrier(void)
+{
+    __asm__ volatile ("dmb" ::: "memory");
+}
 #ifdef BOARD_ROBO_PICO_ROBOT
 static motion_config_t encoder_config;
 static volatile uint8_t encoder_previous[2];
 static bool encoder_ready;
+static INT encoder_owner_processor;
 static uint32_t encoder_proc_inte;
 static uint32_t encoder_irq_masks[GPIO_IRQ_BANK_COUNT];
 
@@ -63,6 +70,8 @@ static void motion_encoder_isr(UINT intno)
         ClearInt(intno);
         return;
     }
+    ++encoder_snapshot_sequence;
+    encoder_memory_barrier();
     ++motion_encoder_irq_count;
     current = read_pair(encoder_config.left_encoder_a, encoder_config.left_encoder_b);
     delta = motion_quadrature_delta(encoder_previous[0], current);
@@ -74,6 +83,8 @@ static void motion_encoder_isr(UINT intno)
     if (delta == 0 && current != encoder_previous[1]) ++encoder_invalid[1];
     else encoder_counts[1] += delta;
     encoder_previous[1] = current;
+    encoder_memory_barrier();
+    ++encoder_snapshot_sequence;
     ClearInt(intno);
 }
 #endif
@@ -88,11 +99,13 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
     T_DINT dint;
     uint32_t bank;
     encoder_config = *config;
+    encoder_owner_processor = tk_get_prc();
     encoder_counts[0] = 0;
     encoder_counts[1] = 0;
     encoder_invalid[0] = 0U;
     encoder_invalid[1] = 0U;
     motion_encoder_irq_count = 0U;
+    encoder_snapshot_sequence = 0U;
     for (bank = 0U; bank < GPIO_IRQ_BANK_COUNT; ++bank) {
         encoder_irq_masks[bank] = 0U;
     }
@@ -140,23 +153,35 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
 
 void motion_encoder_get_snapshot(motion_encoder_snapshot_t *snapshot)
 {
-    UINT intsts;
+    uint32_t sequence_start;
+    uint32_t sequence_end;
+
     if (snapshot == 0) return;
-    DI(intsts);
-    snapshot->left_counts = encoder_counts[0];
-    snapshot->right_counts = encoder_counts[1];
-    snapshot->left_invalid_transitions = encoder_invalid[0];
-    snapshot->right_invalid_transitions = encoder_invalid[1];
-    snapshot->invalid_transitions = encoder_invalid[0] + encoder_invalid[1];
-    snapshot->irq_count = motion_encoder_irq_count;
-    EI(intsts);
+    do {
+        sequence_start = encoder_snapshot_sequence;
+        encoder_memory_barrier();
+        if ((sequence_start & 1U) == 0U) {
+            snapshot->left_counts = encoder_counts[0];
+            snapshot->right_counts = encoder_counts[1];
+            snapshot->left_invalid_transitions = encoder_invalid[0];
+            snapshot->right_invalid_transitions = encoder_invalid[1];
+            snapshot->invalid_transitions = encoder_invalid[0] + encoder_invalid[1];
+            snapshot->irq_count = motion_encoder_irq_count;
+            encoder_memory_barrier();
+            sequence_end = encoder_snapshot_sequence;
+        } else {
+            sequence_end = sequence_start;
+        }
+    } while (sequence_start != sequence_end
+             || (sequence_end & 1U) != 0U);
 }
 
 void motion_encoder_get_levels(uint8_t *left_level, uint8_t *right_level)
 {
-    UINT intsts;
     if (left_level == 0 || right_level == 0) return;
 #ifdef BOARD_ROBO_PICO_ROBOT
+    UINT intsts;
+
     DI(intsts);
     *left_level = read_pair(encoder_config.left_encoder_a,
                             encoder_config.left_encoder_b);
@@ -169,20 +194,33 @@ void motion_encoder_get_levels(uint8_t *left_level, uint8_t *right_level)
 #endif
 }
 
-void motion_encoder_reset(void)
+motion_result_t motion_encoder_reset(void)
 {
+#ifdef BOARD_ROBO_PICO_ROBOT
     UINT intsts;
+
+    /* DI() masks interrupts only on the calling processor. Refuse a reset
+       from another processor so it cannot race the encoder ISR. */
+    if (!encoder_ready || tk_get_prc() != encoder_owner_processor) {
+        return MOTION_RESULT_INVALID;
+    }
     DI(intsts);
+    ++encoder_snapshot_sequence;
+    encoder_memory_barrier();
     encoder_counts[0] = 0;
     encoder_counts[1] = 0;
     encoder_invalid[0] = 0U;
     encoder_invalid[1] = 0U;
     motion_encoder_irq_count = 0U;
-#ifdef BOARD_ROBO_PICO_ROBOT
     encoder_previous[0] = read_pair(encoder_config.left_encoder_a,
                                     encoder_config.left_encoder_b);
     encoder_previous[1] = read_pair(encoder_config.right_encoder_a,
                                     encoder_config.right_encoder_b);
-#endif
+    encoder_memory_barrier();
+    ++encoder_snapshot_sequence;
     EI(intsts);
+    return MOTION_RESULT_OK;
+#else
+    return MOTION_RESULT_HARDWARE;
+#endif
 }

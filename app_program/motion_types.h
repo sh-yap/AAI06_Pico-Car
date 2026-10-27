@@ -68,6 +68,8 @@ typedef struct {
     uint32_t invalid_encoder_transitions;
     uint32_t encoder_irq_count;
     uint64_t timestamp_us;
+    /* Monotonic timestamp at the most recent state transition. */
+    uint64_t state_timestamp_us;
     bool valid;
 } motion_status_t;
 

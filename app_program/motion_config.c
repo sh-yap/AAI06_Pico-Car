@@ -20,10 +20,11 @@ void motion_config_default(motion_config_t *config)
     config->left_encoder_b = 16U;
     config->right_encoder_a = 4U;
     config->right_encoder_b = 5U;
-    /* These are deliberately provisional until the motor datasheet is signed off. */
-    /* Bench calibration: ten manual forward revolutions, latest run. */
-    config->left_counts_per_wheel_rev = 2489;
-    config->right_counts_per_wheel_rev = 2472;
+    /* Manual wheel calibration, 2026-10-27: two marked ten-revolution
+       forward trials.  Means were 2535.7 left and 2528.6 right counts per
+       wheel revolution; retain separate rounded values for each encoder. */
+    config->left_counts_per_wheel_rev = 2536;
+    config->right_counts_per_wheel_rev = 2529;
     config->left_wheel_diameter_um = 65000;
     config->right_wheel_diameter_um = 65000;
     config->track_width_um = 145000;
@@ -62,6 +63,7 @@ bool motion_config_validate(const motion_config_t *config)
 
     if (config == NULL || config->max_speed_mm_s <= 0 ||
         config->max_pwm_permille > 1000U || config->deadband_permille > 1000U ||
+        config->deadband_permille > config->max_pwm_permille ||
         config->startup_pwm_permille > config->max_pwm_permille ||
         config->left_feedforward_offset_permille > config->max_pwm_permille ||
         config->right_feedforward_offset_permille > config->max_pwm_permille ||
