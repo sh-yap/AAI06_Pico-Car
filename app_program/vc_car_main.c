@@ -5,9 +5,9 @@
  * Starts comms (Buddy 1), Motion (Buddy 2) and the VC task.  The WiFi
  * radio task is started by the kernel when built with WIFI=cyw43.
  *
- * First car test (before Buddy 3 is merged): laptop "start" -> the car
- * drives straight at normal speed (line is a placeholder "centred") and
- * stops by itself after 5 s; laptop "stop" brakes at once.
+ * Also starts Buddy 3 (line + barcode) and Buddy 5 (obstacle ahead); the
+ * VC reads them as switched on in vc_task.c.  Laptop "start" -> the car
+ * follows the line; "stop" brakes at once.
  *
  * Deviations (BARR-C): usermain() returns INT, signature fixed by
  * micro T-Kernel; this file has no header as it exports only usermain().
@@ -25,15 +25,47 @@
 #include "motion_task.h"
 #include "vc.h"
 #include "vc_task.h"
+#include "buddy3_task.h"
+#include "obstacle_types.h"
+#include "obstacle_task.h"
 
 #define USB_WAIT_POLLS     (50)      /* x 100 ms: wait up to 5 s for USB. */
 #define LINK_POLL_MS       (500U)    /* How often to check the MQTT link. */
+#define BUDDY3_PRIORITY    (5)       /* As in Buddy 3's own app_main.c.   */
+#define BUDDY3_STACK_BYTES (4096U)
+
+static UW g_buddy3_stack[BUDDY3_STACK_BYTES / sizeof(UW)];
+
+
+/* Buddy 3: output message buffer, then the line/barcode task. */
+static bool
+start_buddy3 (void)
+{
+    T_CTSK ctsk = {0};
+    ID     tid;
+    bool   b_ok = false;
+
+    if (0 < buddy3_output_mbf_create())
+    {
+        ctsk.tskatr  = TA_HLNG | TA_RNG3 | TA_USERBUF;
+        ctsk.task    = buddy3_task;
+        ctsk.itskpri = BUDDY3_PRIORITY;
+        ctsk.stksz   = (SZ) sizeof(g_buddy3_stack);
+        ctsk.bufptr  = g_buddy3_stack;
+        tid          = tk_cre_tsk(&ctsk);
+        b_ok         = (0 < tid) && (E_OK == tk_sta_tsk(tid, 0));
+    }
+
+    return b_ok;
+}
 
 EXPORT INT
 usermain (void)
 {
     motion_result_t motion_result;
     bool            b_comms_ok;
+    bool            b_line_ok;
+    bool            b_obstacle_ok;
     bool            b_ok;
     bool            b_was_connected = false;
     bool            b_connected;
@@ -57,9 +89,14 @@ usermain (void)
         motion_result = motion_start_task();
     }
 
-    b_ok = b_comms_ok && (MOTION_RESULT_OK == motion_result);
-    tm_printf((UB *) "[init] comms=%d motion=%d -> %s\n", (INT) b_comms_ok,
-              (INT) motion_result, b_ok ? "OK" : "FAILED");
+    b_line_ok     = start_buddy3();
+    b_obstacle_ok = obstacle_task_init() && obstacle_task_start();
+
+    b_ok = b_comms_ok && (MOTION_RESULT_OK == motion_result) && b_line_ok
+           && b_obstacle_ok;
+    tm_printf((UB *) "[init] comms=%d motion=%d line=%d obstacle=%d -> %s\n",
+              (INT) b_comms_ok, (INT) motion_result, (INT) b_line_ok,
+              (INT) b_obstacle_ok, b_ok ? "OK" : "FAILED");
 
     if (!vc_task_start(b_ok))
     {

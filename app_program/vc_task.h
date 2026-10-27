@@ -21,6 +21,7 @@
  * PROPOSED until the team agrees the fault mask (tracker item C3). */
 #define VC_FAULT_MOTION          (1U << 0)  /* Motion reports FAULT.        */
 #define VC_FAULT_MOTION_REJECTED (1U << 1)  /* Motion refused a command.    */
+#define VC_FAULT_OBSTACLE        (1U << 2)  /* Ultrasonic sensor fault.     */
 
 /* Create and start the VC task.  b_init_ok: every subsystem started
  * (otherwise the VC goes straight to EMERGENCY_STOP).  Call once from

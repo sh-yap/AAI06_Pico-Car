@@ -4,12 +4,15 @@
  *
  * Every 20 ms: gather inputs -> vc_step() -> act on the outputs.
  *
- * Subsystems not integrated yet are placeholders:
- *   - Buddy 3 (line/barcode): until VC_HAVE_BUDDY3 = 1, the line is always
- *     "centred", and a run ends itself after VC_TEST_RUN_MS (as if the
- *     laptop sent STOP) so a bench test can never run away;
- *   - Buddy 4 (hump): never on a hump;
- *   - Buddy 5 (obstacle): never an obstacle; a bypass request just stops.
+ * Subsystems, each behind a switch so a missing one can be left out:
+ *   - Buddy 3 (line/barcode), VC_HAVE_BUDDY3: packed status words from
+ *     Buddy 3's task.  With 0 the line is always "centred" and a run ends
+ *     itself after VC_TEST_RUN_MS (bench safety);
+ *   - Buddy 5 (obstacle), VC_HAVE_BUDDY5: "obstacle ahead" and sensor
+ *     fault from Buddy 5's task.  Scan and bypass are not written yet, so
+ *     an obstacle stops the car and the scan timeout ends in
+ *     EMERGENCY_STOP (fail safe);
+ *   - Buddy 4 (hump): placeholder, never on a hump.
  *
  * Two Motion (Buddy 2) behaviours shape this file:
  *   - every SET_VELOCITY command resets Motion's speed controller, so a
@@ -31,13 +34,20 @@
 #include "comms.h"
 
 #ifndef VC_HAVE_BUDDY3
-#define VC_HAVE_BUDDY3           (0)    /* 1 once Buddy 3 is in main.     */
+#define VC_HAVE_BUDDY3           (1)    /* Line + barcode from Buddy 3.   */
+#endif
+
+#ifndef VC_HAVE_BUDDY5
+#define VC_HAVE_BUDDY5           (1)    /* Obstacle ahead from Buddy 5.   */
 #endif
 
 #if VC_HAVE_BUDDY3
-#include "line_follow.h"
-#include "navigation.h"
 #include "buddy3_task.h"
+#endif
+
+#if VC_HAVE_BUDDY5
+#include "obstacle_types.h"
+#include "obstacle_task.h"
 #endif
 
 /* ------------------------------------------------------------------------ *
@@ -233,33 +243,6 @@ read_command (vc_inputs_t * p_in)
 
 #if VC_HAVE_BUDDY3
 
-/* Buddy 3 line error (-1.0 .. +1.0) -> VC steer (-127 .. +127). */
-static int8_t
-error_to_steer (float error)
-{
-    float e = error;
-
-    if (e > 1.0f)
-    {
-        e = 1.0f;
-    }
-    else if (e < -1.0f)
-    {
-        e = -1.0f;
-    }
-    else if (!(e == e))             /* NaN: treat as centred. */
-    {
-        e = 0.0f;
-    }
-    else
-    {
-        /* In range. */
-    }
-
-    return (int8_t) (e * 127.0f);   /* Range checked above. */
-}
-
-
 static vc_line_t
 line_from_buddy3 (line_state_t state)
 {
@@ -326,7 +309,44 @@ nav_from_buddy3 (nav_command_t nav)
 }
 
 
-/* Drain Buddy 3's queue: latest line wins, first barcode is kept. */
+/* Buddy 3 barcode -> the character sent to the laptop. */
+static char
+barcode_char (barcode_t code)
+{
+    static char const g_chars[] = "-ABCD?";    /* NONE, A..D, INVALID */
+    char              c         = '?';
+
+    if ((uint32_t) code < (sizeof(g_chars) - 1U))
+    {
+        c = g_chars[code];
+    }
+
+    return c;
+}
+
+
+/* Line telemetry and barcode events to the laptop (comms, Buddy 1). */
+static void
+report_line (buddy3_status_t const * p_status, vc_nav_t nav)
+{
+    comms_line_t report;
+
+    report.position = (comms_line_pos_t) p_status->line_state; /* Same order. */
+    report.error    = p_status->line_error;
+    report.sensors  = p_status->line_sensors;
+    comms_report_line(&report);
+
+    if (BARCODE_NONE != p_status->barcode)
+    {
+        (void) comms_event_barcode(barcode_char(p_status->barcode),
+                                   (comms_nav_t) nav);         /* Same order. */
+    }
+}
+
+
+/* Drain Buddy 3's queue of packed 32-bit status words: the latest line
+ * wins, the first barcode command is kept.  A word that fails
+ * buddy3_status_unpack() (reserved bits / codes) is ignored. */
 static void
 read_line (vc_inputs_t * p_in, uint32_t now)
 {
@@ -334,27 +354,31 @@ read_line (vc_inputs_t * p_in, uint32_t now)
     static int8_t    s_error   = 0;
     static uint32_t  s_seen_ms = 0U;
     static bool      s_b_seen  = false;
-    buddy3_output_msg_t msg;
-    vc_nav_t            nav;
-    uint32_t            i;
+    buddy3_packed_t  packed;
+    buddy3_status_t  status;
+    vc_nav_t         nav;
+    uint32_t         i;
+    bool             b_more = true;
 
-    for (i = 0U; i < VC_LINE_DRAIN_MAX; i++)
+    for (i = 0U; b_more && (i < VC_LINE_DRAIN_MAX); i++)
     {
-        if ((INT) sizeof(msg)
-            != tk_rcv_mbf(buddy3_output_mbfid, &msg, TMO_POL))
-        {
-            break;
-        }
+        b_more = ((INT) sizeof(packed)
+                  == tk_rcv_mbf(buddy3_output_mbfid, &packed, TMO_POL));
 
-        s_line    = line_from_buddy3(msg.line_state);
-        s_error   = error_to_steer(msg.line_error);
-        s_seen_ms = now;
-        s_b_seen  = true;
-        nav       = nav_from_buddy3(msg.nav_command);
-
-        if ((VC_NAV_NONE == p_in->barcode) && (VC_NAV_NONE != nav))
+        if (b_more && buddy3_status_unpack(packed, &status))
         {
-            p_in->barcode = nav;
+            s_line    = line_from_buddy3(status.line_state);
+            s_error   = status.line_error;      /* Already -127..+127. */
+            s_seen_ms = now;
+            s_b_seen  = true;
+            nav       = nav_from_buddy3(status.nav_command);
+
+            if ((VC_NAV_NONE == p_in->barcode) && (VC_NAV_NONE != nav))
+            {
+                p_in->barcode = nav;
+            }
+
+            report_line(&status, nav);
         }
     }
 
@@ -389,6 +413,64 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 }
 
 #endif /* VC_HAVE_BUDDY3 */
+
+
+#if VC_HAVE_BUDDY5
+
+/* Buddy 5's event flag: OBSTACLE_EVT_AHEAD stays set until acknowledged;
+ * OBSTACLE_EVT_FAULT is set while the sensor is faulty (a serious fault:
+ * the car must not drive blind).  Read without clearing: only Buddy 5
+ * writes these bits. */
+static void
+read_obstacle (vc_inputs_t * p_in)
+{
+    T_RFLG    rflg;
+    ID const  flg = obstacle_task_get_flag();
+
+    if ((0 < flg) && (E_OK == tk_ref_flg(flg, &rflg)))
+    {
+        p_in->b_obstacle_ahead = (0U != (rflg.flgptn & OBSTACLE_EVT_AHEAD));
+
+        if (0U != (rflg.flgptn & OBSTACLE_EVT_FAULT))
+        {
+            p_in->serious_faults |= (uint16_t) VC_FAULT_OBSTACLE;
+        }
+    }
+    else
+    {
+        /* No obstacle task: treat as a sensor fault, never as "clear". */
+        p_in->serious_faults |= (uint16_t) VC_FAULT_OBSTACLE;
+    }
+}
+
+
+/* The VC has acted on "obstacle ahead" (stopped, scanning): tell Buddy 5,
+ * which clears the bit and raises it again if the obstacle is still there. */
+static void
+act_on_obstacle (vc_outputs_t const * p_out)
+{
+    if (VC_OBST_SCAN_REQUEST == p_out->obstacle)
+    {
+        obstacle_task_ack_ahead();
+    }
+}
+
+#else  /* Placeholder: never an obstacle. */
+
+static void
+read_obstacle (vc_inputs_t * p_in)
+{
+    (void) p_in;
+}
+
+
+static void
+act_on_obstacle (vc_outputs_t const * p_out)
+{
+    (void) p_out;
+}
+
+#endif /* VC_HAVE_BUDDY5 */
 
 /* ------------------------------------------------------------------------ *
  * Outputs
@@ -650,12 +732,14 @@ vc_task_entry (INT stacd, void * p_exinf)
         read_command(&in);
         read_motion(&in);
         read_line(&in, now);
-        /* Buddy 4 / Buddy 5 placeholders: b_hump, b_obstacle_* = false. */
+        read_obstacle(&in);
+        /* Buddy 4 placeholder: b_hump = false. */
 
         before = g_vc.state;
         vc_step(&g_vc, &in, &out);
 
         act_on_motion(&out);
+        act_on_obstacle(&out);
         report_state(before, &out, now);
         comms_set_fault((uint32_t) in.serious_faults);
 
