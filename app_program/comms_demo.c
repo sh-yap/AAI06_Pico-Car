@@ -29,14 +29,18 @@
 #define DEMO_BARCODE_TICKS    50U    /* every 5 s                         */
 #define DEMO_HUMP_TICKS       70U    /* every 7 s                         */
 #define DEMO_OBSTACLE_TICKS   110U   /* every 11 s                        */
-#define DEMO_HUMP_BASE_MM     20
-#define DEMO_HUMP_STEP_MM     7
+#define DEMO_HUMP_BASE_DMM    200    /* 20.0 mm (0.1 mm steps)            */
+#define DEMO_HUMP_STEP_DMM    70     /* +7.0 mm per hump                  */
 #define DEMO_HUMP_STEPS       5U
+#define DEMO_TILT_MG          120    /* nose up while "climbing"          */
+#define DEMO_CODE_COUNT       3U
 
-static char const        g_codes[] = "ABCD";
-static comms_nav_t const g_code_cmds[] =
+/* The course's barcodes (lecturer's slide); which command each means is
+ * still TBC. */
+static char const        g_codes[] = "AFZ";
+static comms_nav_t const g_code_cmds[DEMO_CODE_COUNT] =
 {
-    COMMS_NAV_LEFT, COMMS_NAV_RIGHT, COMMS_NAV_STRAIGHT, COMMS_NAV_UTURN
+    COMMS_NAV_LEFT, COMMS_NAV_RIGHT, COMMS_NAV_STRAIGHT
 };
 
 
@@ -61,16 +65,26 @@ demo_tick (uint32_t tick, int32_t * p_distance_mm)
     /* Buddy 3: line drifts left, centre, right. */
     line.position = (comms_line_pos_t) (COMMS_LINE_LEFT + (tick / 10U) % 3U);
     line.error    = ((int32_t) ((tick / 10U) % 3U) - 1) * 40;
-    line.sensors  = (uint8_t) (1U << ((tick / 10U) % 3U));
+    line.sensors  = (uint8_t) ((tick / 10U) % 4U);  /* 2 sensor bits */
     comms_report_line(&line);
 
-    /* Buddy 4: flat ground. */
-    terrain.motion = COMMS_MOTION_ACCELERATING;
+    /* Buddy 4: a small rise every 2 s, otherwise flat. */
+    if (5U > (tick % 20U))
+    {
+        terrain.motion   = COMMS_MOTION_CLIMBING_HUMP;
+        terrain.tilt_mg  = DEMO_TILT_MG;
+        terrain.hump_dmm = 50 * (int32_t) (tick % 20U);
+    }
+    else
+    {
+        terrain.motion = COMMS_MOTION_ACCELERATING;
+    }
     comms_report_terrain(&terrain);
 
     if (0U == (tick % DEMO_BARCODE_TICKS))
     {
-        index = ((tick / DEMO_BARCODE_TICKS) - 1U) % 4U;   /* A first */
+        /* A first */
+        index = ((tick / DEMO_BARCODE_TICKS) - 1U) % DEMO_CODE_COUNT;
         comms_set_state(COMMS_STATE_EXECUTE_NAV);
         (void) comms_event_barcode(g_codes[index], g_code_cmds[index]);
     }
@@ -85,7 +99,7 @@ demo_tick (uint32_t tick, int32_t * p_distance_mm)
 
     if (0U == (tick % DEMO_HUMP_TICKS))
     {
-        (void) comms_event_hump(DEMO_HUMP_BASE_MM + DEMO_HUMP_STEP_MM
+        (void) comms_event_hump(DEMO_HUMP_BASE_DMM + DEMO_HUMP_STEP_DMM
                                 * (int32_t) ((tick / DEMO_HUMP_TICKS)
                                              % DEMO_HUMP_STEPS));
     }

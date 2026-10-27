@@ -14,12 +14,14 @@
  *
  *   IDLE --(link up + IP)--> CONNECTING --(accepted)--> CONNECTED
  *     ^                          |                          |
- *     |                     (refused/timeout)          (lost/closed)
+ *     |              (refused / 5 s / link down)       (lost/closed)
  *     |                          v                          v
  *     +---- link down ------ BACKOFF <----------------------+
  *
- * BACKOFF doubles its wait on every failure (1 s .. 30 s) and resets after
+ * BACKOFF doubles its wait on every failure (1 s .. 5 s) and resets after
  * a successful connection, so a missing broker costs almost nothing.
+ * CONNECTING has its own 5 s limit: lwIP would otherwise wait up to 100 s
+ * for a broker that accepted TCP but never answered.
  *
  * What to publish comes from the comms module (comms_link.h); this file
  * only owns the session and moves messages between it and lwIP.
@@ -41,7 +43,8 @@
 
 #define MQTT_KEEP_ALIVE_S        10U
 #define MQTT_RETRY_MIN_MS        1000U
-#define MQTT_RETRY_MAX_MS        30000U
+#define MQTT_RETRY_MAX_MS        5000U  /* LAN broker: retries are cheap */
+#define MQTT_CONNECT_TIMEOUT_MS  5000U  /* lwIP's own limit is 100 s     */
 #define MQTT_SERVICE_MS          20U    /* how often to pull new messages */
 #define MQTT_PUBLISH_BURST       4U     /* max publishes per service      */
 #define MQTT_QOS_1               1U
@@ -142,23 +145,21 @@ incoming_data_cb (void * p_arg, u8_t const * p_data, u16_t len, u8_t flags)
 
     (void) p_arg;
 
-    if (!g_b_cmd_is_ours)
+    if (g_b_cmd_is_ours)
     {
-        return;
-    }
+        room = LWIP_UTK_MQTT_CMD_MAX - g_cmd_fill;
+        take = (len < room) ? len : room;
+        (void) memcpy(&g_cmd_buf[g_cmd_fill], p_data, take);
+        g_cmd_fill += take;
 
-    room = LWIP_UTK_MQTT_CMD_MAX - g_cmd_fill;
-    take = (len < room) ? len : room;
-    (void) memcpy(&g_cmd_buf[g_cmd_fill], p_data, take);
-    g_cmd_fill += take;
-
-    if (0U != (flags & MQTT_DATA_FLAG_LAST))
-    {
-        (void) memcpy(g_status.cmd_payload, g_cmd_buf, g_cmd_fill);
-        g_status.cmd_len = g_cmd_fill;
-        g_status.cmd_count++;
-        g_b_cmd_is_ours = false;
-        comms_link_on_command(g_cmd_buf, g_cmd_fill);
+        if (0U != (flags & MQTT_DATA_FLAG_LAST))
+        {
+            (void) memcpy(g_status.cmd_payload, g_cmd_buf, g_cmd_fill);
+            g_status.cmd_len = g_cmd_fill;
+            g_status.cmd_count++;
+            g_b_cmd_is_ours = false;
+            comms_link_on_command(g_cmd_buf, g_cmd_fill);
+        }
     }
 }
 
@@ -221,6 +222,7 @@ static bool
 publish_pending (void)
 {
     err_t result;
+    bool  b_sent = false;
 
     result = mqtt_publish(&g_client, g_pending.topic, g_pending.payload,
                           g_pending.payload_len, g_pending.qos,
@@ -230,18 +232,21 @@ publish_pending (void)
     {
         g_status.published++;
         g_b_pending = false;
-        return true;
+        b_sent      = true;
     }
-
-    if (ERR_MEM != result)
+    else if (ERR_MEM != result)
     {
         /* Not a temporary shortage: drop it rather than retry forever. */
         g_status.publish_errors++;
         g_status.last_error = (int32_t) result;
         g_b_pending = false;
     }
+    else
+    {
+        /* lwIP buffer full: keep it and retry on the next service. */
+    }
 
-    return false;
+    return b_sent;
 }
 
 
@@ -250,6 +255,7 @@ service_connected (uint32_t now_ms)
 {
     err_t    result;
     uint32_t burst;
+    bool     b_more;
 
     if (g_b_announce_pending)
     {
@@ -271,23 +277,19 @@ service_connected (uint32_t now_ms)
         g_b_subscribe_pending = (ERR_OK != result);
     }
 
-    if ((now_ms - g_last_service_ms) < MQTT_SERVICE_MS)
+    if ((now_ms - g_last_service_ms) >= MQTT_SERVICE_MS)
     {
-        return;
-    }
+        g_last_service_ms = now_ms;
+        b_more            = true;
 
-    g_last_service_ms = now_ms;
-
-    for (burst = 0U; burst < MQTT_PUBLISH_BURST; burst++)
-    {
-        if (!g_b_pending)
+        for (burst = 0U; b_more && (burst < MQTT_PUBLISH_BURST); burst++)
         {
-            g_b_pending = comms_link_next(&g_pending);
-        }
+            if (!g_b_pending)
+            {
+                g_b_pending = comms_link_next(&g_pending);
+            }
 
-        if (!g_b_pending || !publish_pending())
-        {
-            break;
+            b_more = g_b_pending && publish_pending();
         }
     }
 }
@@ -317,26 +319,10 @@ initialize (void)
 }
 
 
-void
-lwip_utk_mqtt_poll (struct netif * p_netif)
+/* One step of the session state machine (see the diagram at the top). */
+static void
+poll_state (uint32_t now_ms, bool b_net_ready)
 {
-    uint32_t now_ms;
-    bool     b_net_ready;
-
-    if (!g_b_initialized)
-    {
-        initialize();
-    }
-
-    if (!g_b_broker_valid || (NULL == p_netif))
-    {
-        return;
-    }
-
-    now_ms      = sys_now();
-    b_net_ready = netif_is_up(p_netif) && netif_is_link_up(p_netif)
-               && !ip4_addr_isany_val(*netif_ip4_addr(p_netif));
-
     switch ((lwip_utk_mqtt_state_t) g_status.state)
     {
         case LWIP_UTK_MQTT_IDLE:
@@ -347,8 +333,16 @@ lwip_utk_mqtt_poll (struct netif * p_netif)
             break;
 
         case LWIP_UTK_MQTT_CONNECTING:
-            /* lwIP times the handshake out itself and reports it through
-               connection_cb(), so there is nothing to do here. */
+            /* Success or refusal arrives through connection_cb().  Give up
+               here if WiFi dropped or the broker never answers: closing
+               with mqtt_disconnect() raises no callback of its own. */
+            if (!b_net_ready
+                || ((now_ms - g_state_since_ms) >= MQTT_CONNECT_TIMEOUT_MS))
+            {
+                mqtt_disconnect(&g_client);
+                start_backoff(b_net_ready ? (int32_t) ERR_TIMEOUT
+                                          : (int32_t) ERR_CONN);
+            }
             break;
 
         case LWIP_UTK_MQTT_CONNECTED:
@@ -395,8 +389,28 @@ lwip_utk_mqtt_poll (struct netif * p_netif)
             enter_state(LWIP_UTK_MQTT_IDLE);
             break;
     }
+}
 
-    g_b_net_was_ready = b_net_ready;
+
+void
+lwip_utk_mqtt_poll (struct netif * p_netif)
+{
+    uint32_t now_ms;
+    bool     b_net_ready;
+
+    if (!g_b_initialized)
+    {
+        initialize();
+    }
+
+    if (g_b_broker_valid && (NULL != p_netif))
+    {
+        now_ms      = sys_now();
+        b_net_ready = netif_is_up(p_netif) && netif_is_link_up(p_netif)
+                   && !ip4_addr_isany_val(*netif_ip4_addr(p_netif));
+        poll_state(now_ms, b_net_ready);
+        g_b_net_was_ready = b_net_ready;
+    }
 }
 
 

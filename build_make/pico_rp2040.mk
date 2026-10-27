@@ -191,6 +191,21 @@ ifeq ($(COMMS_DEMO),1)
 COMMS_DEMO_SUFFIX := _demo
 endif
 
+# COMMS_FORMAT selects the MQTT payload format (docs/BINARY_FORMAT.md):
+# binary (default, CR1 minimum-bit packing) or json (readable fallback for
+# debugging).  Only the chosen format is compiled in.  A JSON image is named
+# ..._json so the two are never mixed up.
+COMMS_FORMAT ?= binary
+ifneq ($(filter $(COMMS_FORMAT),binary json),$(COMMS_FORMAT))
+$(error Unknown COMMS_FORMAT '$(COMMS_FORMAT)'; use binary or json)
+endif
+COMMS_FORMAT_SUFFIX :=
+COMMS_JSON := 0
+ifeq ($(COMMS_FORMAT),json)
+COMMS_FORMAT_SUFFIX := _json
+COMMS_JSON := 1
+endif
+
 ifeq ($(WIFI_NETIF),1)
 ifneq ($(WIFI_JOIN),1)
 $(error WIFI_NETIF=1 requires WIFI_JOIN=1)
@@ -242,7 +257,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)_$(APP)_$(BOARD)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)_$(APP)_$(BOARD)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -293,7 +308,7 @@ ASFLAGS += -DCNF_SMP=1
 endif
 
 # Fake-data driver for the comms API (app_program/comms_demo.c).
-CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO)
+CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON)
 
 # Rebuild the build stamp every time, so the date/time printed at boot and
 # published on robot/info always identifies the image actually flashed.
@@ -333,7 +348,7 @@ CFLAGS += -DTM_CONSOLE_UART=$(UART_MIRROR)
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)
 PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

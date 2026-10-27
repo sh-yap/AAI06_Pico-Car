@@ -45,18 +45,20 @@
 #define CYW43_JOIN_TIMEOUT_US 30000000ULL
 #define CYW43_DHCP_TIMEOUT_US 30000000ULL
 #define CYW43_DNS_TIMEOUT_US  30000000ULL
-/* Rejoin back-off: first retry soon after the loss, then double up to the
- * ceiling.  The minimum spacing is longer than a normal WPA2 join so a
- * retry never interrupts an attempt that is still in progress. */
-#define CYW43_REJOIN_FIRST_MS 2000U
+/* Rejoin: first retry soon after the loss, then a fixed spacing.  The
+ * spacing is longer than a normal WPA2 join so a retry never interrupts
+ * an attempt that is still in progress.  MIN == MAX: no growing back-off,
+ * so a returning hotspot is found within one spacing (fast recovery). */
+#define CYW43_REJOIN_FIRST_MS 1000U
 #define CYW43_REJOIN_MIN_MS   5000U
-#define CYW43_REJOIN_MAX_MS   15000U
+#define CYW43_REJOIN_MAX_MS   5000U
 /* When the AP vanishes the driver reports link-down but keeps its join
  * state ACTIVE, and the radio firmware retries on its own (a 34 s hotspot
  * outage recovered this way on hardware), and a join started with the AP
  * absent can sit in that state indefinitely.  Only if neither has worked
- * after this long do we step in and force a fresh join. */
-#define CYW43_LINK_STUCK_US   20000000ULL
+ * after this long do we step in and force a fresh join.  Kept just above
+ * the rejoin spacing so we do not cut short a join already under way. */
+#define CYW43_LINK_STUCK_US   6000000ULL
 
 #if TM_WIFI_JOIN
 #include "wifi_credentials.h"
