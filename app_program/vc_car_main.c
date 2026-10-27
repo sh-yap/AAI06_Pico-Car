@@ -29,12 +29,49 @@
 #include "obstacle_types.h"
 #include "obstacle_task.h"
 
+#if TM_WIFI_CYW43
+/* Plain C types on purpose - see the note in cyw43_utk.h. */
+#include "cyw43_utk.h"
+#endif
+
 #define USB_WAIT_POLLS     (50)      /* x 100 ms: wait up to 5 s for USB. */
 #define LINK_POLL_MS       (500U)    /* How often to check the MQTT link. */
 #define BUDDY3_PRIORITY    (5)       /* As in Buddy 3's own app_main.c.   */
 #define BUDDY3_STACK_BYTES (4096U)
 
 static UW g_buddy3_stack[BUDDY3_STACK_BYTES / sizeof(UW)];
+
+#define DIAG_EVERY         (10U)     /* x LINK_POLL_MS = every 5 s.        */
+
+
+/* Every 5 s: WiFi task polls in that time (about 2500 expected at one
+ * poll per 2 ms; far fewer = the task is being held up), link, signal,
+ * MQTT state and rejoin counters.  Diagnostics for test_integrate. */
+static void
+report_radio (void)
+{
+#if TM_WIFI_CYW43
+    static uint32_t   s_tick       = 0U;
+    static uint32_t   s_last_polls = 0U;
+    T_CYW43_UTK_STATUS st;
+
+    s_tick++;
+
+    if (DIAG_EVERY <= s_tick)
+    {
+        s_tick = 0U;
+        cyw43_utk_get_status(&st);
+        tm_printf((UB *) "[diag] polls/5s=%u link=%u join=%d rssi=%d"
+                         " mqtt=%u err=%d losses=%u rejoins=%u\n",
+                  (UINT) (st.poll_count - s_last_polls),
+                  (UINT) st.netif_link_up, (INT) st.link_status,
+                  (INT) st.link_rssi, (UINT) st.mqtt_state,
+                  (INT) st.mqtt_last_error, (UINT) st.link_losses,
+                  (UINT) st.rejoin_attempts);
+        s_last_polls = st.poll_count;
+    }
+#endif
+}
 
 
 /* Buddy 3: output message buffer, then the line/barcode task. */
@@ -105,7 +142,9 @@ usermain (void)
 
     tm_printf((UB *) "Send \"start\" / \"stop\" to robot/command.\n");
 
-    /* Nothing else to start.  Report MQTT link changes; never return
+    /* Nothing else to start.  Report MQTT link changes, and every 5 s how
+     * often the WiFi task ran (test_integrate diagnostics: the connection
+     * drops for ~59 s at a time in the combined firmware).  Never return
      * (returning shuts the kernel down). */
     for (;;)
     {
@@ -118,6 +157,7 @@ usermain (void)
                       b_connected ? "CONNECTED" : "not connected");
         }
 
+        report_radio();
         (void) tk_dly_tsk(LINK_POLL_MS);
     }
 
