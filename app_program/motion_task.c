@@ -15,7 +15,11 @@
 #define MOTION_STOP_EVENT 1U
 #define MOTION_STACK_SIZE 4096U
 #define MOTION_PI_Q16 205887
-#define MOTION_STARTUP_BOOST_MS 200U
+/* Start-up boost length and stall limit: floor-test values on
+   test_integrate (were 200 ms and 500 ms, tuned unloaded) - Buddy 2 to
+   confirm. */
+#define MOTION_STARTUP_BOOST_MS 400U
+#define MOTION_STALL_MS 1000U
 #define MOTION_ZERO_SPEED_MM_S 20
 
 static motion_config_t motion_config;
@@ -318,7 +322,7 @@ static void motion_loop(void)
             } else {
                 right_stall_ms = 0U;
             }
-            if (left_stall_ms >= 500U || right_stall_ms >= 500U) {
+            if (left_stall_ms >= MOTION_STALL_MS || right_stall_ms >= MOTION_STALL_MS) {
                 motion_fault(MOTION_FAULT_STALL);
             }
         }

@@ -30,8 +30,11 @@ void motion_config_default(motion_config_t *config)
     config->max_speed_mm_s = 300;
     config->max_pwm_permille = 900U;
     config->deadband_permille = 80U;
-    /* Bench motor test showed that a short 200-permille boost starts both wheels. */
-    config->startup_pwm_permille = 200U;
+    /* Bench motor test showed that a short 200-permille boost starts both
+       wheels unloaded.  On the floor (power bank, 27 Oct track test) 200
+       stalled 4 of 5 starts; 350 is a test_integrate value - Buddy 2 to
+       confirm. */
+    config->startup_pwm_permille = 350U;
     /* Initial unloaded affine fits from the measured 80/100-permille runs.
        Slope units are PWM permille per mm/s, represented in Q10. */
     config->left_feedforward_offset_permille = 59U;
