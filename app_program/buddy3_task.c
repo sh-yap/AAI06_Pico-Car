@@ -22,9 +22,10 @@
 #define BUDDY3_TASK_PERIOD_MS    10U
 
 /*
- * Threshold for barcode sensing on the centre IR sensor.
- * Same value as line_follow.c's calibrated thresholds
- * (white ~170-210, black ~2510-2630).
+ * Threshold for the dedicated barcode IR sensor (GP28 / ADC2).
+ * Measured 2026-10-27, room light:
+ *   white paper <= 277, track tape >= 2725,
+ *   inkjet barcode: wide bar ~600, thin bar ~240 (not visible in IR).
  */
 #define BARCODE_IR_THRESHOLD     1300U
 
@@ -52,14 +53,14 @@ static const char *const line_state_name[] = {
 ID buddy3_output_mbfid = -1;
 
 static UW buddy3_output_mbf_buf[
-    (BUDDY3_OUTPUT_MBF_SLOTS * sizeof(buddy3_output_msg_t)) / sizeof(UW)
+    (BUDDY3_OUTPUT_MBF_SLOTS * sizeof(buddy3_packed_t)) / sizeof(UW)
     + BUDDY3_OUTPUT_MBF_SLOTS * 4U
 ];
 
 static T_CMBF buddy3_output_cmbf = {
     .mbfatr  = TA_TFIFO,
     .bufsz   = sizeof buddy3_output_mbf_buf,
-    .maxmsz  = sizeof(buddy3_output_msg_t),
+    .maxmsz  = sizeof(buddy3_packed_t),
     .bufptr  = buddy3_output_mbf_buf,
 };
 
@@ -75,7 +76,9 @@ void buddy3_task(INT stacd, void *exinf)
 {
     ir_readings_t readings;
     line_state_t line_state;
-    float line_error;
+    int8_t line_error;
+    uint8_t line_sensors;
+    barcode_t barcode_code;
     nav_command_t nav_command;
 
     SYSTIM sys_time;
@@ -86,7 +89,8 @@ void buddy3_task(INT stacd, void *exinf)
 
     bool barcode_is_black;
 
-    buddy3_output_msg_t out_msg;
+    buddy3_status_t status;
+    buddy3_packed_t packed;
 
 #if BUDDY3_DEBUG
     uint32_t debug_cycle = 0U;
@@ -105,11 +109,10 @@ void buddy3_task(INT stacd, void *exinf)
         readings = ir_sensor_read();
         line_state = line_get_position(readings);
         line_error = line_get_error(readings);
+        line_sensors = line_get_sensor_bits(readings);
 
-        
-         
         barcode_is_black =
-            ir_sensor_is_black(readings.centre, BARCODE_IR_THRESHOLD);
+            ir_sensor_is_black(readings.barcode, BARCODE_IR_THRESHOLD);
 
         tk_get_tim(&sys_time);
         timestamp_ms = sys_time.lo;
@@ -130,36 +133,42 @@ void buddy3_task(INT stacd, void *exinf)
         barcode_was_ready = barcode_available();
 #endif
 
-        /* barcode_get_command() safely returns NAV_NONE if nothing is ready. */
+        /*
+         * Read the code before barcode_get_command(), which clears it.
+         * Both safely return NONE if nothing is ready.
+         */
+        barcode_code = barcode_get_code();
         nav_command = barcode_get_command();
 
 #if BUDDY3_DEBUG
         if (barcode_was_ready)
         {
-            tm_printf((UB *)"[buddy3] barcode captured at %u ms -> nav=%d\n",
-                      timestamp_ms, (INT)nav_command);
+            tm_printf((UB *)"[buddy3] barcode captured at %u ms -> code=%d nav=%d\n",
+                      timestamp_ms, (INT)barcode_code, (INT)nav_command);
         }
 
         if (++debug_cycle >= BUDDY3_DEBUG_EVERY)
         {
             debug_cycle = 0U;
-            /* Error printed x1000 - tm_printf has no %f. */
-            tm_printf((UB *)"[buddy3] L=%4u C=%4u R=%4u  %-8s err=%5d"
-                           "  black=%d  enc=%d\n",
-                      readings.left, readings.centre, readings.right,
+            tm_printf((UB *)"[buddy3] C=%4u R=%4u B=%4u  %-8s err=%4d"
+                           "  bits=%d  black=%d  enc=%d\n",
+                      readings.centre, readings.right, readings.barcode,
                       line_state_name[line_state],
-                      (INT)(line_error * 1000.0f),
+                      (INT)line_error, (INT)line_sensors,
                       (INT)barcode_is_black, (INT)encoder_position);
         }
 #endif
 
-        out_msg.line_state  = line_state;
-        out_msg.line_error  = line_error;
-        out_msg.nav_command = nav_command;
+        status.line_state   = line_state;
+        status.line_error   = line_error;
+        status.line_sensors = line_sensors;
+        status.barcode      = barcode_code;
+        status.nav_command  = nav_command;
 
-        
-        (void)tk_snd_mbf(buddy3_output_mbfid, &out_msg,
-                          (INT)sizeof(out_msg), TMO_POL);
+        packed = buddy3_status_pack(&status);
+
+        (void)tk_snd_mbf(buddy3_output_mbfid, &packed,
+                          (INT)sizeof(packed), TMO_POL);
 
         tk_dly_tsk(BUDDY3_TASK_PERIOD_MS);
     }

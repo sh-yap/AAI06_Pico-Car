@@ -7,7 +7,7 @@
 #include "navigation.h"
 
 
-/* Barcode identifiers. Patterns for A/B/C/D pending confirmed encoding. */
+/* Barcode identifiers. Code 39 *A* .. *D*; anything else is INVALID. */
 typedef enum
 {
     BARCODE_NONE = 0,
@@ -60,8 +60,15 @@ void barcode_check_timeout(uint32_t timestamp_ms);
 /* True once a complete barcode has been captured and is ready to decode. */
 bool barcode_available(void);
 
-/* Decoded barcode. Incomplete until A/B/C/D encoding is confirmed. */
+/* Decoded barcode: NONE if no capture is ready, INVALID if unreadable. */
 barcode_t barcode_get_code(void);
+
+/*
+ * Raw Code 39 data character of the ready capture (e.g. 'A', 'Z'),
+ * or '\0' if none is ready or it could not be read. Lets a character
+ * outside the course table still be logged or reported.
+ */
+char barcode_get_char(void);
 
 /*
  * Converts the decoded barcode to a nav command

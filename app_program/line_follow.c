@@ -3,8 +3,15 @@
  *
  * Buddy 3 - IR line-following logic
  *
- * Converts IR sensor readings into line position,
- * continuous line error, and junction detection.
+ * Converts the two line-sensor readings (centre and right)
+ * into line position, continuous line error, and junction
+ * detection. The third IR sensor (GP28) is the dedicated
+ * barcode sensor and is not used here.
+ *
+ * With only centre and right sensors, "line to the left" cannot
+ * be seen directly. When both sensors see white, the line is
+ * assumed to be on the side it was last seen on, until it has
+ * been missing for LINE_LOST_COUNT cycles.
  */
 
 #include "line_follow.h"
@@ -13,42 +20,38 @@
 #include <stdint.h>
 
 
-/* Calibrated 2026-09-27: white ~170-210, black ~2510-2630 (midpoint). */
-#define IR_LEFT_THRESHOLD      1300U
-#define IR_CENTRE_THRESHOLD    1300U
-#define IR_RIGHT_THRESHOLD     1300U
+/*
+ * Calibrated 2026-10-27 on white paper and real track tape, room light
+ * (midpoint of highest white and lowest black per sensor):
+ *   centre GP27: white <= 216, black >= 2910
+ *   right  GP26: white <= 200, black >= 3150
+ * Lighting variation not yet tested.
+ */
+#define IR_CENTRE_THRESHOLD    1563U
+#define IR_RIGHT_THRESHOLD     1675U
 
 
+/* Junction = both line sensors black for this many consecutive cycles. */
 #define JUNCTION_DEBOUNCE_COUNT    3U
+
+/* Both sensors white for this many cycles (10 ms each) = LINE_LOST. */
+#define LINE_LOST_COUNT            30U
 
 static uint8_t junction_count = 0U;
 static bool junction_latched = false;
+
+static uint8_t white_count = 0U;
+
+/* Side the line was last seen on; used while both sensors see white. */
+static line_state_t last_seen = LINE_CENTRE;
 
 
 void line_follow_init(void)
 {
     junction_count = 0U;
     junction_latched = false;
-}
-
-
-/* Junction = all three sensors seeing black. May be refined after testing. */
-static bool line_is_junction_pattern(ir_readings_t readings)
-{
-    bool left_black;
-    bool centre_black;
-    bool right_black;
-
-    left_black =
-        ir_sensor_is_black(readings.left, IR_LEFT_THRESHOLD);
-
-    centre_black =
-        ir_sensor_is_black(readings.centre, IR_CENTRE_THRESHOLD);
-
-    right_black =
-        ir_sensor_is_black(readings.right, IR_RIGHT_THRESHOLD);
-
-    return (left_black && centre_black && right_black);
+    white_count = 0U;
+    last_seen = LINE_CENTRE;
 }
 
 
@@ -56,14 +59,12 @@ static bool line_is_junction_pattern(ir_readings_t readings)
  * Debounced junction detection. Reports each junction once.
  * Internal only - called from line_get_position() so junction
  * state advances exactly once per cycle.
+ * May be refined after track testing (a slow drift across the
+ * line also briefly puts both sensors on black).
  */
-static bool line_detect_junction(ir_readings_t readings)
+static bool line_detect_junction(bool centre_black, bool right_black)
 {
-    bool junction_pattern;
-
-    junction_pattern = line_is_junction_pattern(readings);
-
-    if (junction_pattern)
+    if (centre_black && right_black)
     {
         if (junction_count < JUNCTION_DEBOUNCE_COUNT)
         {
@@ -89,17 +90,8 @@ static bool line_detect_junction(ir_readings_t readings)
 
 line_state_t line_get_position(ir_readings_t readings)
 {
-    bool left_black;
     bool centre_black;
     bool right_black;
-
-    if (line_detect_junction(readings))
-    {
-        return LINE_JUNCTION;
-    }
-
-    left_black =
-        ir_sensor_is_black(readings.left, IR_LEFT_THRESHOLD);
 
     centre_black =
         ir_sensor_is_black(readings.centre, IR_CENTRE_THRESHOLD);
@@ -107,96 +99,107 @@ line_state_t line_get_position(ir_readings_t readings)
     right_black =
         ir_sensor_is_black(readings.right, IR_RIGHT_THRESHOLD);
 
-    if (centre_black && !left_black && !right_black)
+    if (line_detect_junction(centre_black, right_black))
     {
+        white_count = 0U;
+        return LINE_JUNCTION;
+    }
+
+    if (centre_black && !right_black)
+    {
+        white_count = 0U;
+        last_seen = LINE_CENTRE;
         return LINE_CENTRE;
     }
 
-    if (left_black && !right_black)
+    if (right_black)
     {
-        return LINE_LEFT;
-    }
-
-    if (right_black && !left_black)
-    {
+        white_count = 0U;
+        last_seen = LINE_RIGHT;
         return LINE_RIGHT;
     }
 
-    if (!left_black && !centre_black && !right_black)
+    /* Both white: line has moved off the left of centre, or off the right sensor. */
+    if (white_count < LINE_LOST_COUNT)
+    {
+        white_count++;
+    }
+
+    if (white_count >= LINE_LOST_COUNT)
     {
         return LINE_LOST;
     }
 
-
-    if (centre_black)
-    {
-        return LINE_CENTRE;
-    }
-
-    return LINE_LOST;
+    return (last_seen == LINE_RIGHT) ? LINE_RIGHT : LINE_LEFT;
 }
 
 
 /*
- * Continuous line error: -1.0 = left, 0.0 = centre, +1.0 = right.
+ * Continuous line error: -127 = left, 0 = centre, +127 = right.
  * Only the amount above threshold contributes.
+ * Integer maths only - the RP2040 has no FPU.
+ * Uses the state from line_get_position(), so call that first
+ * in the same cycle.
  * NOTE: assumes higher ADC value = black, matching ir_sensor_is_black().
  */
-float line_get_error(ir_readings_t readings)
+int8_t line_get_error(ir_readings_t readings)
 {
-    float left_strength;
-    float centre_strength;
-    float right_strength;
-
-    float total_strength;
-    float error;
-
-    if (readings.left > IR_LEFT_THRESHOLD)
-    {
-        left_strength =
-            (float)(readings.left - IR_LEFT_THRESHOLD);
-    }
-    else
-    {
-        left_strength = 0.0f;
-    }
+    uint32_t centre_strength;
+    uint32_t right_strength;
+    uint32_t total_strength;
 
     if (readings.centre > IR_CENTRE_THRESHOLD)
     {
         centre_strength =
-            (float)(readings.centre - IR_CENTRE_THRESHOLD);
+            (uint32_t)(readings.centre - IR_CENTRE_THRESHOLD);
     }
     else
     {
-        centre_strength = 0.0f;
+        centre_strength = 0U;
     }
 
     if (readings.right > IR_RIGHT_THRESHOLD)
     {
         right_strength =
-            (float)(readings.right - IR_RIGHT_THRESHOLD);
+            (uint32_t)(readings.right - IR_RIGHT_THRESHOLD);
     }
     else
     {
-        right_strength = 0.0f;
+        right_strength = 0U;
     }
 
-    total_strength =
-        left_strength +
-        centre_strength +
-        right_strength;
+    total_strength = centre_strength + right_strength;
 
-    /* No line detected - check LINE_LOST via line_get_position() separately. */
-    if (total_strength <= 0.0f)
+    /* Neither sensor on the line: full correction towards the last-seen side. */
+    if (total_strength == 0U)
     {
-        return 0.0f;
+        if (white_count >= LINE_LOST_COUNT)
+        {
+            return 0;
+        }
+
+        return (last_seen == LINE_RIGHT) ? LINE_ERROR_MAX : -LINE_ERROR_MAX;
     }
 
-    error =
-        ((-1.0f * left_strength) +
-         ( 0.0f * centre_strength) +
-         ( 1.0f * right_strength))
-        / total_strength;
+    /* Rounded; result is 0..LINE_ERROR_MAX since right <= total. */
+    return (int8_t)(((right_strength * (uint32_t)LINE_ERROR_MAX)
+                     + (total_strength / 2U)) / total_strength);
+}
 
-    return error;
+
+uint8_t line_get_sensor_bits(ir_readings_t readings)
+{
+    uint8_t bits = 0U;
+
+    if (ir_sensor_is_black(readings.centre, IR_CENTRE_THRESHOLD))
+    {
+        bits |= LINE_SENSOR_CENTRE;
+    }
+
+    if (ir_sensor_is_black(readings.right, IR_RIGHT_THRESHOLD))
+    {
+        bits |= LINE_SENSOR_RIGHT;
+    }
+
+    return bits;
 }

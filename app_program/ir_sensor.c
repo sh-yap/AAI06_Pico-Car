@@ -17,15 +17,15 @@
 /*
  * IR sensor GPIO assignments.
  *
- * Left sensor   AO -> GP28 / ADC2
- * Centre sensor AO -> GP27 / ADC1
- * Right sensor  AO -> GP26 / ADC0
+ * Barcode sensor     AO -> GP28 / ADC2
+ * Centre line sensor AO -> GP27 / ADC1
+ * Right line sensor  AO -> GP26 / ADC0
  */
-#define IR_LEFT_PIN        28U
+#define IR_BARCODE_PIN     28U
 #define IR_CENTRE_PIN      27U
 #define IR_RIGHT_PIN       26U
 
-#define IR_LEFT_ADC        2U
+#define IR_BARCODE_ADC     2U
 #define IR_CENTRE_ADC      1U
 #define IR_RIGHT_ADC       0U
 
@@ -89,15 +89,15 @@ ir_readings_t ir_sensor_read(void)
 {
     ir_readings_t readings;
 
-    readings.left   = ir_read_channel(IR_LEFT_ADC);
-    readings.centre = ir_read_channel(IR_CENTRE_ADC);
-    readings.right  = ir_read_channel(IR_RIGHT_ADC);
+    readings.centre  = ir_read_channel(IR_CENTRE_ADC);
+    readings.right   = ir_read_channel(IR_RIGHT_ADC);
+    readings.barcode = ir_read_channel(IR_BARCODE_ADC);
 
     return readings;
 }
 
 
-/* black-vs-white ADC direction still needs calibration. */
+/* Higher ADC value = black (confirmed by 2026-09-27 calibration). */
 bool ir_sensor_is_black(uint16_t reading, uint16_t threshold)
 {
     return (reading >= threshold);

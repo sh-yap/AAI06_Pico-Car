@@ -3,8 +3,7 @@
 
 #include <tk/tkernel.h>
 
-#include "line_follow.h"
-#include "navigation.h"
+#include "buddy3_status.h"
 
 
 /*
@@ -20,15 +19,10 @@
 void buddy3_task(INT stacd, void *exinf);
 
 
-/* Message sent to consumers */
-typedef struct
-{
-    line_state_t line_state;
-    float line_error;
-    nav_command_t nav_command;
-} buddy3_output_msg_t;
-
-
+/*
+ * Output message buffer: each message is one buddy3_packed_t
+ * (4 bytes). Consumers decode it with buddy3_status_unpack().
+ */
 extern ID buddy3_output_mbfid;
 
 

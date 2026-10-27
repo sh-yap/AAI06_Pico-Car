@@ -4,12 +4,16 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Raw readings from the three IR sensors (from AO pins). */
+/*
+ * Raw readings from the three IR sensors (from AO pins).
+ * centre/right are the two line sensors; barcode is the
+ * dedicated barcode sensor.
+ */
 typedef struct
 {
-    uint16_t left;
     uint16_t centre;
     uint16_t right;
+    uint16_t barcode;
 } ir_readings_t;
 
 
