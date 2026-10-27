@@ -417,19 +417,45 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 
 #if VC_HAVE_BUDDY5
 
+/* True while the car is on a mission (may be moving). */
+static bool
+is_running (vc_state_t state)
+{
+    return (VC_STATE_FOLLOW_LINE <= state)
+           && (VC_STATE_REACQUIRE_LINE >= state);
+}
+
+
 /* Buddy 5's event flag: OBSTACLE_EVT_AHEAD stays set until acknowledged;
  * OBSTACLE_EVT_FAULT is set while the sensor is faulty (a serious fault:
  * the car must not drive blind).  Read without clearing: only Buddy 5
- * writes these bits. */
+ * writes these bits.
+ *
+ * While the car is NOT running, "ahead" is acknowledged every step and
+ * ignored: otherwise a hand or wall seen while the car sat in READY stays
+ * latched and stops the car the moment it is started.  A real obstacle is
+ * raised again within one reading (~60 ms) after the start. */
 static void
-read_obstacle (vc_inputs_t * p_in)
+read_obstacle (vc_inputs_t * p_in, vc_state_t state)
 {
     T_RFLG    rflg;
     ID const  flg = obstacle_task_get_flag();
 
     if ((0 < flg) && (E_OK == tk_ref_flg(flg, &rflg)))
     {
-        p_in->b_obstacle_ahead = (0U != (rflg.flgptn & OBSTACLE_EVT_AHEAD));
+        if (is_running(state))
+        {
+            p_in->b_obstacle_ahead =
+                (0U != (rflg.flgptn & OBSTACLE_EVT_AHEAD));
+        }
+        else if (0U != (rflg.flgptn & OBSTACLE_EVT_AHEAD))
+        {
+            obstacle_task_ack_ahead();          /* Stale: clear it. */
+        }
+        else
+        {
+            /* Nothing latched. */
+        }
 
         if (0U != (rflg.flgptn & OBSTACLE_EVT_FAULT))
         {
@@ -445,22 +471,36 @@ read_obstacle (vc_inputs_t * p_in)
 
 
 /* The VC has acted on "obstacle ahead" (stopped, scanning): tell Buddy 5,
- * which clears the bit and raises it again if the obstacle is still there. */
+ * which clears the bit and raises it again if the obstacle is still there.
+ * Also report what was seen, so the laptop shows why the car stopped. */
 static void
 act_on_obstacle (vc_outputs_t const * p_out)
 {
+    obstacle_status_t status;
+    comms_obstacle_t  report = {0};
+
     if (VC_OBST_SCAN_REQUEST == p_out->obstacle)
     {
         obstacle_task_ack_ahead();
+
+        if (obstacle_task_get_status(&status))
+        {
+            report.distance_mm = (int32_t) status.distance_mm;
+        }
+
+        report.angle_deg = 90;                  /* Straight ahead.       */
+        report.action    = COMMS_AVOID_STOP;    /* No scan written yet.  */
+        (void) comms_event_obstacle(&report);
     }
 }
 
 #else  /* Placeholder: never an obstacle. */
 
 static void
-read_obstacle (vc_inputs_t * p_in)
+read_obstacle (vc_inputs_t * p_in, vc_state_t state)
 {
     (void) p_in;
+    (void) state;
 }
 
 
@@ -732,7 +772,7 @@ vc_task_entry (INT stacd, void * p_exinf)
         read_command(&in);
         read_motion(&in);
         read_line(&in, now);
-        read_obstacle(&in);
+        read_obstacle(&in, g_vc.state);
         /* Buddy 4 placeholder: b_hump = false. */
 
         before = g_vc.state;
