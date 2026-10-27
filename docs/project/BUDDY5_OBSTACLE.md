@@ -17,6 +17,9 @@ are in `obstacle_config.h`, with the measurements in its comments.
 | `app_program/obstacle_calc.c/.h` | Pure maths, unit-tested on the PC |
 | `app_program/obstacle_ultrasonic.c/.h` | HC-SR04 driver |
 | `app_program/obstacle_servo.c/.h` | SG90 driver |
+| `app_program/obstacle_monitor.c/.h` | MONITOR decisions (stop, blind latch, lost obstacle, fault), unit-tested on the PC |
+| `app_program/obstacle_task.c/.h` | The obstacle task and its interface for the Vehicle Controller |
+| `app_program/obstacle_task_test_main.c` | Task test with a stand-in controller, `APP=obstacle_task_test` |
 | `app_program/obstacle_console.c/.h` | Console helpers for the test programs |
 | `app_program/ultrasonic_test_main.c` | Bench test, `APP=ultrasonic_test` |
 | `app_program/servo_test_main.c` | Bench test, `APP=servo_test` |
