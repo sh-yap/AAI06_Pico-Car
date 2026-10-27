@@ -41,6 +41,11 @@
 
 static UW g_buddy3_stack[BUDDY3_STACK_BYTES / sizeof(UW)];
 
+#if TM_WIFI_CYW43
+/* USB interrupts taken since boot (usb_sdk_compat.c). */
+IMPORT volatile UW tm_usb_irq_count;
+#endif
+
 #define DIAG_EVERY         (10U)     /* x LINK_POLL_MS = every 5 s.        */
 
 
@@ -53,7 +58,9 @@ report_radio (void)
 #if TM_WIFI_CYW43
     static uint32_t   s_tick       = 0U;
     static uint32_t   s_last_polls = 0U;
+    static uint32_t   s_last_usb   = 0U;
     T_CYW43_UTK_STATUS st;
+    uint32_t          usb_irqs;
 
     s_tick++;
 
@@ -61,14 +68,17 @@ report_radio (void)
     {
         s_tick = 0U;
         cyw43_utk_get_status(&st);
-        tm_printf((UB *) "[diag] polls/5s=%u link=%u join=%d rssi=%d"
-                         " mqtt=%u err=%d losses=%u rejoins=%u\n",
+        usb_irqs = tm_usb_irq_count;
+        tm_printf((UB *) "[diag] polls/5s=%u usbirq/5s=%u link=%u join=%d"
+                         " rssi=%d mqtt=%u err=%d losses=%u rejoins=%u\n",
                   (UINT) (st.poll_count - s_last_polls),
+                  (UINT) (usb_irqs - s_last_usb),
                   (UINT) st.netif_link_up, (INT) st.link_status,
                   (INT) st.link_rssi, (UINT) st.mqtt_state,
                   (INT) st.mqtt_last_error, (UINT) st.link_losses,
                   (UINT) st.rejoin_attempts);
         s_last_polls = st.poll_count;
+        s_last_usb   = usb_irqs;
     }
 #endif
 }

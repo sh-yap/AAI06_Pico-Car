@@ -39,7 +39,12 @@ IMPORT void	tm_tusb_discard_input(void);
 IMPORT unsigned	tm_tusb_read_available(void);
 IMPORT int	tm_tusb_read_char(void);
 
-#define USB_TASK_PRIORITY	3
+/* Was 3 (above the radio and Motion, both 4).  test_integrate: on a power
+   bank (USB powered, no host enumerating) the car's MQTT link stalled for
+   ~59 s every minute and heartbeats stretched to 1.7 s, while on a laptop
+   it was perfect.  Every USB interrupt wakes this task, so below the
+   control and radio tasks it can no longer starve them. */
+#define USB_TASK_PRIORITY	8
 #if TK_SUPPORT_SMP
 #define USB_TASK_STACK		4096
 #else
