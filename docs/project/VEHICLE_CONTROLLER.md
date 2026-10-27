@@ -13,7 +13,7 @@ subsystem drives the motors or changes the mission state.
 | --- | --- |
 | State machine (`vc.c`) | Done. 150 host-test checks, 0 failed |
 | RTOS task (`vc_task.c`) + `APP=vc_car` | Done. Builds (SMP=0 with WiFi, SMP=1). **Not yet tested on the car** |
-| Motion (Buddy 2) | Connected: drive, stop, status.  Turns and reverse wait on Motion fixes (see Known issues) |
+| Motion (Buddy 2) | Connected: drive, stop, status.  Catch-up software fixes are on `buddy2-motion-catchup`; loaded-car validation remains pending |
 | Comms (Buddy 1) | Connected: laptop `start`/`stop`, `robot/state`, fault word, run summary, motion telemetry |
 | Line + barcode (Buddy 3) | Code ready behind `VC_HAVE_BUDDY3`; waits on Buddy 3 merging into `main`.  Until then: placeholder line "centred" |
 | Obstacle (Buddy 5) | Placeholder (no obstacle).  "Obstacle ahead" task is on branch `buddy-5-obstacle-task`; scan/bypass not written yet |
@@ -77,7 +77,7 @@ The period is kept from absolute time, so work time does not drift it.
 
 | VC output | Motion call |
 | --- | --- |
-| DRIVE (speed, steer) | `SET_VELOCITY`, angular rate = −steer × 400 mdeg/s.  Re-sent only when speed changes or steering moves by 8/127 or more |
+| DRIVE (speed, steer) | `SET_VELOCITY`, angular rate = steer × 400 mdeg/s; positive is right. Re-sent only when speed changes or steering moves by 8/127 or more |
 | TURN LEFT / RIGHT / U-TURN | `motion_stop()`, then 40 ms later `TURN_ANGLE` −90° / +90° / 180° at 100 mm/s |
 | REVERSE | `motion_stop()`, then 40 ms later `MOVE_DISTANCE` −100 mm at −80 mm/s |
 | STOP | `motion_stop()` |
@@ -127,16 +127,17 @@ Save logs in `evidence/buddy1/`.
 
 ## Known issues
 
-**In Motion (Buddy 2), blocking turns and reverse:**
-- `motion_encoder_reset()` is never called, so turns and moves measure
-  from power-on and finish at once after any driving.
-- A left turn (negative angle) never completes: its target is negative but
-  the travelled distance is always positive, so it times out and faults.
-- Every `SET_VELOCITY` resets the speed controller.  The VC works around
-  this by re-sending only on real change; steering updates ideally
-  shouldn't reset it.
-- `motion_stop()` discards commands queued before Motion's next loop.  The
-  VC waits 40 ms after a stop before sending the next command.
+**Motion catch-up status:**
+- Per-command encoder origins and signed distance/turn completion are now
+  implemented on `buddy2-motion-catchup`; hardware repeatability is still
+  unverified.
+- Same-mode `SET_VELOCITY` updates preserve controller state; start,
+  reversal and mode changes reset it.
+- Stop handling serialises queue ownership and keeps PWM writes in the Motion
+  task. The VC's 40 ms hold remains until the hardware stop regression is
+  measured.
+- Encoder snapshots use an SMP-safe sequence check. Cross-core stop latency,
+  encoder noise and final angular-sign normalization still need testing.
 
 **In the VC:**
 - Tunables are first guesses (TBC): speeds, timeouts, steering gain.  Tune

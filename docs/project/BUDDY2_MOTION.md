@@ -37,8 +37,13 @@ is nothing to build.
 Include `app_program/motion_task.h` and `motion_types.h`. Public distances and
 speeds are integer millimetres and millimetres/second; angles are millidegrees
 and timeouts are milliseconds. `motion_submit()` is non-blocking, and
-`motion_stop()` brakes immediately through a dedicated event path. Invalid,
+`motion_stop()` requests a bounded brake through a dedicated Motion-task event
+path; PWM remains owned by the Motion task. Invalid,
 uninitialised and full-queue conditions are returned explicitly.
+Positive linear speed is forward; positive angular rate and positive turn
+angle are vehicle-right. Timeout, stall and encoder faults remain latched until
+an explicit `motion_stop()` acknowledgement; a hardware-configuration fault
+requires reinitialisation.
 
 The pure calculations in `motion_control.c` have no RTOS or hardware
 dependencies. Run their deterministic host tests with:
@@ -57,6 +62,10 @@ make -C tests/motion test
 | Right encoder A/B | GP4 / GP5 |
 | Proposed I2C1 | GP2 / GP3 |
 | PWM | 10 kHz, TOP 12499, divider 1 |
+
+The 2026-10-27 marked manual calibration measured 2535.7 left and 2528.6 right
+counts per wheel revolution, rounded in the configuration to 2536 and 2529.
+This calibrates encoder counts, not loaded distance accuracy or tyre slip.
 
 Encoder voltage/output type, motor voltage/current and PH2.0-6P orientation
 must be verified before applying power. GP16/GP17 are dedicated to the left
@@ -92,6 +101,8 @@ create false invalid-transition measurements.
 `APP=motion_closed_loop_test` follows the same rule. It stores up to 40 status
 samples statically at 10 Hz while motion is active, brakes, and only then dumps
 the captured samples over USB. During capture only the stop key is accepted.
+Keys `a`/`d` request a three-second left/right angular-velocity curve; `l`,
+`t` and `u` request -90, +90 and 180 degree encoder turns respectively.
 Its safety-test keys are `o` for a 500 ms command timeout, `i` for rejection of
 an out-of-range command, and `q` for queue saturation using zero-speed commands.
 The queue test explicitly brakes before and after the submissions.

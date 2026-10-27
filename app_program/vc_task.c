@@ -14,12 +14,9 @@
  *     EMERGENCY_STOP (fail safe);
  *   - Buddy 4 (hump): placeholder, never on a hump.
  *
- * Two Motion (Buddy 2) behaviours shape this file:
- *   - every SET_VELOCITY command resets Motion's speed controller, so a
- *     drive command is only re-sent when speed or steering really changes;
- *   - motion_stop() is processed on Motion's next loop and discards any
- *     command queued before then, so after a stop nothing is sent for
- *     VC_STOP_HOLD_STEPS steps.
+ * Motion (Buddy 2) keeps velocity updates inside one controller run and
+ * serialises stop handling. The VC still holds for VC_STOP_HOLD_STEPS steps
+ * after a stop as a conservative transition delay.
  */
 
 #include <tk/tkernel.h>
@@ -625,8 +622,8 @@ drive (int16_t speed_mm_s, int8_t steer)
         cmd.sequence_id                   = next_seq();
         cmd.timeout_ms                    = 0U;
         cmd.value.velocity.linear_mm_s    = speed_mm_s;
-        /* Line to the right (+) needs a right turn: negative rate. */
-        cmd.value.velocity.angular_mdeg_s = -(int32_t) steer
+        /* Line to the right (+) needs the agreed positive right-turn rate. */
+        cmd.value.velocity.angular_mdeg_s = (int32_t) steer
                                             * VC_STEER_GAIN_MDEG_S;
         result = motion_submit(&cmd);
 
