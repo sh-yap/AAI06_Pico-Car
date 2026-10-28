@@ -25,11 +25,23 @@ APP ?= demo
 BOARD ?= pico
 UART_MIRROR := 1
 
-ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test ultrasonic_test servo_test obstacle_task_test vc_car),$(APP))
-$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, ultrasonic_test, servo_test, obstacle_task_test or vc_car)
+ifneq ($(filter $(APP),demo motion_sim_test motion_motor_test motion_encoder_test motion_closed_loop_test motion_closed_loop_button_test motion_stage4_test ultrasonic_test servo_test obstacle_task_test vc_car),$(APP))
+$(error Unknown APP '$(APP)'; use demo, motion_sim_test, motion_motor_test, motion_encoder_test, motion_closed_loop_test, motion_closed_loop_button_test, motion_stage4_test, ultrasonic_test, servo_test, obstacle_task_test or vc_car)
 endif
 ifneq ($(filter $(BOARD),pico robo_pico_robot),$(BOARD))
 $(error Unknown BOARD '$(BOARD)'; use pico or robo_pico_robot)
+endif
+
+ifeq ($(APP),motion_stage4_test)
+ifneq ($(BOARD),robo_pico_robot)
+$(error APP=motion_stage4_test requires BOARD=robo_pico_robot)
+endif
+endif
+
+ifeq ($(APP),motion_closed_loop_button_test)
+ifneq ($(BOARD),robo_pico_robot)
+$(error APP=motion_closed_loop_button_test requires BOARD=robo_pico_robot)
+endif
 endif
 
 ifneq ($(SMP),0)
@@ -320,6 +332,12 @@ ifeq ($(BOARD),robo_pico_robot)
 CFLAGS += -DBOARD_ROBO_PICO_ROBOT=1
 endif
 CFLAGS += -DTM_CONSOLE_UART=$(UART_MIRROR)
+
+# Opt-in only for the button diagnostic; normal vehicle firmware cannot
+# request a USB soft detach. USB remains owned by its existing service task.
+ifeq ($(APP),motion_closed_loop_button_test)
+CFLAGS += -DTM_USB_HOST_DIAGNOSTIC=1
+endif
 
 ################################################################################
 # Console selection

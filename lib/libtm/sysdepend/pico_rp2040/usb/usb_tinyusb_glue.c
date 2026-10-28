@@ -78,6 +78,14 @@ int tm_tusb_read_char(void)
     return tud_cdc_read_char();
 }
 
+#if TM_USB_HOST_DIAGNOSTIC
+/* Called only by the USB service, never by Motion or an application task. */
+int tm_tusb_diag_attach(int attached)
+{
+    return (attached ? tud_connect() : tud_disconnect()) ? 1 : 0;
+}
+#endif
+
 /*
  * Diagnostics.  The console cannot report on the console, so these are read
  * out over GPIO when USB fails to enumerate.

@@ -13,6 +13,8 @@ typedef struct {
     uint32_t right_invalid_transitions;
     uint32_t invalid_transitions;
     uint32_t irq_count;
+    /* Counts and timestamp belong to the same sequence-validated snapshot. */
+    uint64_t sampled_at_us;
 } motion_encoder_snapshot_t;
 
 motion_result_t motion_encoder_init(const motion_config_t *config);

@@ -12,6 +12,12 @@ build_make/tools/elf2uf2.exe
 tools/elf2uf2/elf2uf2
 tools/elf2uf2/elf2uf2.exe
 build_make/.build_profile
+tests/motion/motion_task_tests
+tests/motion/motion_task_tests.exe
+tests/motion/motion_encoder_snapshot_tests
+tests/motion/motion_encoder_snapshot_tests.exe
+tests/motion/motion_usb_isolation_tests
+tests/motion/motion_usb_isolation_tests.exe
 
 # Local Wi-Fi credentials. Copy config/wifi_credentials.example.h to this
 # path and edit it; never commit the populated file.

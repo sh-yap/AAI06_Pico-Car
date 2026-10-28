@@ -1,0 +1,1 @@
+/* Hardware access is supplied by the motion task harness. */

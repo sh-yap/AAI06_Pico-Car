@@ -5,6 +5,7 @@
 
 #include "../../app_program/motion_config.h"
 #include "../../app_program/motion_control.h"
+#include "../../app_program/motion_stage4_profile.h"
 
 static void expect(int condition, const char *name)
 {
@@ -24,6 +25,8 @@ int main(void)
     int32_t speed;
     motion_pid_t pid = { 1.0f, 0.5f, 0.0f, 0.0f, 0.0f, 20.0f, -100.0f, 100.0f };
     motion_pid_result_t pid_result;
+    motion_stage4_case_t stage4_case;
+    uint32_t stage4_flags;
     expect(motion_quadrature_delta(0U, 1U) == -1, "forward quadrature");
     expect(motion_quadrature_delta(1U, 0U) == 1, "reverse quadrature");
     expect(motion_quadrature_delta(0U, 3U) == 0, "invalid quadrature");
@@ -105,6 +108,10 @@ int main(void)
            "accept plausible encoder delta");
     expect(!motion_encoder_delta_plausible(1000, 20U, 5275, 300),
            "reject impossible encoder delta");
+    expect(motion_encoder_delta_plausible(250, 20U, 4684, 1000),
+           "accept measured loaded launch encoder delta");
+    expect(!motion_encoder_delta_plausible(250, 20U, 4684, 300),
+           "old command-speed bound rejects loaded launch delta");
     expect(motion_speed_from_counts(100, 40U, 5275, &speed)
            && speed == 201,
            "delayed control period uses measured time");
@@ -114,6 +121,14 @@ int main(void)
            "measured left encoder calibration");
     expect(config.right_counts_per_wheel_rev == 2529,
            "measured right encoder calibration");
+    expect(config.left_wheel_diameter_um == 57700,
+           "loaded left wheel diameter calibration");
+    expect(config.right_wheel_diameter_um == 57600,
+           "loaded right wheel diameter calibration");
+    expect(config.startup_pwm_permille == 200U,
+           "loaded startup PWM calibration");
+    expect(config.encoder_physical_max_speed_mm_s == 1000,
+           "loaded encoder physical-speed bound");
     expect(motion_config_validate(&config), "default motion configuration");
     expect(motion_feedforward_permille(100, 57U, 318U, 225U, 100U, 6U, 80U, 900U) == 88,
            "left feedforward");
@@ -132,6 +147,47 @@ int main(void)
     expect(pid_result.output <= 100.0f && pid_result.output > 0.0f, "PID saturation");
     pid_result = motion_pid_step(&pid, 0.0f, 100.0f, 0.02f);
     expect(pid_result.output < 0.0f, "PID reverse output");
+    expect(motion_stage4_case_count() == 18U, "Stage 4 sweep case count");
+    expect(motion_stage4_case_get(0U, &stage4_case) &&
+           stage4_case.direction == MOTION_STAGE4_FORWARD &&
+           stage4_case.duty_permille == 150U && stage4_case.duration_ms == 1000U,
+           "Stage 4 first forward case");
+    expect(motion_stage4_case_get(8U, &stage4_case) &&
+           stage4_case.direction == MOTION_STAGE4_FORWARD &&
+           stage4_case.duty_permille == 350U,
+           "Stage 4 last forward case");
+    expect(motion_stage4_case_get(9U, &stage4_case) &&
+           stage4_case.direction == MOTION_STAGE4_REVERSE &&
+           stage4_case.duty_permille == 150U,
+           "Stage 4 first reverse case");
+    expect(motion_stage4_case_get(17U, &stage4_case) &&
+           stage4_case.direction == MOTION_STAGE4_REVERSE &&
+           stage4_case.duty_permille == 350U,
+           "Stage 4 last reverse case");
+    expect(!motion_stage4_case_get(18U, &stage4_case),
+           "reject Stage 4 case outside sweep");
+    stage4_flags = motion_stage4_assess(&stage4_case, -1000, -990, 0U, false);
+    expect(stage4_flags == MOTION_STAGE4_RESULT_NONE &&
+           motion_stage4_result_code(stage4_flags) == 1U,
+           "Stage 4 reverse pass assessment");
+    stage4_flags = motion_stage4_assess(&stage4_case, 0, -990, 0U, false);
+    expect((stage4_flags & MOTION_STAGE4_RESULT_LEFT_LOW_ACTIVITY) != 0U &&
+           motion_stage4_result_code(stage4_flags) == 3U,
+           "Stage 4 left low-activity assessment");
+    stage4_flags = motion_stage4_assess(&stage4_case, 0, 0, 0U, false);
+    expect(motion_stage4_result_code(stage4_flags) == 5U,
+           "Stage 4 both low-activity assessment");
+    stage4_flags = motion_stage4_assess(&stage4_case, 1000, -990, 0U, false);
+    expect((stage4_flags & MOTION_STAGE4_RESULT_WRONG_DIRECTION) != 0U &&
+           motion_stage4_result_code(stage4_flags) == 6U,
+           "Stage 4 wrong-direction priority");
+    stage4_flags = motion_stage4_assess(&stage4_case, -1000, -990, 1U, false);
+    expect((stage4_flags & MOTION_STAGE4_RESULT_INVALID_ENCODER) != 0U &&
+           motion_stage4_result_code(stage4_flags) == 7U,
+           "Stage 4 invalid-encoder assessment");
+    stage4_flags = motion_stage4_assess(&stage4_case, 0, 0, 0U, true);
+    expect(motion_stage4_result_code(stage4_flags) == 2U,
+           "Stage 4 abort result priority");
     puts("All Buddy 2 host tests passed.");
     return EXIT_SUCCESS;
 }

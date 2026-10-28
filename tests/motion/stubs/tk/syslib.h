@@ -1,0 +1,1 @@
+/* Encoder snapshot tests do not initialise board interrupts. */
