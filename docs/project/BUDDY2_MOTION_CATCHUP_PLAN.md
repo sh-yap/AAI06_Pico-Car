@@ -15,10 +15,10 @@ considered verified until Buddy 2 repeats the test and saves the evidence.
 | 0 | Freeze the current baseline and agree the contract | In progress | Contract received; WiFi build/limits pending |
 | 1 | Re-check wiring, motors and encoders safely | In progress; functional checks pass, electrical/power checks pending | `evidence/motion/2026-10-27_MANUAL_ENCODER_CALIBRATION.md` |
 | 2 | Fix motion correctness and concurrency defects | Software regression, raised-wheel manoeuvres, timeout, acknowledgement, recovery, reversal and stop-priority pass; five corrected stop-latency runs measured 204 us-10.690 ms, team limit remains | `evidence/motion/2026-10-27_SOFTWARE_VERIFICATION.md`, `evidence/motion/2026-10-27_RAISED_WHEEL_CLOSED_LOOP.md`, `evidence/motion/2026-10-27_RAISED_WHEEL_MANOEUVRE_DEFECT.md` |
-| 3 | Recalibrate encoder geometry with the complete car | Cleared for progression; CPR and loaded effective diameters are documented, powered encoder-noise verification continues with Stage 4 | `evidence/motion/2026-10-27_STAGE3_LOADED_GEOMETRY.md` |
+| 3 | Recalibrate encoder geometry with the complete car | Cleared for progression; CPR documented, external-power false burst provisionally resolved by timer fix; physical distance refinement continues in Stage 6 | `evidence/motion/2026-10-27_STAGE3_LOADED_GEOMETRY.md`, `evidence/motion/2026-10-28_CLOCK_RATE_CHECK.md` |
 | 4 | Characterise the motors under the final load | In progress; button firmware built, physical sweep pending | `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md` |
-| 5 | Tune loaded closed-loop wheel-speed control | Button-controlled 100 mm/s straight test built; physical run pending | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md` |
-| 6 | Tune distance and straight-line motion | Not started | |
+| 5 | Tune loaded closed-loop wheel-speed control | First post-watchdog-tick USB and powerbank/VIN runs pass without a Motion fault; repeatability and floor tuning remain | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md` |
+| 6 | Tune distance and straight-line motion | In progress; encoder estimate 301 mm, approximate physical travel 350 mm for a 300 mm command | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md` |
 | 7 | Tune left, right and U-turns | Not started | |
 | 8 | Prove stop and fault behaviour | Not started | |
 | 9 | Integrate with the current team software | Not started | |
@@ -53,6 +53,9 @@ evidence is saved. Record the commit and evidence path in the last column.
 - Host tests for the hardware-independent calculations.
 - Vehicle Controller integration for drive, stop, reverse and turns.
 - Motion telemetry through the communications subsystem.
+- RP2040 watchdog tick explicitly initialized from the 12 MHz reference clock,
+  giving the hardware timer a deterministic 1 us tick on USB and external
+  power boots.
 
 ### Current hardware assignment
 
@@ -646,11 +649,33 @@ the encoder/PID controller, not by assigning equal raw PWM to both motors.
   through the USB owner task while retaining computer power, then restore
   USB and replay the exact saved report with `p`. Diagnostic hooks are absent
   from normal firmware. Both build profiles pass; 95 host checks pass.
-- [ ] With button-diag-03 on computer USB and wheels raised, run GP20 baseline.
-  If successful, send `n`, wait for COM to return, reopen Serial Monitor and
-  send `p` without resetting. Compare both reports before further changes.
+- [x] Tester supplied a passing computer-USB baseline and USB-data-off trial.
+  The earlier successful baseline was on the floor; a later computer-USB run
+  with wheels raised now faults with 599 left counts over 14063 us while the
+  left wheel moves slightly and the right remains still. This does not close
+  encoder validation. See `evidence/motion/2026-10-28_ENCODER_FAULT_AUDIT.md`
+  for the exact log, software review, passing regressions and isolation steps.
+- [x] Repeated the same closed-loop button test with both wheels raised on the
+  powerbank; the same encoder-fault beep behaviour returned, while the matching
+  raised-wheel computer-USB run completed. This makes the external-power path
+  the leading comparative factor. Raw powerbank diagnostic fields are still
+  required before assigning a wheel or exact delta.
+- [x] Compare the BSP `kernel/sysdepend/pico_rp2040/cpu_clock.c` with the
+  teammate-provided working file. The repository was missing the watchdog
+  `TICK` initialization that supplies the RP2040 timer reference. Add
+  `ENABLE | XOSC_MHz` after configuring `CLK_REF`; the repository file now
+  matches the supplied file. Clock-test and button-test firmware rebuild with
+  no emitted warnings or errors.
+- [x] Post-fix computer-USB run completed with `state=3`, `fault=0`, counts
+  4220/4233, speed 105/105 mm/s, invalid transitions 0/0 and encoder travel
+  301/300 mm. These counts are consistent with the earlier successful totals.
+- [x] Post-fix powerbank-to-VIN run completed without the former multi-group
+  fault beeps. The tester observed approximately 350 mm physical travel for
+  the 300 mm command. This provisionally clears the external-power false burst
+  but opens distance calibration: about +50 mm or +17% from one approximate
+  measurement. Do not recalibrate until repeated measured floor runs exist.
 - [ ] Flash the button-controlled closed-loop UF2 and complete the physical
-  straightness worksheet.
+  straightness worksheet with the remaining repeat trials.
 - [ ] If the path still curves right, use the logged/observed direction to
   tune the normalized correction and per-wheel loaded feed-forward; do not
   change Stage 3 wheel geometry for a steering bias.

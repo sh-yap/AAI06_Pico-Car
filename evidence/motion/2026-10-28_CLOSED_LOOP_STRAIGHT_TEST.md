@@ -1,6 +1,54 @@
 # Closed-loop straightness test - 2026-10-28
 
-## Current review: cause still unresolved
+## Latest update: external-power fault cleared after timer-tick initialization
+
+The RP2040 BSP did not explicitly configure the watchdog `TICK` generator that
+supplies the hardware timer reference. A teammate-provided `cpu_clock.c` added
+`ENABLE` plus `XOSC_MHz` cycles after `CLK_REF` was configured. The repository
+now contains the same change in
+`kernel/sysdepend/pico_rp2040/cpu_clock.c`, so every boot establishes a 1 us
+timer tick instead of relying on state established elsewhere.
+
+The post-fix computer-USB button run completed successfully:
+
+```text
+[button-diag-03] init_core=1 seq=1 state=3 fault=0 detail=0 wheel=0
+[button-diag] usb_state_at_print=3 (1=no host, 2=mounted, 3=serial open)
+[button-diag] data_off_trial=0 usb_irq_start=131 usb_irq_end=131
+[button-diag] dt_ms=0 prev_us=0 sample_us=17145319 read_us=2
+[button-diag] prev=0/0 count=4220/4233 delta=0/0
+[button-diag] irq_prev=0 irq=8438 invalid=0/0
+[button-diag] last_speed=105/105 pre_fault_pwm=0/0 pwm=0/0 travel=301 target=300
+```
+
+The same rebuilt image then ran from powerbank through Robo-Pico VIN without
+the former multi-group encoder-fault beeps. The tester measured approximately
+350 mm of physical travel for the 300 mm command. This is a first successful
+external-power run and strong evidence that the missing timer initialization
+caused the power-dependent false plausibility fault. It is not yet a final
+repeatability result. The encoder estimate was 301 mm while the approximate
+physical measurement was 350 mm, an overshoot of about 50 mm or 17%; distance
+calibration therefore remains open and must not be changed from one approximate
+measurement.
+
+The successful counts are consistent with the earlier passing USB runs:
+4220/4233 now versus 4224/4199, 4272/4148 and 4247/4186 previously. Total
+counts differ by only about 0.2-0.4%. Keep the encoder safety check enabled.
+
+The sections below preserve the earlier investigation in chronological order.
+
+Related historical audit: [encoder fault audit](2026-10-28_ENCODER_FAULT_AUDIT.md).
+Before the watchdog-tick fix, computer USB also produced one raised-wheel fault
+(599 left counts in 14063 us). Earlier USB baseline and USB-data-isolation
+passes were reported by the tester. Preserve these entries as chronological
+evidence; the post-fix USB and VIN results above are the latest evidence.
+
+The tester subsequently repeated the raised-wheel run with the powerbank and
+reported the same beep failure. The matching raised-wheel computer-USB run
+completed successfully. No raw powerbank diagnostic line was provided with
+that repeat, so only the comparative result is recorded here.
+
+## Earlier review: cause was unresolved before the watchdog-tick fix
 
 ### Latest result and next diagnostic: button-diag-03
 
@@ -284,7 +332,7 @@ tuning and inspect power/ground integrity and encoder-wire routing.
 
 | Trial | Distance target | Completed beep | Travel endpoint | Drift (car's side) | Left/right start | Notes |
 | ---: | ---: | ---: | ---: | --- | --- | --- |
-| 1 | 300 mm | | | | | |
+| 1 | 300 mm | No fault groups | ~350 mm | Not recorded | Both drove | Post-watchdog-tick fix; powerbank to VIN |
 | 2 | 300 mm | | | | | |
 | 3 | 300 mm | | | | | |
 | 4 | 300 mm | | | | | |
@@ -292,8 +340,8 @@ tuning and inspect power/ground integrity and encoder-wire routing.
 
 ## Review
 
-- Straight on how many trials:
+- Straight on how many trials: not recorded for the first post-fix run
 - Right drift on how many trials:
 - Left drift on how many trials:
-- Any fault beep:
-- Controller change required:
+- Any fault beep: none reported on the first post-fix VIN run
+- Controller change required: timer fix retained; distance calibration pending

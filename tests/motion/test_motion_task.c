@@ -164,5 +164,26 @@ int main(void)
           motion_status.encoder_fault_wheel_mask == 1U &&
           drive_calls == drives_before && test_duty[0] == 0U && test_duty[1] == 0U,
           "real count spike after timing correction still brakes immediately");
+    /* Replay the user's 28 Oct diag-03 failure, retaining exact timestamps. */
+    test_clock = 422617U;
+    test_encoder.left_counts = 175;
+    test_encoder.right_counts = 2;
+    test_encoder.irq_count = 177U;
+    (void)motion_stop();
+    motion_loop();
+    cmd.sequence_id = 4U;
+    (void)motion_submit(&cmd);
+    motion_loop();
+    test_clock = 436680U;
+    test_encoder.left_counts = 774;
+    test_encoder.irq_count = 776U;
+    motion_loop();
+    check(motion_status.encoder_fault == MOTION_ENCODER_FAULT_COUNT_DELTA &&
+          motion_status.encoder_fault_wheel_mask == 1U &&
+          motion_status.encoder_fault_elapsed_ms == 14U &&
+          motion_status.encoder_fault_left_delta == 599 &&
+          motion_status.encoder_fault_right_delta == 0 &&
+          test_duty[0] == 0U && test_duty[1] == 0U,
+          "reported 599/0 counts over 14063 us correctly latch a left fault and brake");
     return 0;
 }

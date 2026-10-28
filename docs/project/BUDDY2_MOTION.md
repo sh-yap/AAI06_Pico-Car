@@ -46,6 +46,14 @@ task reached the encoder distance target; two beeps indicate an operator stop.
 Fault codes are three timeout, four stall, five encoder, six invalid command,
 seven hardware/configuration, and eight command rejection.
 
+The RP2040 BSP now explicitly initializes the watchdog `TICK` register after
+configuring `CLK_REF`. This tick is the hardware timer reference used by
+Motion's elapsed-time and encoder plausibility calculations. The first rebuilt
+USB run completed at 301/300 mm with counts 4220/4233 and `fault=0`; the same
+image then completed from powerbank through VIN without the earlier encoder
+fault groups. Approximate physical travel was 350 mm, so the power-dependent
+fault is provisionally cleared while distance calibration remains open.
+
 ## Public interface
 
 Include `app_program/motion_task.h` and `motion_types.h`. Public distances and
