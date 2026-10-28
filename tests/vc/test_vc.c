@@ -150,14 +150,25 @@ test_follow_line_and_hump (void)
     printf("follow line + hump speed cap\n");
 
     go_to_follow_line(0U);
-    g_in.line_error = -40;
+    g_in.line_error = 0;
     step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(VC_MOTION_DRIVE == g_out.motion);
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
-    CHECK(-40 == g_out.steer);
     CHECK(!g_out.b_state_changed);
 
+    /* Off centre: steer by the error, and slow down for the bend. */
+    g_in.line_error = -40;
+    step();
+    CHECK(-40 == g_out.steer);
+    CHECK(VC_SPEED_NORMAL_MM_S > g_out.speed_mm_s);
+    CHECK(VC_SPEED_CURVE_MM_S < g_out.speed_mm_s);
+
+    g_in.line_error = 127;
+    step();
+    CHECK(VC_SPEED_CURVE_MM_S == g_out.speed_mm_s);
+
+    g_in.line_error = 0;
     g_in.b_hump = true;
     step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* Hump is not a state. */

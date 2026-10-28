@@ -42,6 +42,32 @@ static uint8_t read_pair(uint8_t pin_a, uint8_t pin_b)
     return (uint8_t)(((input >> pin_a) & 1U) | (((input >> pin_b) & 1U) << 1U));
 }
 
+/* test_integrate (Buddy 2 to review): on powerbank/VIN the encoders saw
+ * >1000-count bursts in ~10 ms (motor noise; fine on computer USB).  At the
+ * 300 mm/s limit a real edge comes every ~270 us and then holds, so a level
+ * is only trusted if it reads the same twice this far apart. */
+#define ENCODER_STABLE_US 3U
+
+/* Both encoder pairs, read twice ENCODER_STABLE_US apart.  Returns false
+ * if either pair changed between the reads (a noise spike in progress). */
+static bool read_stable(uint8_t *p_left, uint8_t *p_right)
+{
+    uint64_t const start = motion_clock_us();
+    uint8_t left = read_pair(encoder_config.left_encoder_a,
+                             encoder_config.left_encoder_b);
+    uint8_t right = read_pair(encoder_config.right_encoder_a,
+                              encoder_config.right_encoder_b);
+
+    while ((motion_clock_us() - start) < ENCODER_STABLE_US) {
+        /* Short busy wait inside the ISR: a few microseconds per edge. */
+    }
+    *p_left = read_pair(encoder_config.left_encoder_a,
+                        encoder_config.left_encoder_b);
+    *p_right = read_pair(encoder_config.right_encoder_a,
+                         encoder_config.right_encoder_b);
+    return (left == *p_left) && (right == *p_right);
+}
+
 static void add_irq_pin(uint8_t pin)
 {
     uint32_t bank = pin / 8U;
@@ -53,6 +79,8 @@ static void add_irq_pin(uint8_t pin)
 static void motion_encoder_isr(UINT intno)
 {
     uint8_t current;
+    uint8_t left_now;
+    uint8_t right_now;
     int8_t delta;
     uint32_t bank;
     uint32_t pending;
@@ -68,19 +96,21 @@ static void motion_encoder_isr(UINT intno)
             encoder_pending = true;
         }
     }
-    if (!encoder_pending) {
+    if (!encoder_pending || !read_stable(&left_now, &right_now)) {
+        /* Nothing for us, or a noise spike: count nothing.  A real edge
+         * holds, and the next interrupt reads it. */
         ClearInt(intno);
         return;
     }
     ++encoder_snapshot_sequence;
     encoder_memory_barrier();
     ++motion_encoder_irq_count;
-    current = read_pair(encoder_config.left_encoder_a, encoder_config.left_encoder_b);
+    current = left_now;
     delta = motion_quadrature_delta(encoder_previous[0], current);
     if (delta == 0 && current != encoder_previous[0]) ++encoder_invalid[0];
     else encoder_counts[0] += delta;
     encoder_previous[0] = current;
-    current = read_pair(encoder_config.right_encoder_a, encoder_config.right_encoder_b);
+    current = right_now;
     delta = motion_quadrature_delta(encoder_previous[1], current);
     if (delta == 0 && current != encoder_previous[1]) ++encoder_invalid[1];
     else encoder_counts[1] += delta;

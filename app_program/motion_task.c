@@ -27,6 +27,7 @@
 #define MOTION_INVALID_TRANSITIONS_PER_SAMPLE 8U
 #define MOTION_TARGET_SLEW_MM_S_PER_PERIOD 6.0f
 #define MOTION_PWM_SLEW_PER_PERIOD 25.0f
+#define MOTION_SUBMIT_LOCK_MS 30 /* motion_submit(): max wait for the lock. */
 #define MOTION_STRAIGHT_CORRECTION_GAIN 0.10f
 #define MOTION_STRAIGHT_CORRECTION_MAX_MM_S 30.0f
 #define MOTION_MIN_DT_MS 1U
@@ -750,8 +751,13 @@ motion_result_t motion_submit(const motion_command_t *command)
             command, motion_config.max_speed_mm_s,
             (int32_t)(motion_config.track_width_um / 1000),
             MOTION_MAX_TURN_ANGLE_MDEG)) return MOTION_RESULT_INVALID;
+    /* Wait briefly: the Motion loop holds this lock for its whole body, and
+       both tasks run every 20 ms from the same tick, so a single TMO_POL
+       try could hit the held lock on every step and the drive command never
+       got in (car still, no fault; test_integrate 28 Oct, Buddy 2 to
+       review).  Bounded so a stuck Motion task cannot hang the caller. */
     if (command_mtx <= E_OK
-        || tk_loc_mtx(command_mtx, TMO_POL) != E_OK) {
+        || tk_loc_mtx(command_mtx, MOTION_SUBMIT_LOCK_MS) != E_OK) {
         return MOTION_RESULT_BUSY;
     }
     if (reinitialisation_required) {

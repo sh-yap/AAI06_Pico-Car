@@ -54,16 +54,23 @@
 #define VC_TASK_PRIORITY         (5)       /* Just below Motion (4).       */
 #define VC_TASK_STACK_BYTES      (4096U)   /* SMP kernel path is deep.     */
 
-#define VC_STEER_GAIN_MDEG_S     (400)     /* Turn rate per steer unit;
-                                              127 -> about 50 deg/s.       */
+#define VC_STEER_GAIN_MDEG_S     (700)     /* Turn rate per steer unit;
+                                              127 -> about 89 deg/s.  Was
+                                              400 (50 deg/s): too gentle,
+                                              ran off bends (27 Oct).      */
 #define VC_STEER_RESEND          (8)       /* Re-send drive if steer moves
                                               this much (of 127).          */
+#define VC_SPEED_RESEND          (10)      /* ...or speed moves this much
+                                              (mm/s).  The bend slowdown
+                                              changes speed with every
+                                              small steer change.          */
 #define VC_TURN_SPEED_MM_S       (100)     /* Wheel speed for encoder turns.*/
 #define VC_REVERSE_MM            (100)     /* Back off before a rescan.    */
 #define VC_REVERSE_SPEED_MM_S    (80)
 #define VC_STATIONARY_MM_S       (10)      /* Both wheels below = still.   */
 #define VC_STOP_HOLD_STEPS       (2U)      /* 40 ms: Motion sees the stop. */
 #define VC_SUBMIT_RETRIES        (5U)      /* BUSY / QUEUE_FULL retries.   */
+#define VC_SUBMIT_RETRIES_DRIVE  (10U)     /* Same for drive: 0.2 s.       */
 #define VC_TEST_RUN_MS           (5000U)   /* Placeholder-line run length. */
 #define VC_LINE_STALE_MS         (100U)    /* No Buddy 3 data = line lost. */
 #define VC_LINE_DRAIN_MAX        (16U)     /* Messages read per step, max. */
@@ -87,6 +94,7 @@ static uint32_t          g_pending_tries;
 static uint32_t          g_hold_steps; /* Steps left after a stop.        */
 
 static bool     g_b_driving;           /* A velocity command is active.   */
+static uint32_t g_drive_busy_try;      /* Drive refused as busy in a row. */
 static int16_t  g_drive_speed;
 static int8_t   g_drive_steer;
 
@@ -545,8 +553,9 @@ stop_motion (void)
     g_b_driving     = false;
     g_b_pending     = false;
     g_manoeuvre_seq = 0U;
-    g_b_rejected    = false;
-    g_hold_steps    = VC_STOP_HOLD_STEPS;
+    g_b_rejected     = false;
+    g_drive_busy_try = 0U;
+    g_hold_steps     = VC_STOP_HOLD_STEPS;
 }
 
 
@@ -612,7 +621,13 @@ drive (int16_t speed_mm_s, int8_t steer)
     g_b_pending     = false;            /* Driving replaces any manoeuvre. */
     g_manoeuvre_seq = 0U;
 
-    b_changed = (!g_b_driving) || (speed_mm_s != g_drive_speed)
+    /* A change to or from 0 mm/s is always sent, however small. */
+    b_changed = (!g_b_driving)
+                || ((speed_mm_s != g_drive_speed)
+                    && ((0 == speed_mm_s) || (0 == g_drive_speed)
+                        || (VC_SPEED_RESEND
+                            <= abs_i32((int32_t) speed_mm_s
+                                       - (int32_t) g_drive_speed))))
                 || (VC_STEER_RESEND
                     <= abs_i32((int32_t) steer - (int32_t) g_drive_steer));
 
@@ -629,17 +644,22 @@ drive (int16_t speed_mm_s, int8_t steer)
 
         if (MOTION_RESULT_OK == result)
         {
-            g_b_driving   = true;
-            g_drive_speed = speed_mm_s;
-            g_drive_steer = steer;
+            g_b_driving      = true;
+            g_drive_speed    = speed_mm_s;
+            g_drive_steer    = steer;
+            g_drive_busy_try = 0U;
         }
-        else if (is_retryable(result))
+        else if (is_retryable(result)
+                 && (VC_SUBMIT_RETRIES_DRIVE > g_drive_busy_try))
         {
-            /* Try again next step. */
+            g_drive_busy_try++;                 /* Try again next step. */
         }
         else
         {
-            g_b_rejected = true;
+            /* Refused, or busy for too long: a fault, not a silent wait
+             * (a busy Motion once left the car still with fault 0). */
+            g_b_rejected     = true;
+            g_drive_busy_try = 0U;
             tm_printf((UB *) "[vc] drive rejected by Motion: %d\n",
                       (INT) result);
         }

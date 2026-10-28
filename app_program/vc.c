@@ -169,6 +169,25 @@ follow_speed (vc_inputs_t const * p_in)
 }
 
 
+/* Slow down in proportion to the steer: full speed when centred, down to
+ * VC_SPEED_CURVE_MM_S at full steer (never above the given speed). */
+static int16_t
+curve_speed (int16_t speed_mm_s, int8_t steer)
+{
+    int32_t const magnitude = (0 > steer) ? -(int32_t) steer : (int32_t) steer;
+    int32_t       slowest   = VC_SPEED_CURVE_MM_S;
+    int32_t       speed;
+
+    if (slowest > speed_mm_s)
+    {
+        slowest = speed_mm_s;
+    }
+
+    speed = speed_mm_s - (((speed_mm_s - slowest) * magnitude) / 127);
+    return (int16_t) speed;
+}
+
+
 /* Remember a decoded barcode until the next junction. */
 static void
 store_barcode (vc_t * p_vc, vc_inputs_t const * p_in)
@@ -239,10 +258,10 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     else
     {
         p_out->motion     = VC_MOTION_DRIVE;
-        p_out->speed_mm_s = follow_speed(p_in);
         /* Over a junction already handled: drive straight across. */
         p_out->steer      = (VC_LINE_JUNCTION == line) ? 0
                                                        : p_in->line_error;
+        p_out->speed_mm_s = curve_speed(follow_speed(p_in), p_out->steer);
     }
 }
 
