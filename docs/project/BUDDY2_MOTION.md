@@ -18,6 +18,10 @@ APP=motion_motor_test     BOARD=robo_pico_robot
 APP=motion_encoder_test   BOARD=robo_pico_robot
 APP=motion_closed_loop_test BOARD=robo_pico_robot
 APP=motion_stage4_test    BOARD=robo_pico_robot
+APP=motion_stage5_test    BOARD=robo_pico_robot
+APP=motion_stage6_test    BOARD=robo_pico_robot
+APP=motion_stage7_test    BOARD=robo_pico_robot
+APP=motion_route_test     BOARD=robo_pico_robot
 APP=motion_closed_loop_button_test BOARD=robo_pico_robot
 ```
 
@@ -38,6 +42,42 @@ is nothing to build.
 It does not require WiFi or MQTT. Robo-Pico GP20 repeats the selected bounded
 one-second run; GP21 stops an active run, advances the test while idle, or
 resets the sweep to forward 150 permille when held for at least one second.
+The run deadline uses the RP2040 microsecond clock rather than accumulated
+RTOS delays. If USB serial is present, an exact elapsed-time/count report is
+printed only after both motors have been braked; GP20 still triggers motion.
+
+`APP=motion_stage5_test` is the powerbank-only PID image. It contains one
+required operating point at a time, in forward and reverse 500 mm cases. The
+50 and 80 mm/s points are complete in both directions. GP20 starts and GP21
+stops a run or toggles direction while idle.
+
+`APP=motion_stage6_test` is the powerbank-only distance-calibration image. It
+uses 50 mm/s only and selects the completed 500 mm forward case, an optional
+1500 mm forward long-drift case, and the 100 mm reverse case. GP20 starts a
+case and GP21 stops an active case; while idle, GP21 advances the case and a
+long hold resets to 500 mm forward.
+After braking, the serial report includes the target, encoder-derived travel,
+left/right encoder counts, invalid transitions, sequence ID, elapsed time,
+mean speed and peak speed. It uses the active loaded Q10 1167 (1.140) scale.
+GP19 is only an optional external LED output; the Robo-Pico has no visible
+onboard status LED assigned to `BOARD_LED_PIN`. If an external LED and resistor
+are fitted to GP19, 1-9 flashes after completion represent approximately
+10-90 mm/s average encoder speed. This indication is not required for testing.
+
+`APP=motion_stage7_test` is the powerbank-only turn image. GP20 starts the
+selected encoder turn at 80 mm/s. GP21 selects left 90, right 90 or U-turn
+while idle, and immediately stops while running. One, two and three selection
+beeps identify those cases. One result beep means complete; two means operator
+stop, and fault result codes remain 3-8.
+
+`APP=motion_route_test` is the powerbank-only combined route image. One GP20
+press runs 500 mm forward, 90 degrees left, 500 mm forward, 90 degrees right,
+1000 mm forward, a 180-degree right U-turn, then 1500 mm forward. Straight
+segments use 50 mm/s and turns use 80 mm/s. GP21 is an immediate stop at every
+stage, including the one-second start delay and the short gaps between
+commands. One final result beep means the entire route completed; two means
+operator stop and fault result codes remain 3-8. The route can be started
+again with GP20 after completion.
 
 `APP=motion_closed_loop_button_test` is the powerbank-only straightness image.
 GP20 submits a 300 mm forward move at 100 mm/s to the encoder/PID Motion task;
@@ -45,6 +85,14 @@ GP21 requests an immediate stop. A one-beep completion indicates the Motion
 task reached the encoder distance target; two beeps indicate an operator stop.
 Fault codes are three timeout, four stall, five encoder, six invalid command,
 seven hardware/configuration, and eight command rejection.
+
+The RP2040 BSP now explicitly initializes the watchdog `TICK` register after
+configuring `CLK_REF`. This tick is the hardware timer reference used by
+Motion's elapsed-time and encoder plausibility calculations. The first rebuilt
+USB run completed at 301/300 mm with counts 4220/4233 and `fault=0`; the same
+image then completed from powerbank through VIN without the earlier encoder
+fault groups. Approximate physical travel was 350 mm, so the power-dependent
+fault is provisionally cleared while distance calibration remains open.
 
 ## Public interface
 
@@ -66,6 +114,11 @@ dependencies. Run their deterministic host tests with:
 make -C tests/motion test
 ```
 
+The host suite also exercises the real Motion loop, encoder ISR/snapshot,
+button-test isolation and motor-driver error paths with mocked hardware. PWM
+or brake write failures become a latched hardware fault instead of being
+silently reported as successful.
+
 ## Provisional Robo-Pico resources
 
 | Resource | Assignment |
@@ -80,6 +133,9 @@ make -C tests/motion test
 The 2026-10-27 marked manual calibration measured 2535.7 left and 2528.6 right
 counts per wheel revolution, rounded in the configuration to 2536 and 2529.
 This calibrates encoder counts, not loaded distance accuracy or tyre slip.
+The 2026-10-28 loaded floor test measured 570 mm in 10.39 s for a 500 mm,
+50 mm/s command. After Stage 5 cleared for the supported 50/80 mm/s scope,
+Q10 1167 (1.140) became the active Stage 6 loaded-distance correction.
 
 Encoder voltage/output type, motor voltage/current and PH2.0-6P orientation
 must be verified before applying power. GP16/GP17 are dedicated to the left

@@ -28,15 +28,24 @@ void motion_config_default(motion_config_t *config)
     /* Loaded rolling calibration, 2026-10-27, complete car approximately
        665 g. A controlled 300 mm forward-and-return test gave bidirectional
        effective diameters of 57.729 mm left and 57.597 mm right. Rounded
-       values are retained here; Stage 6 powered distance tests will refine
-       them if tyre slip produces a systematic error. */
+       values are retained here; Stage 6 powered distance tests use the
+       separate distance_scale_q10 field if a loaded systematic error is
+       confirmed. */
     config->left_wheel_diameter_um = 57700;
     config->right_wheel_diameter_um = 57600;
-    config->track_width_um = 145000;
+    /* Loaded Stage 6 calibration: a 500 mm encoder target produced 570 mm
+       of floor travel.  Compensate the conversion by 570 / 500 = 1.140,
+       represented as Q10 1167. */
+    config->distance_scale_q10 = 1167U;
+    /* Stage 7 first loaded pivot estimate: 90 deg commanded produced about
+       110 deg, so effective width = 145 * 90 / 110 = 118.6 mm.  Use the
+       rounded 119 mm candidate for the focused retest. */
+    config->track_width_um = 119000;
     config->max_speed_mm_s = 300;
-    /* This is a hardware plausibility bound, not a permitted command speed.
-       Loaded raw-PWM testing measured about 910 mm/s at 350 permille, so a
-       1000 mm/s physical bound covers real launch transients. */
+    /* This is a provisional hardware plausibility bound, not a permitted
+       command speed. The original raw-PWM test did not measure exact wall
+       time, so its travel distance cannot establish a 910 mm/s wheel speed.
+       Keep the conservative bound until timed encoder data are captured. */
     config->encoder_physical_max_speed_mm_s = 1000;
     config->max_pwm_permille = 900U;
     config->deadband_permille = 80U;
@@ -86,6 +95,7 @@ bool motion_config_validate(const motion_config_t *config)
         config->right_reverse_boost_permille > config->max_pwm_permille ||
         config->left_counts_per_wheel_rev <= 0 || config->right_counts_per_wheel_rev <= 0 ||
         config->left_wheel_diameter_um <= 0 || config->right_wheel_diameter_um <= 0 ||
+        config->distance_scale_q10 < 512U || config->distance_scale_q10 > 2048U ||
         config->track_width_um <= 0) {
         return false;
     }

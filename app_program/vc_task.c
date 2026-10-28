@@ -64,7 +64,9 @@
                                               (mm/s).  The bend slowdown
                                               changes speed with every
                                               small steer change.          */
-#define VC_TURN_SPEED_MM_S       (100)     /* Wheel speed for encoder turns.*/
+#define VC_TURN_SPEED_MM_S       (80)      /* Wheel speed for encoder turns.
+                                              Buddy 2's validated loaded
+                                              wheel speed (was 100).        */
 #define VC_REVERSE_MM            (100)     /* Back off before a rescan.    */
 #define VC_REVERSE_SPEED_MM_S    (80)
 #define VC_STATIONARY_MM_S       (10)      /* Both wheels below = still.   */
