@@ -19,6 +19,7 @@ typedef struct {
     int32_t right_wheel_diameter_um;
     int32_t track_width_um;
     int32_t max_speed_mm_s;
+    int32_t encoder_physical_max_speed_mm_s;
     uint16_t max_pwm_permille;
     uint16_t deadband_permille;
     uint16_t startup_pwm_permille;

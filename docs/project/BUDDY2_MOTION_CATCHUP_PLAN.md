@@ -15,9 +15,9 @@ considered verified until Buddy 2 repeats the test and saves the evidence.
 | 0 | Freeze the current baseline and agree the contract | In progress | Contract received; WiFi build/limits pending |
 | 1 | Re-check wiring, motors and encoders safely | In progress; functional checks pass, electrical/power checks pending | `evidence/motion/2026-10-27_MANUAL_ENCODER_CALIBRATION.md` |
 | 2 | Fix motion correctness and concurrency defects | Software regression, raised-wheel manoeuvres, timeout, acknowledgement, recovery, reversal and stop-priority pass; five corrected stop-latency runs measured 204 us-10.690 ms, team limit remains | `evidence/motion/2026-10-27_SOFTWARE_VERIFICATION.md`, `evidence/motion/2026-10-27_RAISED_WHEEL_CLOSED_LOOP.md`, `evidence/motion/2026-10-27_RAISED_WHEEL_MANOEUVRE_DEFECT.md` |
-| 3 | Recalibrate encoder geometry with the complete car | Not started | |
-| 4 | Characterise the motors under the final load | Not started | |
-| 5 | Tune loaded closed-loop wheel-speed control | Not started | |
+| 3 | Recalibrate encoder geometry with the complete car | Cleared for progression; CPR and loaded effective diameters are documented, powered encoder-noise verification continues with Stage 4 | `evidence/motion/2026-10-27_STAGE3_LOADED_GEOMETRY.md` |
+| 4 | Characterise the motors under the final load | In progress; button firmware built, physical sweep pending | `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md` |
+| 5 | Tune loaded closed-loop wheel-speed control | Button-controlled 100 mm/s straight test built; physical run pending | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md` |
 | 6 | Tune distance and straight-line motion | Not started | |
 | 7 | Tune left, right and U-turns | Not started | |
 | 8 | Prove stop and fault behaviour | Not started | |
@@ -437,43 +437,98 @@ largest changes in effective millimetres/count, feed-forward and PID tuning.
 
 ### Fix the test configuration
 
-- [ ] Install the power bank, all sensors, brackets, cables and the final wheel
-  and tyre set in their intended locations.
-- [ ] Mark the power-bank position so its weight distribution is repeatable.
-- [ ] Record total mass, left/right weight bias if measurable, tyre condition,
-  surface, battery voltage and state of charge.
+- [x] Record the complete-car mass: approximately 665 g (0.665 kg).
+- [ ] Install the powerbank in its normal physical position for the loaded
+  rolling test; battery charge is not relevant while rolling manually.
+- [x] Record approximate loaded axle height: 30 mm, implying an initial
+  diameter cross-check of approximately 60 mm.
 
 ### Measure
 
-- [ ] Repeat ten manual wheel revolutions per side and calculate mean, minimum,
-  maximum and spread of counts/revolution.
-- [ ] Measure loaded wheel diameter, but calibrate effective millimetres/count
-  using a long measured floor distance to include tyre compression.
-- [ ] Measure physical wheel separation and retain it only as the initial turn
-  model value; Stage 7 will determine effective track width.
-- [ ] Verify forward/reverse signs again with the assembled car.
-- [ ] Update configuration constants only from saved measurements.
-- [ ] Add the date, vehicle configuration and method beside every calibrated
+- [x] Reuse the documented manual CPR calibration (2536 left, 2529 right);
+  repeat it only if the wheel, encoder or gearing changes.
+- [x] Calculate effective millimetres/count and loaded wheel diameter from a
+  controlled 300 mm forward-and-return test. Powered distance belongs to Stage 6.
+- [ ] Measure effective track width during Stage 7 turn calibration rather
+  than blocking this stage on a rough physical measurement.
+- [x] Verify forward/reverse signs again with the assembled car.
+- [x] Update configuration constants only from saved measurements.
+- [x] Add the date, vehicle configuration and method beside every calibrated
   constant; avoid anonymous magic numbers.
 
 ### Exit check
 
-- [ ] CPR and effective distance/count are repeatable and documented.
-- [ ] Left/right geometry constants match the final loaded car.
-- [ ] Encoder invalid-transition behaviour remains acceptable with motors on.
+- [x] CPR and effective distance/count are repeatable and documented.
+- [x] Left/right wheel-diameter constants match the final loaded car.
+- [ ] Encoder invalid-transition behaviour remains acceptable with motors on;
+  collect this together with the Stage 4 powered tests.
 
 ## Stage 4 - Loaded motor characterisation
 
 Goal: replace unloaded and emergency `test_integrate` guesses with measured
 loaded feed-forward and start-up values.
 
+### Power and control arrangement
+
+- The powerbank supplies electrical power to the car only.
+- Do not connect computer USB power and the powerbank simultaneously on the
+  current hardware arrangement.
+- WiFi and MQTT are not required for the Stage 4 raw motor tests. Use a
+  dedicated test application controlled by the Robo-Pico user buttons on
+  GP20 and GP21 while the car is powered only by the powerbank.
+- Do not use the Pico BOOTSEL button or reset control to command motion.
+- The existing `motion_motor_test` application accepts USB-console commands,
+  so it cannot perform this powerbank-only test. The dedicated
+  `APP=motion_stage4_test` mode starts braked, runs only one bounded test per
+  button press and always provides an immediate stop action.
+- WiFi/MQTT testing is deferred until the later integrated-load checks. The
+  integrated `vc_car` MQTT interface only exposes mission `start`/`stop`, not
+  raw PWM sweep commands.
+
+### Button-controlled test firmware
+
+- [x] Add a dedicated `motion_stage4_test` build target for the Robo-Pico.
+- [x] Keep WiFi disabled; the required build uses `WIFI=none`.
+- [x] GP20 repeats the selected one-second raw-PWM test. After GP20 is
+  accepted, the buzzer gives an immediate acknowledgement; after GP20 is
+  released, the status LED flashes for a one-second hand-clear countdown
+  before the motors start.
+- [x] GP21 brakes an active test immediately. While idle, a short GP21 press
+  gives an immediate acknowledgement and advances one case; holding GP21 for
+  at least one second resets to forward 150 permille.
+- [x] The sweep is 150, 175, 200, 225, 250, 275, 300, 325 and 350 permille,
+  first forward and then reverse. The same case can be repeated with GP20.
+- [x] Each run resets the encoders, drives both wheels for no more than one
+  second, brakes, and checks wheel activity, encoder direction and invalid
+  transitions. No console operation occurs during the powerbank test.
+- [x] GP19 (if an external status LED is fitted) and the Robo-Pico buzzer on
+  GP22 (driven with a 2 kHz PWM tone) report the selected case and result.
+  Forward selection is 1-9
+  short flashes. Reverse selection is one long flash followed by 1-9 short
+  flashes. Result codes are: 1 pass, 2 stopped, 3 left low activity, 4 right
+  low activity, 5 both low, 6 wrong encoder direction, 7 invalid encoder
+  transition, and repeating 9-flash groups for an initialisation failure.
+- [x] Add deterministic host tests for the case table and result priority.
+- [x] All 61 current Buddy 2 host tests pass with `-Wall -Wextra -Werror`.
+- [x] Build `APP=motion_stage4_test BOARD=robo_pico_robot SMP=1
+  CONSOLE=usb_cdc WIFI=none` with no emitted warnings or errors. The generated
+  ELF uses 94760 / 152 / 32316 text/data/bss bytes.
+- [ ] Flash the generated Stage 4 UF2 and complete the physical worksheet at
+  `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md`.
+
 ### Test matrix
 
 - [ ] Use a clear, straight floor lane and a spotter/emergency power cut-off.
-- [ ] Test at high, nominal and agreed minimum battery voltage.
+- [ ] Complete the initial sweep with the same powerbank arrangement used on
+  the final car. Battery-range robustness can be repeated later; no charge
+  percentage is required for this first pass.
 - [ ] Sweep safe PWM values in small steps with both wheels driving. Record
-  left/right steady speed, whether each wheel starts, battery voltage and
-  invalid encoder transitions.
+  one-second travel, drift, whether each wheel starts, and the status/buzzer
+  encoder result code.
+- [x] The initial low-duty results are recorded in
+  `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md`. For the short
+  course, 275-350 permille is optional characterization rather than a required
+  operating point.
 - [ ] Repeat in forward and reverse; do not assume one reverse trim fits both
   directions or battery levels.
 - [ ] Measure the lowest repeatable moving PWM and the lowest repeatable
@@ -498,6 +553,107 @@ loaded feed-forward and start-up values.
   PID correction.
 - [ ] Both wheels start reliably across the agreed battery range.
 - [ ] Selected limits are safe for the car, driver and test area.
+
+### Stage 5 powerbank validation (prepared)
+
+The raw-PWM floor sweep has established the loaded start threshold and the
+left-faster/right-drifting bias. Precision straightness is now tested through
+the encoder/PID controller, not by assigning equal raw PWM to both motors.
+
+- [x] Add `APP=motion_closed_loop_button_test` for powerbank-only testing.
+- [x] GP20 submits a 300 mm forward move at 100 mm/s using `motion_task`.
+- [x] GP21 requests an immediate stop while the move is active.
+- [x] Startup boost, per-wheel PID, normalized straight correction and encoder
+  distance completion remain owned by the Motion task.
+- [x] Replace the provisional 350 permille / 400 ms startup boost with the
+  provisional value 200 permille / 250 ms (via 225). Changes did not resolve
+  the fault; startup power has not been established as its cause.
+- [x] Separate encoder physical-speed plausibility from the 300 mm/s command
+  limit. The physical bound is provisionally 1000 mm/s with the existing
+  transient margin. Actual launch speed was not measured: the raw test summed
+  requested RTOS delays, so its travel cannot be treated as mm/s.
+- [x] Buzzer feedback: one acknowledgement beep, then one completion beep;
+  two means operator stop, three timeout, four stall, five encoder fault, six
+  invalid command, seven hardware/configuration and eight command rejection.
+- [x] Preserve the Vehicle Controller's single encoder-fault category while
+  adding button-test diagnostic detail. After five encoder-fault beeps, a
+  second group means: one count-delta plausibility, two speed calculation,
+  three invalid quadrature transitions, or four unknown detail.
+- [x] After the repeat identified count-delta plausibility, retain the fault
+  wheel mask, sample interval and raw left/right delta in `motion_status_t`.
+  The powerbank-only diagnostic emits these as three additional beep groups
+  so the false delta can be corrected without disabling the safety check.
+- [x] Restore immediate count-delta braking. The three-sample workaround did
+  not resolve the fault and let suspect counts affect distance/steering.
+  Reject the sample before any PID, distance or steering update.
+- [x] Retain timer read-order and bounded restart-boost changes as provisional;
+  neither has been shown to resolve the physical failure.
+- [x] Add `g` to `motion_closed_loop_test` for an exact 300 mm / 100 mm/s USB
+  diagnostic and print the retained encoder fault interval and left/right raw
+  deltas. This replaces further threshold guessing from buzzer buckets.
+- [x] USB serial-only diagnostic completed at encoder travel 301/300 mm with
+  no fault and zero reported invalid transitions. This is not proof that the
+  button firmware passes on USB or that the powerbank causes the fault.
+- [x] Add a symmetric 25-permille-per-control-period drive-output soft-start.
+  It did not resolve the fault. Latest runs gave `5,1,2,2,4` and `5,1,2,3,5`
+  with about 130 mm travel and variable heading; underlying cause is unresolved.
+- [x] Add `[button-diag-01]` reports to the button image, frozen first-fault
+  counts/timestamps/IRQs/pre-brake PWM, and idle `p` report replay.
+- [x] Add actual Motion-loop host regression checks with mocked hardware;
+  fourteen checks plus the existing 65 helper checks pass.
+- [x] Compare GP20 using the same button image on USB and powerbank. USB
+  completed without a fault; powerbank turned slightly right and faulted with
+  `5,1,2,3,4` (right count-delta check, 16-30 ms, maximum delta 501-1000).
+  Electrical supply and USB-connected software timing remain possible causes.
+- [x] Same button image over USB reached `state=COMPLETE`, `fault=0`, encoder
+  travel 300/300 mm, counts 4214/4204 and invalid transitions 0/0. The reported
+  160 mm floor movement was followed by about 145 mm on a repeat. The tester
+  carried the computer alongside the vehicle; cable drag is not established.
+  Physical distance accuracy remains unresolved despite encoder completion.
+- [x] Repeat the same button image on powerbank with both drive wheels clear
+  of the floor. Both attempts, including after reset, faulted with `5,1,1,2,3`
+  (left count-delta check, 6-15 ms, maximum delta 251-500). The tester observed
+  slight movement of possibly both wheels first, then only the left on repeat.
+  The fault persists without floor load and is not confined to the right side.
+- [x] Confirm actual power inputs: the original powerbank setup used VIN;
+  the later two-port comparison explicitly used Pico micro-USB, as did the
+  computer. The later comparison changes source and USB-host presence.
+- [x] Compare both powerbank output sockets through the Pico micro-USB
+  arrangement. The tester saw the right wheel with the left socket
+  (`5,1,2,2,3`) and the left wheel with the right socket (`5,1,1,2,3`).
+  These observations do not establish a causal port-to-wheel relationship;
+  electrical and software timing causes remain unresolved.
+- [x] Re-read the powerbank output label: both ports are nominally 5 V.
+  This does not establish voltage or current delivery under motor load.
+- [x] Reproduce a software timing defect: preemption between clock read and
+  encoder acquisition can create a false count-delta fault. Add the timestamp
+  to the sequence-validated snapshot and use it throughout Motion sampling.
+  Use raw high/low/high timer reads to avoid the shared timer latch.
+- [x] Verify button-diag-02: 65 helper, 19 Motion-loop and four encoder-reader
+  host checks pass, including genuine fault braking; button UF2 builds without
+  emitted warnings/errors. The physical cause is not yet established.
+- [x] Button-diag-02 powerbank raised-wheel run on the tester's right port
+  produced `5,1,1,2,4`; only the left wheel was visibly moving. The timing fix
+  did not clear the powerbank fault. Repeated unchanged port tests are not
+  useful; a hardware cause is not established by the beep code.
+- [x] Flash button-diag-02 and run GP20 once on powerbank through micro-USB,
+  VIN feed disconnected, both wheels raised, one fixed powerbank port. The
+  right-port run produced `5,1,1,2,4`; only the left wheel visibly moved.
+- [x] Wall adapter labelled 5 V / 1 A also gave `5,1,1,2,3` with only the
+  left wheel visibly moving. Neither source adequacy nor a hardware defect
+  is established; stop attributing the issue solely to the powerbank.
+- [x] Prepare button-diag-03 `n` diagnostic: temporarily disconnect USB data
+  through the USB owner task while retaining computer power, then restore
+  USB and replay the exact saved report with `p`. Diagnostic hooks are absent
+  from normal firmware. Both build profiles pass; 95 host checks pass.
+- [ ] With button-diag-03 on computer USB and wheels raised, run GP20 baseline.
+  If successful, send `n`, wait for COM to return, reopen Serial Monitor and
+  send `p` without resetting. Compare both reports before further changes.
+- [ ] Flash the button-controlled closed-loop UF2 and complete the physical
+  straightness worksheet.
+- [ ] If the path still curves right, use the logged/observed direction to
+  tune the normalized correction and per-wheel loaded feed-forward; do not
+  change Stage 3 wheel geometry for a steering bias.
 
 ## Stage 5 - Closed-loop wheel-speed tuning
 

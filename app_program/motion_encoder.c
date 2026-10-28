@@ -7,6 +7,7 @@
 #include <sys/sysdepend/cpu/rp2040/sysdef.h>
 
 #include "motion_control.h"
+#include "motion_clock.h"
 
 #define MOTION_GPIO_IRQ 13U /* RP2040 IO_IRQ_BANK0, owned by Buddy 2 on core 0. */
 #define GPIO_INTR_BASE (IO_BANK0_BASE + 0xF0U)
@@ -24,7 +25,8 @@ EXPORT volatile uint32_t motion_encoder_irq_count;
 
 static void encoder_memory_barrier(void)
 {
-    __asm__ volatile ("dmb" ::: "memory");
+    /* GCC emits DMB on RP2040; host regressions use the host's fence. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 #ifdef BOARD_ROBO_PICO_ROBOT
 static motion_config_t encoder_config;
@@ -167,6 +169,9 @@ void motion_encoder_get_snapshot(motion_encoder_snapshot_t *snapshot)
             snapshot->right_invalid_transitions = encoder_invalid[1];
             snapshot->invalid_transitions = encoder_invalid[0] + encoder_invalid[1];
             snapshot->irq_count = motion_encoder_irq_count;
+            /* An ISR anywhere between the initial sequence read and this
+             * timestamp forces a retry of both counts AND time. */
+            snapshot->sampled_at_us = motion_clock_us();
             encoder_memory_barrier();
             sequence_end = encoder_snapshot_sequence;
         } else {

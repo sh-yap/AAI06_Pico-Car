@@ -138,6 +138,50 @@ EXPORT INT tm_usb_console_getchar(void)
 	return value;
 }
 
+#if TM_USB_HOST_DIAGNOSTIC
+IMPORT int tm_tusb_diag_attach(int attached);
+LOCAL BOOL diag_requested_attached = TRUE;
+LOCAL BOOL diag_applied_attached = TRUE;
+
+/* Requests cross the same interrupt-preserving lock as the console rings.
+ * TinyUSB is touched only when the service task applies the request. */
+EXPORT ER tm_usb_diag_set_attached(BOOL attached)
+{
+	UINT intsts;
+	if(!usb_started || !tm_usb_init_ok) return E_OBJ;
+	tx_lock_enter(&intsts);
+	diag_requested_attached = attached;
+	tx_lock_leave(intsts);
+	return E_OK;
+}
+
+EXPORT BOOL tm_usb_diag_is_detached(void)
+{
+	UINT intsts;
+	BOOL detached;
+	tx_lock_enter(&intsts);
+	detached = !diag_applied_attached;
+	tx_lock_leave(intsts);
+	return detached;
+}
+
+LOCAL BOOL usb_diag_apply_request(void)
+{
+	UINT intsts;
+	BOOL requested;
+	tx_lock_enter(&intsts);
+	requested = diag_requested_attached;
+	tx_lock_leave(intsts);
+	if(requested != diag_applied_attached && tm_tusb_diag_attach(requested)) {
+		tx_lock_enter(&intsts);
+		diag_applied_attached = requested;
+		if(!requested) rx_tail = rx_head;
+		tx_lock_leave(intsts);
+	}
+	return diag_applied_attached;
+}
+#endif
+
 /*
  * Ordered bring-up checks, for readout over GPIO when USB does not
  * enumerate and the console therefore cannot describe its own failure.
@@ -189,6 +233,15 @@ LOCAL void usb_service_task(INT stacd, void *exinf)
 	tm_usb_link_state = 1;
 
 	for(;;) {
+#if TM_USB_HOST_DIAGNOSTIC
+		if(!usb_diag_apply_request()) {
+			/* tud_disconnect does not clear TinyUSB's cached mounted flag.
+			 * Do not access endpoints until reattachment and host reset. */
+			tm_usb_link_state = 1;
+			tk_slp_tsk(USB_POLL_MS);
+			continue;
+		}
+#endif
 		/* Drain the whole event burst before yielding.  Returning to
 		   the scheduler between events would put a tick period into
 		   each stage of every control transfer. */

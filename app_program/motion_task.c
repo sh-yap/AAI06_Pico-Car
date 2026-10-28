@@ -9,6 +9,7 @@
 #include "motion_config.h"
 #include "motion_control.h"
 #include "motion_encoder.h"
+#include "motion_clock.h"
 #include "motion_motor.h"
 
 #define MOTION_PERIOD_MS 20U
@@ -16,15 +17,16 @@
 #define MOTION_STOP_EVENT 1U
 #define MOTION_STACK_SIZE 4096U
 #define MOTION_PI_Q16 205887
-/* Start-up boost length and stall limit: floor-test values on
-   test_integrate (were 200 ms and 500 ms, tuned unloaded) - Buddy 2 to
-   confirm. */
-#define MOTION_STARTUP_BOOST_MS 400U
+/* The loaded raw-PWM sweep showed that 225 permille starts the car reliably.
+   A shorter boost limits the launch distance before encoder/PID control takes
+   over at low mission speeds. */
+#define MOTION_STARTUP_BOOST_MS 250U
 #define MOTION_STALL_MS 1000U
 #define MOTION_ZERO_SPEED_MM_S 20
 #define MOTION_MAX_TURN_ANGLE_MDEG 360000
 #define MOTION_INVALID_TRANSITIONS_PER_SAMPLE 8U
 #define MOTION_TARGET_SLEW_MM_S_PER_PERIOD 6.0f
+#define MOTION_PWM_SLEW_PER_PERIOD 25.0f
 #define MOTION_STRAIGHT_CORRECTION_GAIN 0.10f
 #define MOTION_STRAIGHT_CORRECTION_MAX_MM_S 30.0f
 #define MOTION_MIN_DT_MS 1U
@@ -67,6 +69,9 @@ static int32_t command_origin_right;
 static uint64_t previous_timestamp_us;
 static uint32_t previous_invalid_transitions;
 static bool encoder_sample_valid;
+static uint32_t previous_irq_count;
+static float left_applied_output;
+static float right_applied_output;
 
 static int32_t motion_abs_i32(int32_t value)
 {
@@ -89,19 +94,13 @@ static void reset_velocity_control(void)
     right_startup_ms = 0U;
     left_stall_ms = 0U;
     right_stall_ms = 0U;
+    left_applied_output = 0.0f;
+    right_applied_output = 0.0f;
 }
 
 static uint64_t motion_timestamp_us(void)
 {
-    uint32_t high_a;
-    uint32_t low;
-    uint32_t high_b;
-    do {
-        high_a = in_w(TIMER_TIMEHR);
-        low = in_w(TIMER_TIMELR);
-        high_b = in_w(TIMER_TIMEHR);
-    } while (high_a != high_b);
-    return ((uint64_t)high_a << 32) | low;
+    return motion_clock_us();
 }
 
 static void motion_set_state(motion_state_t state)
@@ -110,6 +109,21 @@ static void motion_set_state(motion_state_t state)
         motion_status.state = state;
         motion_status.state_timestamp_us = motion_timestamp_us();
     }
+}
+
+static void clear_encoder_fault_detail(void)
+{
+    motion_status.encoder_fault = MOTION_ENCODER_FAULT_NONE;
+    motion_status.encoder_fault_wheel_mask = 0U;
+    motion_status.encoder_fault_elapsed_ms = 0U;
+    motion_status.encoder_fault_left_delta = 0;
+    motion_status.encoder_fault_right_delta = 0;
+    motion_status.encoder_fault_previous_left = 0;
+    motion_status.encoder_fault_previous_right = 0;
+    motion_status.encoder_fault_previous_irq = 0U;
+    motion_status.encoder_fault_previous_time_us = 0U;
+    motion_status.encoder_fault_previous_left_pwm = 0U;
+    motion_status.encoder_fault_previous_right_pwm = 0U;
 }
 
 static void publish_status(void)
@@ -126,12 +140,35 @@ static void motion_fault(motion_fault_t fault)
     motion_status.right_pwm_permille = 0U;
     motion_set_state(MOTION_STATE_FAULT);
     motion_status.fault = fault;
+    if (fault != MOTION_FAULT_ENCODER) {
+        clear_encoder_fault_detail();
+    }
     active_command = false;
     manoeuvre_pending = false;
     fault_latched = true;
     if (fault == MOTION_FAULT_HARDWARE_CONFIG) {
         reinitialisation_required = true;
     }
+}
+
+static void motion_encoder_fault(motion_encoder_fault_t detail,
+                                 uint8_t wheel_mask,
+                                 uint32_t elapsed_ms,
+                                 int32_t left_delta,
+                                 int32_t right_delta)
+{
+    motion_status.encoder_fault = detail;
+    motion_status.encoder_fault_wheel_mask = wheel_mask;
+    motion_status.encoder_fault_elapsed_ms = elapsed_ms;
+    motion_status.encoder_fault_left_delta = left_delta;
+    motion_status.encoder_fault_right_delta = right_delta;
+    motion_status.encoder_fault_previous_left = previous_left;
+    motion_status.encoder_fault_previous_right = previous_right;
+    motion_status.encoder_fault_previous_irq = previous_irq_count;
+    motion_status.encoder_fault_previous_time_us = previous_timestamp_us;
+    motion_status.encoder_fault_previous_left_pwm = motion_motor_last_duty(0U);
+    motion_status.encoder_fault_previous_right_pwm = motion_motor_last_duty(1U);
+    motion_fault(MOTION_FAULT_ENCODER);
 }
 
 static void start_command(const motion_command_t *command,
@@ -155,6 +192,7 @@ static void start_command(const motion_command_t *command,
         motion_status.active_sequence_id = command->sequence_id;
         motion_set_state(MOTION_STATE_RUNNING);
         motion_status.fault = MOTION_FAULT_NONE;
+        clear_encoder_fault_detail();
         motion_status.target_mm = 0;
         motion_status.target_speed_mm_s = command->value.velocity.linear_mm_s;
         motion_status.target_angle_mdeg = command->value.velocity.angular_mdeg_s;
@@ -181,6 +219,7 @@ static void start_command(const motion_command_t *command,
         motion_status.active_sequence_id = command->sequence_id;
         motion_set_state(MOTION_STATE_RUNNING);
         motion_status.fault = MOTION_FAULT_NONE;
+        clear_encoder_fault_detail();
         reset_velocity_control();
     }
 }
@@ -284,13 +323,17 @@ static void motion_loop(void)
     motion_pid_result_t right_output;
     motion_command_t command;
     uint64_t now_us;
+    uint64_t snapshot_start_us;
     uint32_t elapsed_ms;
     uint32_t invalid_delta;
     float correction;
     float slew_delta;
+    float pwm_slew_delta;
     bool status_locked = false;
     bool command_locked = false;
     bool straight_command;
+    bool left_delta_plausible;
+    bool right_delta_plausible;
 
     if (status_mtx <= E_OK
         || tk_loc_mtx(status_mtx, TMO_FEVR) != E_OK) {
@@ -309,8 +352,9 @@ static void motion_loop(void)
     right_mm_per_count_q16 = (int32_t)(((int64_t)MOTION_PI_Q16 * motion_config.right_wheel_diameter_um) /
                                        (motion_config.right_counts_per_wheel_rev * 1000LL));
 
-    now_us = motion_timestamp_us();
+    snapshot_start_us = motion_timestamp_us();
     motion_encoder_get_snapshot(&enc);
+    now_us = enc.sampled_at_us;
 
     /* Stop and command queue state share one mutex across processors.  A
        command accepted after motion_stop() releases this mutex cannot be
@@ -327,8 +371,23 @@ static void motion_loop(void)
             fault_latched = false;
             motion_set_state(MOTION_STATE_STOPPED);
             motion_status.fault = MOTION_FAULT_NONE;
+            clear_encoder_fault_detail();
         }
     }
+    /* Freeze the first fault sample until explicit stop acknowledgement.
+       In particular, later idle reads must not replace its counts or cause. */
+    if (fault_latched) {
+        goto motion_loop_finish;
+    }
+    motion_status.encoder_sample_time_us = now_us;
+    motion_status.encoder_snapshot_duration_us =
+        (uint32_t)(now_us - snapshot_start_us);
+    motion_status.left_encoder_counts = enc.left_counts;
+    motion_status.right_encoder_counts = enc.right_counts;
+    motion_status.left_invalid_encoder_transitions = enc.left_invalid_transitions;
+    motion_status.right_invalid_encoder_transitions = enc.right_invalid_transitions;
+    motion_status.invalid_encoder_transitions = enc.invalid_transitions;
+    motion_status.encoder_irq_count = enc.irq_count;
     if (tk_rcv_mbf(command_mbf, &command, TMO_POL)
         >= (INT)sizeof(command)) {
         if (!motion_command_is_valid(
@@ -360,32 +419,58 @@ static void motion_loop(void)
                                           (uint32_t)enc.left_counts);
         right_delta = motion_counts_delta((uint32_t)previous_right,
                                            (uint32_t)enc.right_counts);
-        if (!motion_encoder_delta_plausible(
-                left_delta, elapsed_ms, left_mm_per_count_q16,
-                motion_config.max_speed_mm_s)
-            || !motion_encoder_delta_plausible(
-                right_delta, elapsed_ms, right_mm_per_count_q16,
-                motion_config.max_speed_mm_s)) {
-            motion_fault(MOTION_FAULT_ENCODER);
+        left_delta_plausible = motion_encoder_delta_plausible(
+            left_delta, elapsed_ms, left_mm_per_count_q16,
+            motion_config.encoder_physical_max_speed_mm_s);
+        right_delta_plausible = motion_encoder_delta_plausible(
+            right_delta, elapsed_ms, right_mm_per_count_q16,
+            motion_config.encoder_physical_max_speed_mm_s);
+        if (!left_delta_plausible || !right_delta_plausible) {
+            uint8_t wheel_mask = (uint8_t)(
+                (!left_delta_plausible ? 1U : 0U) |
+                (!right_delta_plausible ? 2U : 0U));
+            motion_encoder_fault(MOTION_ENCODER_FAULT_COUNT_DELTA,
+                                 wheel_mask, elapsed_ms,
+                                 left_delta, right_delta);
             goto motion_loop_finish;
         }
-        if (!motion_speed_from_counts(left_delta, elapsed_ms,
-                                      left_mm_per_count_q16, &left_speed)
-            || !motion_speed_from_counts(right_delta, elapsed_ms,
-                                         right_mm_per_count_q16, &right_speed)) {
-            motion_fault(MOTION_FAULT_ENCODER);
-            goto motion_loop_finish;
+        /* Only validated samples can reach speed, distance or steering. */
+        if (left_delta_plausible) {
+            if (!motion_speed_from_counts(left_delta, elapsed_ms,
+                                          left_mm_per_count_q16,
+                                          &left_speed)) {
+                motion_encoder_fault(
+                    MOTION_ENCODER_FAULT_SPEED_CALCULATION,
+                    1U, elapsed_ms, left_delta, right_delta);
+                goto motion_loop_finish;
+            }
+        } else {
+            left_speed = motion_status.left_speed_mm_s;
         }
+        if (right_delta_plausible) {
+            if (!motion_speed_from_counts(right_delta, elapsed_ms,
+                                          right_mm_per_count_q16,
+                                          &right_speed)) {
+                motion_encoder_fault(
+                    MOTION_ENCODER_FAULT_SPEED_CALCULATION,
+                    2U, elapsed_ms, left_delta, right_delta);
+                goto motion_loop_finish;
+            }
+        } else {
+            right_speed = motion_status.right_speed_mm_s;
+        }
+    }
+    invalid_delta = enc.invalid_transitions - previous_invalid_transitions;
+    if (invalid_delta > MOTION_INVALID_TRANSITIONS_PER_SAMPLE) {
+        motion_encoder_fault(MOTION_ENCODER_FAULT_INVALID_TRANSITIONS,
+                             0U, elapsed_ms, left_delta, right_delta);
+        goto motion_loop_finish;
     }
     previous_left = enc.left_counts;
     previous_right = enc.right_counts;
     previous_timestamp_us = now_us;
-    invalid_delta = enc.invalid_transitions - previous_invalid_transitions;
+    previous_irq_count = enc.irq_count;
     previous_invalid_transitions = enc.invalid_transitions;
-    if (invalid_delta > MOTION_INVALID_TRANSITIONS_PER_SAMPLE) {
-        motion_fault(MOTION_FAULT_ENCODER);
-        goto motion_loop_finish;
-    }
 
     motion_status.left_encoder_counts = enc.left_counts;
     motion_status.right_encoder_counts = enc.right_counts;
@@ -492,7 +577,9 @@ static void motion_loop(void)
             }
             left_startup_ms += elapsed_ms;
         } else if (motion_abs_i32(left_speed) >= MOTION_ZERO_SPEED_MM_S) {
-            left_startup_ms = MOTION_STARTUP_BOOST_MS;
+            /* Re-arm the bounded boost after real movement so this wheel can
+               overcome static friction again if it later stops. */
+            left_startup_ms = 0U;
         }
         if (motion_abs_i32(right_target_speed) >= 80 &&
             motion_abs_i32(right_speed) < MOTION_ZERO_SPEED_MM_S &&
@@ -504,14 +591,29 @@ static void motion_loop(void)
             }
             right_startup_ms += elapsed_ms;
         } else if (motion_abs_i32(right_speed) >= MOTION_ZERO_SPEED_MM_S) {
-            right_startup_ms = MOTION_STARTUP_BOOST_MS;
+            right_startup_ms = 0U;
         }
+        /* Limit only commanded drive changes. Emergency stop, completion and
+           faults still call the motor brake immediately. This limits drive
+           changes; a power-related cause of the encoder fault is unproven. */
+        pwm_slew_delta = MOTION_PWM_SLEW_PER_PERIOD
+                         * ((float)elapsed_ms / (float)MOTION_PERIOD_MS);
+        left_output.output = motion_slew_target(left_applied_output,
+                                                left_output.output,
+                                                pwm_slew_delta);
+        right_output.output = motion_slew_target(right_applied_output,
+                                                 right_output.output,
+                                                 pwm_slew_delta);
         if (motion_apply_output(0U, left_output.output) != MOTION_RESULT_OK) {
             motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
+        } else {
+            left_applied_output = left_output.output;
         }
         if (motion_status.state == MOTION_STATE_RUNNING
             && motion_apply_output(1U, right_output.output) != MOTION_RESULT_OK) {
             motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
+        } else if (motion_status.state == MOTION_STATE_RUNNING) {
+            right_applied_output = right_output.output;
         }
         active_elapsed += elapsed_ms;
         if (motion_target_reached(

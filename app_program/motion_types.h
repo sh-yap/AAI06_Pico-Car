@@ -29,6 +29,13 @@ typedef enum {
 } motion_fault_t;
 
 typedef enum {
+    MOTION_ENCODER_FAULT_NONE = 0,
+    MOTION_ENCODER_FAULT_COUNT_DELTA,
+    MOTION_ENCODER_FAULT_SPEED_CALCULATION,
+    MOTION_ENCODER_FAULT_INVALID_TRANSITIONS
+} motion_encoder_fault_t;
+
+typedef enum {
     MOTION_RESULT_OK = 0,
     MOTION_RESULT_INVALID,
     MOTION_RESULT_UNINITIALISED,
@@ -53,6 +60,20 @@ typedef struct {
     uint32_t active_sequence_id;
     motion_state_t state;
     motion_fault_t fault;
+    /* Diagnostic detail only; Vehicle Controller policy still uses fault. */
+    motion_encoder_fault_t encoder_fault;
+    uint8_t encoder_fault_wheel_mask;
+    uint32_t encoder_fault_elapsed_ms;
+    int32_t encoder_fault_left_delta;
+    int32_t encoder_fault_right_delta;
+    int32_t encoder_fault_previous_left;
+    int32_t encoder_fault_previous_right;
+    uint32_t encoder_fault_previous_irq;
+    uint64_t encoder_fault_previous_time_us;
+    uint64_t encoder_sample_time_us;
+    uint32_t encoder_snapshot_duration_us;
+    uint16_t encoder_fault_previous_left_pwm;
+    uint16_t encoder_fault_previous_right_pwm;
     int32_t left_encoder_counts;
     int32_t right_encoder_counts;
     int32_t left_speed_mm_s;

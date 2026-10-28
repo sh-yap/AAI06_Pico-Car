@@ -36,22 +36,18 @@ static const char *capture_finish_reason;
 
 static uint64_t test_timestamp_us(void)
 {
-    uint32_t high_a;
     uint32_t low;
-    uint32_t high_b;
+    uint32_t high;
 
-    do {
-        high_a = in_w(TIMER_TIMEHR);
-        low = in_w(TIMER_TIMELR);
-        high_b = in_w(TIMER_TIMEHR);
-    } while (high_a != high_b);
-    return ((uint64_t)high_a << 32) | low;
+    low = in_w(TIMER_TIMELR);
+    high = in_w(TIMER_TIMEHR);
+    return ((uint64_t)high << 32) | low;
 }
 
 static void print_help(void)
 {
     tm_printf((UB *)"[motion-closed-loop] keys: 1=100 2=200 3=300 mm/s forward, r=100 reverse, x=stop\n");
-    tm_printf((UB *)"[motion-closed-loop] a=left curve d=right curve; l=-90 t=+90 u=180 deg; m=100 mm\n");
+    tm_printf((UB *)"[motion-closed-loop] a=left curve d=right curve; l=-90 t=+90 u=180 deg; m=100 mm g=300 mm diagnostic\n");
     tm_printf((UB *)"[motion-closed-loop] v=automatic reversal, p=stop-priority, e=timestamped emergency stop; h=help; samples print only after brake\n");
     tm_printf((UB *)"[motion-closed-loop] safety: o=500 ms timeout, i=invalid command, q=zero-speed queue-full test\n");
 }
@@ -77,10 +73,14 @@ static void capture_add(const motion_status_t *status)
 
 static void print_status(uint32_t sample, const motion_status_t *status)
 {
-    tm_printf((UB *)"[motion-sample] n=%u t_us=%u state_t_us=%u seq=%u state=%d fault=%d count=%d/%d speed=%d/%d travel=%d target=%d pwm=%u/%u invalid=%u/%u total=%u irq=%u\n",
+    tm_printf((UB *)"[motion-sample] n=%u t_us=%u state_t_us=%u seq=%u state=%d fault=%d enc_detail=%d enc_wheel=%u enc_dt_ms=%u enc_delta=%d/%d count=%d/%d speed=%d/%d travel=%d target=%d pwm=%u/%u invalid=%u/%u total=%u irq=%u\n",
               sample, (uint32_t)status->timestamp_us,
               (uint32_t)status->state_timestamp_us,
               status->active_sequence_id, status->state, status->fault,
+              status->encoder_fault, status->encoder_fault_wheel_mask,
+              status->encoder_fault_elapsed_ms,
+              status->encoder_fault_left_delta,
+              status->encoder_fault_right_delta,
               status->left_encoder_counts, status->right_encoder_counts,
               status->left_speed_mm_s, status->right_speed_mm_s,
               status->travelled_mm, status->target_mm,
@@ -98,6 +98,8 @@ static void capture_dump(void)
               (UB *)capture_name, (UB *)capture_finish_reason, capture_count);
     for (i = 0U; i < capture_count; ++i) {
         print_status(i, &capture_samples[i]);
+        /* Avoid overrunning the USB CDC transmit path during a long dump. */
+        (void)tk_dly_tsk(10U);
     }
 }
 
@@ -169,16 +171,18 @@ static void run_queue_full_test(void)
               accepted, full, other);
 }
 
-static motion_result_t submit_move(void)
+static motion_result_t submit_move(int32_t distance_mm,
+                                   int32_t speed_mm_s,
+                                   uint32_t timeout_ms)
 {
     motion_command_t command = {0};
     motion_result_t result;
     command.type = MOTION_COMMAND_MOVE_DISTANCE;
     command.sequence_id = test_sequence++;
     submitted_sequence = command.sequence_id;
-    command.timeout_ms = 5000U;
-    command.value.distance.distance_mm = 100;
-    command.value.distance.speed_mm_s = 80;
+    command.timeout_ms = timeout_ms;
+    command.value.distance.distance_mm = distance_mm;
+    command.value.distance.speed_mm_s = speed_mm_s;
     result = motion_submit(&command);
     if (result == MOTION_RESULT_OK) velocity_watchdog_ms = 0U;
     return result;
@@ -326,7 +330,12 @@ EXPORT INT usermain(void)
                         break;
                     case 'm': case 'M':
                         tm_printf((UB *)"[motion-closed-loop] starting move 100 mm; logging paused until brake\n");
-                        start_test("move 100 mm", submit_move());
+                        start_test("move 100 mm", submit_move(100, 80, 5000U));
+                        break;
+                    case 'g': case 'G':
+                        tm_printf((UB *)"[motion-closed-loop] starting diagnostic move 300 mm at 100 mm/s; logging paused until brake\n");
+                        start_test("diagnostic move 300 mm",
+                                   submit_move(300, 100, 6000U));
                         break;
                     case 'l': case 'L':
                         tm_printf((UB *)"[motion-closed-loop] starting turn -90 deg; logging paused until brake\n");

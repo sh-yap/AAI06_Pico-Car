@@ -17,6 +17,8 @@ APP=motion_sim_test       BOARD=pico
 APP=motion_motor_test     BOARD=robo_pico_robot
 APP=motion_encoder_test   BOARD=robo_pico_robot
 APP=motion_closed_loop_test BOARD=robo_pico_robot
+APP=motion_stage4_test    BOARD=robo_pico_robot
+APP=motion_closed_loop_button_test BOARD=robo_pico_robot
 ```
 
 For example, from `build_make`:
@@ -31,6 +33,18 @@ The image name contains the app/board suffix. `.build_profile`
 also includes APP, BOARD, SMP, console and WiFi gates; changing any of these
 invalidates the shared object tree instead of incorrectly reporting that there
 is nothing to build.
+
+`APP=motion_stage4_test` is the powerbank-only loaded-characterisation image.
+It does not require WiFi or MQTT. Robo-Pico GP20 repeats the selected bounded
+one-second run; GP21 stops an active run, advances the test while idle, or
+resets the sweep to forward 150 permille when held for at least one second.
+
+`APP=motion_closed_loop_button_test` is the powerbank-only straightness image.
+GP20 submits a 300 mm forward move at 100 mm/s to the encoder/PID Motion task;
+GP21 requests an immediate stop. A one-beep completion indicates the Motion
+task reached the encoder distance target; two beeps indicate an operator stop.
+Fault codes are three timeout, four stall, five encoder, six invalid command,
+seven hardware/configuration, and eight command rejection.
 
 ## Public interface
 
