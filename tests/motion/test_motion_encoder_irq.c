@@ -10,6 +10,9 @@
 static uint32_t input_levels;
 static uint32_t pending_edges[4];
 static uint32_t enabled_edges[4];
+static bool fail_gpio_init;
+static bool handler_defined;
+static bool edges_enabled_before_handler;
 
 uint32_t in_w(uint32_t address)
 {
@@ -29,6 +32,9 @@ void out_w(uint32_t address, uint32_t value)
 
 void set_w(uint32_t address, uint32_t value)
 {
+    if (!handler_defined) {
+        edges_enabled_before_handler = true;
+    }
     if (address >= GPIO_PROC0_INTE && address < GPIO_PROC0_INTE + 16U) {
         enabled_edges[(address - GPIO_PROC0_INTE) / 4U] |= value;
     }
@@ -36,9 +42,18 @@ void set_w(uint32_t address, uint32_t value)
 
 INT tk_get_prc(void) { return 1; }
 ER tk_def_int(UINT intno, const T_DINT *definition)
-{ (void)intno; (void)definition; return E_OK; }
+{
+    (void)intno;
+    (void)definition;
+    handler_defined = true;
+    return E_OK;
+}
 ER gpio_set_pin(UINT pin, UINT mode)
-{ (void)pin; (void)mode; return E_OK; }
+{
+    (void)pin;
+    (void)mode;
+    return fail_gpio_init ? -1 : E_OK;
+}
 void ClearInt(UINT intno) { (void)intno; }
 void EnableInt(UINT intno, INT level) { (void)intno; (void)level; }
 
@@ -71,9 +86,15 @@ int main(void)
     static const uint8_t forward[] = {2U, 3U, 1U, 0U};
     static const uint8_t reverse[] = {1U, 3U, 2U, 0U};
     motion_config_default(&config);
+    fail_gpio_init = true;
+    check(motion_encoder_init(&config) == MOTION_RESULT_HARDWARE &&
+          enabled_edges[0] == 0U && enabled_edges[2] == 0U,
+          "encoder GPIO failure is reported before IRQs are armed");
+    fail_gpio_init = false;
     check(motion_encoder_init(&config) == MOTION_RESULT_OK &&
           enabled_edges[0] == 0x00CC0000U && enabled_edges[2] == 0xCCU &&
-          enabled_edges[1] == 0U && enabled_edges[3] == 0U,
+          enabled_edges[1] == 0U && enabled_edges[3] == 0U &&
+          !edges_enabled_before_handler,
           "encoder IRQ masks cover only GP4/5 and GP16/17");
     for (index = 0U; index < 1000U; ++index) {
         pending_edges[2] = 0xCCU;

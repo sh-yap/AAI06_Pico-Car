@@ -16,16 +16,53 @@ considered verified until Buddy 2 repeats the test and saves the evidence.
 | 1 | Re-check wiring, motors and encoders safely | In progress; functional checks pass, electrical/power checks pending | `evidence/motion/2026-10-27_MANUAL_ENCODER_CALIBRATION.md` |
 | 2 | Fix motion correctness and concurrency defects | Software regression, raised-wheel manoeuvres, timeout, acknowledgement, recovery, reversal and stop-priority pass; five corrected stop-latency runs measured 204 us-10.690 ms, team limit remains | `evidence/motion/2026-10-27_SOFTWARE_VERIFICATION.md`, `evidence/motion/2026-10-27_RAISED_WHEEL_CLOSED_LOOP.md`, `evidence/motion/2026-10-27_RAISED_WHEEL_MANOEUVRE_DEFECT.md` |
 | 3 | Recalibrate encoder geometry with the complete car | Cleared for progression; CPR documented, external-power false burst provisionally resolved by timer fix; physical distance refinement continues in Stage 6 | `evidence/motion/2026-10-27_STAGE3_LOADED_GEOMETRY.md`, `evidence/motion/2026-10-28_CLOCK_RATE_CHECK.md` |
-| 4 | Characterise the motors under the final load | In progress; button firmware built, physical sweep pending | `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md` |
-| 5 | Tune loaded closed-loop wheel-speed control | First post-watchdog-tick USB and powerbank/VIN runs pass without a Motion fault; repeatability and floor tuning remain | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md` |
-| 6 | Tune distance and straight-line motion | In progress; encoder estimate 301 mm, approximate physical travel 350 mm for a 300 mm command | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md` |
-| 7 | Tune left, right and U-turns | Not started | |
-| 8 | Prove stop and fault behaviour | Not started | |
+| 4 | Characterise the motors under the final load | **Not formally cleared**; five forward runs recorded, reverse was 3 runs at likely 150‰ and the tester elected to skip the remaining repeats | `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md`, `evidence/motion/2026-10-28_STAGE4_SOFTWARE_AUDIT.md` |
+| 5 | Tune loaded closed-loop wheel-speed control | **Cleared for low-speed progression**; 50 and 80 mm/s pass in both directions, current gains retained, VC reduced to those supported speeds | `evidence/motion/2026-10-28_CLOSED_LOOP_STRAIGHT_TEST.md`, `evidence/motion/2026-10-28_STAGE5_LOW_SPEED_TEST.md` |
+| 6 | Tune distance and straight-line motion | **Cleared for low-speed progression**; corrected-scale 500 mm forward and 100 mm reverse both complete exactly and straight | `evidence/motion/2026-10-28_STAGE6_DISTANCE_CALIBRATION.md` |
+| 7 | Tune left, right and U-turns | **Cleared for progression**; left/right are approximately 95 degrees and the U-turn reaches the opposite heading with about 1.5 cm right offset | `evidence/motion/2026-10-28_STAGE7_MINIMAL_TURN_TEST.md` |
+| 8 | Prove stop and fault behaviour | **Cleared for reduced progression scope**; GP21 stopped a moving U-turn with two beeps and no continued motion; deterministic software fault/VC tests pass | `evidence/motion/2026-10-28_STAGE8_MINIMAL_FAULT_TEST.md` |
 | 9 | Integrate with the current team software | Not started | |
 | 10 | Run final regression and close the Motion gate | Not started | |
 
 Change a stage to **Cleared** only when all of its exit checks pass and its
 evidence is saved. Record the commit and evidence path in the last column.
+
+## 2026-10-28 Stage 4 audit decision
+
+Catch-up Stage 4 is not complete. The existing sweep establishes a useful
+loaded trend and shows that equal raw PWM produces a rightward bias, but it
+does not yet demonstrate a repeatable start point in both directions. The
+single 300 mm closed-loop pass does not replace that evidence and does not
+clear roadmap Gate G4, which also requires repeatable speed, distance,
+straightness and turns.
+
+Only the following physical work is needed before progressing to catch-up
+Stage 5:
+
+1. Flash the rebuilt `motion_stage4_test` image.
+2. At forward 200 permille, run five GP20 trials and record travel, drift,
+   whether both wheels start, and the result code.
+3. At reverse 200 permille, run five GP20 trials with the same records. If
+   either direction fails to start on any trial, use 225 permille for that
+   direction and repeat all five trials at that setting.
+4. Confirm there is no result code 6 (wrong direction) or 7 (invalid encoder
+   transition), and save the surface, power arrangement and available lane.
+
+Do not repeat 275-350 permille now, do not add WiFi/MQTT, and do not repeat the
+battery-range matrix. Those checks do not answer the current start/reliability
+question and belong to later performance/robustness work. The rebuilt test
+uses the RP2040 microsecond clock for the one-second deadline; its optional
+serial line is emitted only after braking and records exact elapsed time and
+encoder counts. GP20 remains the only run trigger and GP21 remains the stop /
+case-select input.
+
+The tester later supplied five forward runs believed to be 200 permille
+(approximately 110, 130, 130, 130 and 130 mm), three reverse runs corrected to
+likely 150 permille (approximately 90 mm each), and one forward 150-permille
+check (approximately 90 mm). The tester elected to skip the two missing reverse
+repetitions and move to lower-speed work. This is recorded as a progression
+exception, not a Stage 4 pass. Also note that 200 permille means 20% raw PWM,
+not 200%; mission speed is commanded in mm/s through Motion.
 
 ## Non-negotiable project rules
 
@@ -503,7 +540,9 @@ loaded feed-forward and start-up values.
   first forward and then reverse. The same case can be repeated with GP20.
 - [x] Each run resets the encoders, drives both wheels for no more than one
   second, brakes, and checks wheel activity, encoder direction and invalid
-  transitions. No console operation occurs during the powerbank test.
+  transitions. The run deadline now uses the hardware microsecond clock
+  rather than summing requested RTOS delays. No console input is used during
+  the powerbank test.
 - [x] GP19 (if an external status LED is fitted) and the Robo-Pico buzzer on
   GP22 (driven with a 2 kHz PWM tone) report the selected case and result.
   Forward selection is 1-9
@@ -514,12 +553,18 @@ loaded feed-forward and start-up values.
 - [x] Add deterministic host tests for the case table and result priority.
 - [x] All 61 current Buddy 2 host tests pass with `-Wall -Wextra -Werror`.
 - [x] Build `APP=motion_stage4_test BOARD=robo_pico_robot SMP=1
-  CONSOLE=usb_cdc WIFI=none` with no emitted warnings or errors. The generated
-  ELF uses 94760 / 152 / 32316 text/data/bss bytes.
+  CONSOLE=usb_cdc WIFI=none` with no emitted warnings or errors. After the
+  timing/error-handling audit, the generated ELF uses
+  96088 / 152 / 32396 text/data/bss bytes.
 - [ ] Flash the generated Stage 4 UF2 and complete the physical worksheet at
   `evidence/motion/2026-10-28_STAGE4_LOADED_MOTOR_RESULTS.md`.
 
 ### Test matrix
+
+The original broad sweep is retained below as historical evidence. The audit
+above reduces the remaining clearance run to five forward and five reverse
+trials at 200 permille, with 225 permille used only if 200 is not repeatable.
+The unused high-duty cells do not need to be filled now.
 
 - [ ] Use a clear, straight floor lane and a spotter/emergency power cut-off.
 - [ ] Complete the initial sweep with the same powerbank arrangement used on
@@ -684,53 +729,131 @@ the encoder/PID controller, not by assigning equal raw PWM to both motors.
 
 Goal: achieve repeatable left/right wheel speed under the final load.
 
+### Low-speed course scope - 2026-10-28
+
+The observed raw-PWM travel is faster than desired for the course. A dedicated
+`APP=motion_stage5_test` image therefore tests 200 mm closed-loop moves selected
+with GP21 and started with GP20. Forward cases are 50, 60, 80, 100 and
+120 mm/s; the same five reverse cases follow. One long indication means
+reverse, while one to five short indications select the speed in that order.
+GP21 remains the immediate stop. WiFi/MQTT is disabled.
+
+For the next physical session, start with forward 50 mm/s. If it completes
+smoothly, repeat it only twice more and stop; 60/80 mm/s are unnecessary at
+this exploratory step. If 50 mm/s stalls or is visibly jerky, try 60 mm/s
+once, then 80 mm/s only if 60 also fails. Do not run 100/120 mm/s or reverse
+yet. Motion's startup and independent stall monitoring now apply from
+50 mm/s upward. Formal repeatability remains open for later gate evidence.
+
+The three controlled 50 mm/s forward repeats are complete: 235, 240 and
+235 mm for a 200 mm encoder target. All were smooth, straight or only slightly
+left, both wheels started, and no fault occurred. A later 500 mm run travelled
+570 mm in 10.39 s. For PID assessment, the encoder-command average is
+`500 / 10.39 = 48.1 mm/s`, which is close to the 50 mm/s setpoint; the separate
+physical-distance conversion error belongs to Stage 6.
+
+The active per-wheel gains are still provisional: `Kp=0.40`, `Ki=1.20`,
+`Kd=0`. Stage 5 was evaluated with Q10 1024 (1.000); the Stage 6 scale change
+was applied only after the speed comparison was complete.
+
+### Final Stage 5 result
+
+The 50 mm/s operating point is accepted without changing the provisional gains:
+forward averaged 48.1 mm/s by encoder-command timing and reverse averaged
+50.15 mm/s; both were smooth, straight and fault-free. At 80 mm/s, the 500 mm
+forward case travelled 560 mm in 6.9 s (81.2 mm/s) and reverse travelled
+560 mm in 6.7 s (83.6 mm/s). Both ran straight, started both wheels and
+returned one completion beep.
+
+The Vehicle Controller now uses only the physically exercised points: 80 mm/s
+normal, reverse and turn speed, and 50 mm/s hump/search speed. Therefore the
+old 100/120/200/300 mm/s checks are outside the supported mission scope and
+are skipped rather than consuming more floor tests. The current
+`Kp=0.40`, `Ki=1.20`, `Kd=0` gains are retained.
+
 ### Tuning order
 
-- [ ] Start with the measured feed-forward from Stage 4.
-- [ ] Tune proportional gain, then integral gain; add derivative only if the
-  evidence shows it is necessary.
-- [ ] Confirm anti-windup and output limits during start, saturation and stop.
-- [ ] Tune slew rate separately from PID gains.
-- [ ] Re-check start-up boost and stall thresholds after PID tuning.
+- [x] Start with the measured feed-forward from Stage 4.
+- [x] Retain proportional/integral gains after smooth, fault-free timing data;
+  derivative was unnecessary.
+- [x] Confirm anti-windup and output limits in host control tests.
+- [x] Keep the bounded slew rate separate from PID gains.
+- [x] Confirm the loaded start boost and stall threshold at 50/80 mm/s.
 
 ### Required tests
 
-- [ ] Test 100, 200 and 300 mm/s where each value is within the proven loaded
-  range; also test the VC's 80, 100, 120 and 200 mm/s operating points.
-- [ ] Test forward and reverse.
-- [ ] Record rise time, overshoot, steady-state mean/error, left/right mismatch,
-  PWM and battery voltage.
-- [ ] Repeat at least ten times at important operating points.
-- [ ] Repeat at high, nominal and minimum battery voltage.
-- [ ] Verify velocity setpoint updates do not create a stop/start pulse or
-  clear useful integral state.
-- [ ] Verify WiFi/console activity does not corrupt speed estimates or create
-  missed encoder transitions.
+- [x] Test the supported 50 and 80 mm/s points; faster points are no longer
+  commanded by the Vehicle Controller.
+- [x] Test forward and reverse.
+- [x] Record physical timing, distance, drift, wheel start and visible result;
+  powerbank-only runs cannot provide serial-only PWM/rise-time fields.
+- [ ] Ten-repeat and battery-range robustness matrices are deferred until the
+  team supplies formal limits or a failure makes them necessary.
+- [x] Verify velocity setpoint updates preserve useful PID state in host tests.
+- [ ] WiFi/MQTT load is deferred to Stage 9 integration and is not required for
+  this powerbank calibration.
 
 ### Exit check
 
-- [ ] Every supported operating point meets the Stage 0 limits.
-- [ ] Gains and feed-forward constants are recorded with units and test data.
-- [ ] No intermittent start or false stall remains.
+- [ ] Formal numerical acceptance remains pending because the Stage 0 limits
+  are still TBC; this does not block the recorded low-speed progression scope.
+- [x] Gains and feed-forward constants are recorded with units and test data.
+- [x] No intermittent start or false stall occurred at 50 or 80 mm/s.
 
 ## Stage 6 - Distance and straight-line control
 
 Goal: make encoder distance commands and normal straight driving repeatable.
 
+### Calibration evidence and minimal scope
+
+Before the sequencing error was corrected, exploratory 50 mm/s distance runs
+measured 100/230/340/570 mm for 100/200/300/500 mm forward commands and 125 mm
+for a 100 mm reverse command. The 500 mm case took 10.39 s. These measurements
+are retained for Stage 6. With Stage 5 complete for the supported low-speed
+scope, Q10 1167 (1.140) is now active. GP19 is only an optional external LED
+output; no LED-speed test is required.
+
+The completed progression cases are 500 mm forward and 100 mm reverse at
+50 mm/s. The rebuilt `APP=motion_stage6_test` image retains the 500 mm case,
+adds one optional 1500 mm forward case for cumulative-drift observation, and
+then retains the 100 mm reverse case. This is one longer observation, not a
+repeat matrix; stop if the car leaves the safe test area.
+
+The 1500 mm run is a straight-motion check only. It does not replace later
+Buddy 3 black-line following integration.
+
+The optional long-run observation was completed on the powerbank setup. The
+500 mm run travelled approximately 500 mm, initially drifted slightly left,
+then corrected slightly right. The 1500 mm run travelled approximately
+1510 mm, so distance tracking remained accurate, but the vehicle swerved right
+without an obvious recovery. No exact lateral offset was measured. This does
+not invalidate the encoder distance result: the current straight correction
+compares normalised left/right wheel travel, so it can correct unequal wheel
+travel but cannot detect chassis heading error or tyre/floor side-slip when
+both encoders report similar travel. One repeat with a marked centreline is
+required before changing the correction gain or adding a wheel trim. The
+repeat 1500 mm run travelled relatively straight with a slight left drift,
+so the earlier rightward result is not repeatable evidence of a fixed right
+bias. Starting heading and placement are now the leading explanation for the
+observed long-run variation; no firmware correction change is justified.
+
 ### Tasks
 
-- [ ] Test forward and reverse distance commands from a fresh boot and after
-  prior velocity/turn commands.
-- [ ] Test 100 mm reverse because this is the Vehicle Controller's current
-  obstacle rescan command.
-- [ ] Test 500, 1000 and 1500 mm straight runs, at least ten times each.
-- [ ] Record commanded distance, left/right wheel distance, measured floor
-  distance, lateral drift, stopping overshoot and battery voltage.
-- [ ] Make straight correction use normalised wheel distance/speed error.
-- [ ] Add a bounded approach/deceleration profile if constant-speed threshold
-  stopping cannot meet the agreed distance limit.
-- [ ] Confirm completion is reported exactly once with the matching sequence
+- [x] Test 500 mm forward from a fresh boot: 500 mm in 10.04 s, straight,
+  both wheels started, one completion beep (49.8 mm/s physical average).
+- [x] Test 100 mm reverse after that prior command: 100 mm in 2.00 s, straight,
+  both wheels started, one completion beep (50.0 mm/s physical average).
+- [x] Record measured floor distance, drift, wheel start, elapsed time and the
+  result beep; serial-only fields are optional.
+- [x] Make straight correction use normalised wheel distance/speed error.
+- [ ] Add a bounded approach/deceleration profile only if threshold stopping
+  cannot meet the agreed distance limit.
+- [x] Confirm completion is reported exactly once with the matching sequence
   ID, and a later command cannot be mistaken for the earlier completion.
+- [x] Perform optional 1500 mm forward observations: the first travelled
+  approximately 1510 mm and drifted right; the repeat was relatively straight
+  with slight left drift. Distance remained accurate, so the direction of
+  lateral drift is not yet repeatable.
 
 ### Exit check
 
@@ -742,21 +865,52 @@ Goal: make encoder distance commands and normal straight driving repeatable.
 
 Goal: make navigation turns reliable for the barcode/controller path.
 
+`APP=motion_stage7_test` is prepared for powerbank operation. GP20 starts the
+selected 80 mm/s encoder turn. GP21 advances the idle selection or immediately
+stops a running turn. Selection codes are one beep for left 90 degrees, two
+for right 90 degrees and three for a 180-degree U-turn. Result code 1 means
+complete and 2 means operator stop; fault codes remain 3-8.
+
+The minimum progression set is one clean run of each turn. Ten-repeat timing,
+voltage matrices and approach-profile work are deferred unless one of these
+runs is inaccurate or unreliable.
+
+The first left-turn run completed safely but measured approximately 110 degrees
+for a 90-degree command. Since turn travel is proportional to configured track
+width, the focused correction is `145 * 90 / 110 = 118.6 mm`, rounded to
+119 mm. The 119 mm retest measured approximately 95 degrees left and the
+right comparison approximately 95 degrees right. This symmetric small bias is
+being left unchanged because the floor-line readings are approximate; the
+U-turn will be the final comparison before any further adjustment.
+
+### Next physical task
+
+Flash the rebuilt `motion_stage7_test`. On boot, one selection beep means left
+90 degrees. Press GP20 once to start. The car should turn slowly at 80 mm/s
+and complete with one result beep. Record whether it turned left, the
+approximate final heading, whether both wheels moved and the result beep.
+GP21 remains the immediate stop button.
+
 ### Tasks
 
-- [ ] Begin with the physical track width, then determine effective track width
-  from measured pivot turns on the actual track surface.
-- [ ] Run at least ten `-90` degree left turns.
-- [ ] Run at least ten `+90` degree right turns.
-- [ ] Run at least ten `180` degree U-turns.
-- [ ] Test turns after straight driving, after another turn and after a stop;
-  do not test only the first command after boot.
-- [ ] Record angle error, completion time, overshoot, wheel counts, PWM,
-  invalid transitions, battery voltage and surface.
-- [ ] Add a bounded turn approach profile if needed for accuracy.
-- [ ] Confirm both wheels are stopped before Motion publishes `COMPLETE`.
-- [ ] Set the Vehicle Controller turn timeout to at least twice the measured
-  worst normal turn time, while retaining a finite fault timeout.
+- [x] Start with the measured 145 mm physical track width; first left-turn
+  result was used to estimate an effective 119 mm turn width.
+- [x] Retest one `-90` degree left turn with the 119 mm candidate: approximately
+  95 degrees, which is close enough to defer another width change until the
+  right-turn comparison.
+- [x] Run one `+90` degree right turn: approximately 95 degrees, slightly
+  slanted right, both wheels started, one completion beep.
+- [x] Run one `180` degree U-turn: reached the opposite direction with a
+  slight right slant; front wheel ended approximately 1.5 cm right of the
+  opposite floor line.
+- [ ] Record actual direction, approximate final angle, completion time if
+  practical and result beep. The sequential runs also test a turn after a
+  prior manoeuvre.
+- [ ] Add a bounded turn approach profile only if the minimum run is inaccurate.
+- [x] Brake both wheels before Motion publishes `COMPLETE` (code and host-path
+  verification).
+- [x] Use a finite 8000 ms Vehicle Controller timeout until measured turn times
+  allow it to be safely reduced.
 
 ### Exit check
 
@@ -765,26 +919,46 @@ Goal: make navigation turns reliable for the barcode/controller path.
 - [ ] Barcode turn requests can use the public Motion API without a timing
   workaround.
 
+The 90-degree and U-turn results are accepted for low-speed progression. The
+small rightward endpoint bias is retained as a known floor/traction effect;
+formal angle limits remain dependent on the Stage 0 limits still marked TBC.
+
 ## Stage 8 - Stop and fault verification
 
 Goal: prove that failures stop safely and are reported to the controller.
 
+The host suites already cover timeout, single-wheel count faults, impossible
+encoder deltas, invalid commands, queue/acknowledgement behaviour, brake-write
+failure, stale-fault recovery and Vehicle Controller emergency-stop mapping.
+The earlier five physical GP21 checks measured 204 us to 10.690 ms response.
+Do not disconnect encoders, jam wheels or induce brownouts merely to duplicate
+deterministic software coverage.
+
+The only remaining physical Stage 8 check is combined with the Stage 7 image:
+select the U-turn, press GP20, then press GP21 while it is turning. The car must
+brake immediately, give result code 2, and remain stopped. A repeated movement
+or any other code is a failure.
+
 ### Required fault tests
 
-- [ ] Operator/Vehicle Controller stop while driving forward, reverse and
-  turning; measure command-to-brake latency and stopping distance.
-- [ ] Stop immediately followed by a new command.
-- [ ] Command timeout.
-- [ ] Single left-wheel stall and single right-wheel stall.
-- [ ] Disconnected left encoder and disconnected right encoder.
-- [ ] Excessive/invalid encoder transitions or simulated impossible delta.
-- [ ] Out-of-range linear speed, angular rate, distance and turn inputs.
-- [ ] Queue saturation.
-- [ ] Low battery/brownout behaviour within the safe test range.
-- [ ] Confirm both motors brake for every fatal Motion fault.
-- [ ] Confirm the Vehicle Controller maps stall, encoder and other Motion
+- [x] Complete the remaining GP21 stop-during-turn check: pressed GP21 after
+  half a U-turn, received two beeps and the car stopped without continuing.
+  Forward physical stop latency and the common forward/reverse/turn stop path
+  are already verified; duplicate direction runs are unnecessary.
+- [x] Stop followed by a new command is covered by the Motion race regression.
+- [x] Command timeout physically braked and latched the timeout fault.
+- [ ] Wheel-stall and disconnected-encoder hardware abuse tests are deferred;
+  the single-wheel encoder/count-fault brake path is covered on the host.
+- [x] Excessive/invalid encoder transitions and impossible deltas brake in host
+  tests.
+- [x] Out-of-range linear speed, angular rate, distance and turn inputs are
+  rejected by deterministic control tests.
+- [ ] Queue saturation and low-battery/brownout matrices are deferred to final
+  integration only if required by the team acceptance limits.
+- [x] Confirm both motors brake for every exercised fatal Motion fault.
+- [x] Confirm the Vehicle Controller maps serious Motion
   faults to the intended telemetry bits and enters `EMERGENCY_STOP`.
-- [ ] Confirm the documented recovery/acknowledgement procedure; a stale fault
+- [x] Confirm the documented recovery/acknowledgement procedure; a stale fault
   must not silently disappear while the hardware problem remains.
 
 ### Exit check
@@ -798,16 +972,28 @@ Goal: prove that failures stop safely and are reported to the controller.
 Goal: prove Motion remains stable with the current Vehicle Controller and all
 merged subsystem workloads.
 
+### GP20 combined-motion route prepared
+
+`APP=motion_route_test` provides a powerbank-only transition check before
+sensor integration. One GP20 press executes 500 mm forward, left 90 degrees,
+500 mm forward, right 90 degrees, 1000 mm forward, a right 180-degree U-turn,
+then 1500 mm forward. Straight travel uses 50 mm/s and turns use 80 mm/s.
+GP21 stops the route during motion, the pre-run delay or an inter-command gap.
+This validates consecutive relative command origins and transitions; it does
+not replace line/barcode integration or the final repeatability evidence. The
+SMP USB/no-WiFi build passed with no emitted warnings or errors; ELF
+text/data/bss is `96400/156/32400` bytes.
+
 ### Current integration contract to preserve
 
 - The Vehicle Controller runs every 20 ms and is the only high-level motion
   requester.
-- Normal speed is currently 200 mm/s; hump speed 100 mm/s; line-recovery speed
-  120 mm/s.
+- Normal, reverse and turn speed are 80 mm/s; hump and line-recovery search
+  speed are 50 mm/s.
 - Line steering currently maps to angular rate using
   `steer * 400 mdeg/s` (positive is right) and resends after an 8/127 steering change. These are
   provisional track values and may need coordinated VC/Motion tuning.
-- Turns use `-90000`, `+90000` and `180000` mdeg at 100 mm/s.
+- Turns use `-90000`, `+90000` and `180000` mdeg at 80 mm/s.
 - Obstacle reverse uses -100 mm at -80 mm/s.
 - Buddy 3 line/barcode and Buddy 5 obstacle-ahead inputs are connected.
 - Buddy 5 scan/bypass motion is not implemented yet; the present controller

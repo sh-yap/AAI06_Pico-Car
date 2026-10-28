@@ -17,11 +17,13 @@
 #define MOTION_STOP_EVENT 1U
 #define MOTION_STACK_SIZE 4096U
 #define MOTION_PI_Q16 205887
+#define MOTION_DISTANCE_SCALE_Q10_ONE 1024LL
 /* The loaded raw-PWM sweep showed that 225 permille starts the car reliably.
    A shorter boost limits the launch distance before encoder/PID control takes
    over at low mission speeds. */
 #define MOTION_STARTUP_BOOST_MS 250U
 #define MOTION_STALL_MS 1000U
+#define MOTION_MIN_ACTIVE_SPEED_MM_S 50
 #define MOTION_ZERO_SPEED_MM_S 20
 #define MOTION_MAX_TURN_ANGLE_MDEG 360000
 #define MOTION_INVALID_TRANSITIONS_PER_SAMPLE 8U
@@ -135,7 +137,9 @@ static void publish_status(void)
 
 static void motion_fault(motion_fault_t fault)
 {
-    (void)motion_motor_brake_all();
+    if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+        fault = MOTION_FAULT_HARDWARE_CONFIG;
+    }
     motion_status.left_pwm_permille = 0U;
     motion_status.right_pwm_permille = 0U;
     motion_set_state(MOTION_STATE_FAULT);
@@ -347,10 +351,16 @@ static void motion_loop(void)
     }
     command_locked = true;
 
-    left_mm_per_count_q16 = (int32_t)(((int64_t)MOTION_PI_Q16 * motion_config.left_wheel_diameter_um) /
-                                      (motion_config.left_counts_per_wheel_rev * 1000LL));
-    right_mm_per_count_q16 = (int32_t)(((int64_t)MOTION_PI_Q16 * motion_config.right_wheel_diameter_um) /
-                                       (motion_config.right_counts_per_wheel_rev * 1000LL));
+    left_mm_per_count_q16 = (int32_t)(((int64_t)MOTION_PI_Q16 *
+                                       motion_config.left_wheel_diameter_um *
+                                       motion_config.distance_scale_q10) /
+                                      ((int64_t)motion_config.left_counts_per_wheel_rev *
+                                       1000LL * MOTION_DISTANCE_SCALE_Q10_ONE));
+    right_mm_per_count_q16 = (int32_t)(((int64_t)MOTION_PI_Q16 *
+                                        motion_config.right_wheel_diameter_um *
+                                        motion_config.distance_scale_q10) /
+                                       ((int64_t)motion_config.right_counts_per_wheel_rev *
+                                        1000LL * MOTION_DISTANCE_SCALE_Q10_ONE));
 
     snapshot_start_us = motion_timestamp_us();
     motion_encoder_get_snapshot(&enc);
@@ -361,17 +371,20 @@ static void motion_loop(void)
        removed by that older stop. */
     if (tk_wai_flg(stop_flg, MOTION_STOP_EVENT, TWF_ORW | TWF_CLR,
                    &stop_pattern, TMO_POL) == E_OK) {
-        (void)motion_motor_brake_all();
-        active_command = false;
-        manoeuvre_pending = false;
-        reset_velocity_control();
-        encoder_sample_valid = false;
-        previous_invalid_transitions = enc.invalid_transitions;
-        if (!reinitialisation_required) {
-            fault_latched = false;
-            motion_set_state(MOTION_STATE_STOPPED);
-            motion_status.fault = MOTION_FAULT_NONE;
-            clear_encoder_fault_detail();
+        if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+            motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
+        } else {
+            active_command = false;
+            manoeuvre_pending = false;
+            reset_velocity_control();
+            encoder_sample_valid = false;
+            previous_invalid_transitions = enc.invalid_transitions;
+            if (!reinitialisation_required) {
+                fault_latched = false;
+                motion_set_state(MOTION_STATE_STOPPED);
+                motion_status.fault = MOTION_FAULT_NONE;
+                clear_encoder_fault_detail();
+            }
         }
     }
     /* Freeze the first fault sample until explicit stop acknowledgement.
@@ -567,7 +580,7 @@ static void motion_loop(void)
         /* Apply a short, bounded boost only while a wheel is stationary.
            This overcomes static friction without becoming a permanent PWM
            offset once encoder feedback is present. */
-        if (motion_abs_i32(left_target_speed) >= 80 &&
+        if (motion_abs_i32(left_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
             motion_abs_i32(left_speed) < MOTION_ZERO_SPEED_MM_S &&
             left_startup_ms < MOTION_STARTUP_BOOST_MS) {
             if (motion_abs_i32((int32_t)left_output.output) < motion_config.startup_pwm_permille) {
@@ -581,7 +594,7 @@ static void motion_loop(void)
                overcome static friction again if it later stops. */
             left_startup_ms = 0U;
         }
-        if (motion_abs_i32(right_target_speed) >= 80 &&
+        if (motion_abs_i32(right_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
             motion_abs_i32(right_speed) < MOTION_ZERO_SPEED_MM_S &&
             right_startup_ms < MOTION_STARTUP_BOOST_MS) {
             if (motion_abs_i32((int32_t)right_output.output) < motion_config.startup_pwm_permille) {
@@ -620,25 +633,28 @@ static void motion_loop(void)
                 motion_status.target_mm,
                 motion_status.travelled_mm,
                 active_type == MOTION_COMMAND_TURN_ANGLE)) {
-            (void)motion_motor_brake_all();
-            motion_status.left_pwm_permille = 0U;
-            motion_status.right_pwm_permille = 0U;
-            active_command = false;
-            manoeuvre_pending = false;
-            motion_set_state(MOTION_STATE_COMPLETE);
+            if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+                motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
+            } else {
+                motion_status.left_pwm_permille = 0U;
+                motion_status.right_pwm_permille = 0U;
+                active_command = false;
+                manoeuvre_pending = false;
+                motion_set_state(MOTION_STATE_COMPLETE);
+            }
         } else if (active_timeout != 0U && active_elapsed >= active_timeout) {
             motion_fault(MOTION_FAULT_TIMEOUT);
         } else {
             /* Each driven wheel is monitored independently. Requiring both
                wheels to be stationary would miss a disconnected encoder or
                a single jammed wheel while its partner continued moving. */
-            if (motion_abs_i32(left_target_speed) >= 80 &&
+            if (motion_abs_i32(left_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
                 motion_abs_i32(left_speed) < MOTION_ZERO_SPEED_MM_S) {
                 left_stall_ms += elapsed_ms;
             } else {
                 left_stall_ms = 0U;
             }
-            if (motion_abs_i32(right_target_speed) >= 80 &&
+            if (motion_abs_i32(right_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
                 motion_abs_i32(right_speed) < MOTION_ZERO_SPEED_MM_S) {
                 right_stall_ms += elapsed_ms;
             } else {
@@ -649,7 +665,9 @@ static void motion_loop(void)
             }
         }
     } else {
-        (void)motion_motor_brake_all();
+        if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+            motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
+        }
     }
 
 motion_loop_finish:

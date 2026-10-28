@@ -100,6 +100,7 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
 #else
     T_DINT dint;
     uint32_t bank;
+    encoder_ready = false;
     encoder_config = *config;
     encoder_owner_processor = tk_get_prc();
     encoder_counts[0] = 0;
@@ -111,10 +112,12 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
     for (bank = 0U; bank < GPIO_IRQ_BANK_COUNT; ++bank) {
         encoder_irq_masks[bank] = 0U;
     }
-    gpio_set_pin(encoder_config.left_encoder_a, GPIO_MODE_IN);
-    gpio_set_pin(encoder_config.left_encoder_b, GPIO_MODE_IN);
-    gpio_set_pin(encoder_config.right_encoder_a, GPIO_MODE_IN);
-    gpio_set_pin(encoder_config.right_encoder_b, GPIO_MODE_IN);
+    if (gpio_set_pin(encoder_config.left_encoder_a, GPIO_MODE_IN) < E_OK ||
+        gpio_set_pin(encoder_config.left_encoder_b, GPIO_MODE_IN) < E_OK ||
+        gpio_set_pin(encoder_config.right_encoder_a, GPIO_MODE_IN) < E_OK ||
+        gpio_set_pin(encoder_config.right_encoder_b, GPIO_MODE_IN) < E_OK) {
+        return MOTION_RESULT_HARDWARE;
+    }
     /* Bias disconnected inputs so the encoder test cannot create an IRQ
      * storm while the motor harness is still unplugged.  The pull-up is a
      * provisional electrical default and must be checked against the encoder
@@ -135,6 +138,14 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
         encoder_proc_inte = GPIO_PROC1_INTE;
     }
 #endif
+    dint.intatr = TA_HLNG;
+    dint.inthdr = (FP)motion_encoder_isr;
+    if (tk_def_int(MOTION_GPIO_IRQ, &dint) < E_OK) return MOTION_RESULT_HARDWARE;
+    ClearInt(MOTION_GPIO_IRQ);
+    /* Install the handler and make its state valid before an encoder GPIO can
+     * reach it. Enabling GPIO edges before encoder_ready left a small window
+     * where the old handler returned without acknowledging the edge. */
+    encoder_ready = true;
     for (bank = 0U; bank < GPIO_IRQ_BANK_COUNT; ++bank) {
         if (encoder_irq_masks[bank] != 0U) {
             /* Clear stale edge flags, then enable without disturbing GPIO
@@ -143,12 +154,7 @@ motion_result_t motion_encoder_init(const motion_config_t *config)
             set_w(encoder_proc_inte + (bank * 4U), encoder_irq_masks[bank]);
         }
     }
-    dint.intatr = TA_HLNG;
-    dint.inthdr = (FP)motion_encoder_isr;
-    if (tk_def_int(MOTION_GPIO_IRQ, &dint) < E_OK) return MOTION_RESULT_HARDWARE;
-    ClearInt(MOTION_GPIO_IRQ);
     EnableInt(MOTION_GPIO_IRQ, 1);
-    encoder_ready = true;
     return MOTION_RESULT_OK;
 #endif
 }

@@ -17,6 +17,8 @@ typedef struct {
     int32_t right_counts_per_wheel_rev;
     int32_t left_wheel_diameter_um;
     int32_t right_wheel_diameter_um;
+    /* Q10 multiplier for loaded distance calibration.  1024 means 1.000. */
+    uint16_t distance_scale_q10;
     int32_t track_width_um;
     int32_t max_speed_mm_s;
     int32_t encoder_physical_max_speed_mm_s;

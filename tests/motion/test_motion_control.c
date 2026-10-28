@@ -125,11 +125,20 @@ int main(void)
            "loaded left wheel diameter calibration");
     expect(config.right_wheel_diameter_um == 57600,
            "loaded right wheel diameter calibration");
+    expect(config.distance_scale_q10 == 1167U,
+           "distance scale uses loaded Stage 6 calibration");
     expect(config.startup_pwm_permille == 200U,
            "loaded startup PWM calibration");
     expect(config.encoder_physical_max_speed_mm_s == 1000,
            "loaded encoder physical-speed bound");
     expect(motion_config_validate(&config), "default motion configuration");
+    config.distance_scale_q10 = 511U;
+    expect(!motion_config_validate(&config),
+           "reject distance scale below calibration bound");
+    config.distance_scale_q10 = 2049U;
+    expect(!motion_config_validate(&config),
+           "reject distance scale above calibration bound");
+    config.distance_scale_q10 = 1024U;
     expect(motion_feedforward_permille(100, 57U, 318U, 225U, 100U, 6U, 80U, 900U) == 88,
            "left feedforward");
     expect(motion_feedforward_permille(-100, 55U, 301U, 246U, 100U, 6U, 80U, 900U) == -90,

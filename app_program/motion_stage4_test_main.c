@@ -2,7 +2,9 @@
 #include <tk/tkernel.h>
 #include <bsp/libbsp.h>
 #include <sys/sysdepend/cpu/rp2040/sysdef.h>
+#include <tm/tmonitor.h>
 
+#include "motion_clock.h"
 #include "motion_config.h"
 #include "motion_encoder.h"
 #include "motion_motor.h"
@@ -136,7 +138,9 @@ static bool wait_before_run(void)
 
     while (elapsed_ms < STAGE4_PRE_RUN_DELAY_MS) {
         if (button_pressed(STAGE4_NEXT_STOP_BUTTON_PIN)) {
-            (void)motion_motor_brake_all();
+            if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+                fatal_blink();
+            }
             wait_until_released(STAGE4_NEXT_STOP_BUTTON_PIN);
             return false;
         }
@@ -154,10 +158,16 @@ static uint32_t run_case(const motion_stage4_case_t *test_case)
     motion_motor_mode_t mode;
     motion_result_t left_result;
     motion_result_t right_result;
-    uint32_t elapsed_ms = 0U;
+    uint64_t start_us;
+    uint64_t stop_us;
+    uint64_t deadline_us;
+    uint32_t elapsed_us;
+    uint32_t result_flags;
     bool aborted = false;
 
-    (void)motion_motor_brake_all();
+    if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+        fatal_blink();
+    }
     if (!wait_before_run()) {
         return MOTION_STAGE4_RESULT_ABORTED;
     }
@@ -171,24 +181,41 @@ static uint32_t run_case(const motion_stage4_case_t *test_case)
     if (left_result != MOTION_RESULT_OK || right_result != MOTION_RESULT_OK) {
         fatal_blink();
     }
+    start_us = motion_clock_us();
+    deadline_us = start_us + ((uint64_t)test_case->duration_ms * 1000ULL);
     led_set(true);
-    while (elapsed_ms < test_case->duration_ms) {
+    while (motion_clock_us() < deadline_us) {
         if (button_pressed(STAGE4_NEXT_STOP_BUTTON_PIN)) {
             aborted = true;
             break;
         }
         (void)tk_dly_tsk(STAGE4_POLL_MS);
-        elapsed_ms += STAGE4_POLL_MS;
     }
-    (void)motion_motor_brake_all();
+    stop_us = motion_clock_us();
+    if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+        fatal_blink();
+    }
     led_set(false);
     motion_encoder_get_snapshot(&snapshot);
     if (aborted) {
         wait_until_released(STAGE4_NEXT_STOP_BUTTON_PIN);
     }
-    return motion_stage4_assess(test_case, snapshot.left_counts,
-                                snapshot.right_counts,
-                                snapshot.invalid_transitions, aborted);
+    result_flags = motion_stage4_assess(test_case, snapshot.left_counts,
+                                        snapshot.right_counts,
+                                        snapshot.invalid_transitions, aborted);
+    elapsed_us = (uint32_t)(stop_us - start_us);
+    /* Printing happens only after both motors are braked. GP20 remains the
+     * motion trigger; this line is optional evidence when a console is
+     * attached and is not required for powerbank-only operation. */
+    tm_printf((UB *)"[motion-stage4] dir=%s pwm=%u elapsed_us=%u counts=%d/%d invalid=%u/%u flags=%u code=%u\n",
+              (UB *)(test_case->direction == MOTION_STAGE4_FORWARD ?
+                     "forward" : "reverse"),
+              test_case->duty_permille, elapsed_us,
+              snapshot.left_counts, snapshot.right_counts,
+              snapshot.left_invalid_transitions,
+              snapshot.right_invalid_transitions,
+              result_flags, motion_stage4_result_code(result_flags));
+    return result_flags;
 }
 
 static bool idle_next_or_reset(uint8_t *case_index)
@@ -240,7 +267,9 @@ EXPORT INT usermain(void)
         motion_encoder_init(&config) != MOTION_RESULT_OK) {
         fatal_blink();
     }
-    (void)motion_motor_brake_all();
+    if (motion_motor_brake_all() != MOTION_RESULT_OK) {
+        fatal_blink();
+    }
     wait_until_released(STAGE4_RUN_BUTTON_PIN);
     wait_until_released(STAGE4_NEXT_STOP_BUTTON_PIN);
     if (!motion_stage4_case_get(case_index, &test_case)) {

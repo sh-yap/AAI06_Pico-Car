@@ -13,6 +13,7 @@ static bool stop_pending;
 static unsigned drive_calls;
 static uint16_t test_duty[2];
 static uint32_t snapshot_delay_us;
+static motion_result_t brake_result = MOTION_RESULT_OK;
 
 uint32_t in_w(uint32_t address)
 { return address == TIMER_TIMERAWL ? (uint32_t)test_clock : (uint32_t)(test_clock >> 32); }
@@ -57,7 +58,11 @@ void motion_encoder_get_snapshot(motion_encoder_snapshot_t *p)
 motion_result_t motion_motor_apply(uint8_t motor, motion_motor_mode_t mode, uint16_t duty)
 { (void)mode; ++drive_calls; test_duty[motor] = duty; return MOTION_RESULT_OK; }
 motion_result_t motion_motor_brake_all(void)
-{ test_duty[0] = 0U; test_duty[1] = 0U; return MOTION_RESULT_OK; }
+{
+    test_duty[0] = 0U;
+    test_duty[1] = 0U;
+    return brake_result;
+}
 uint16_t motion_motor_last_duty(uint8_t motor) { return test_duty[motor]; }
 
 static void check(bool ok, const char *name)
@@ -77,10 +82,12 @@ int main(void)
     cmd.sequence_id = 1U;
     cmd.timeout_ms = 6000U;
     cmd.value.distance.distance_mm = 300;
-    cmd.value.distance.speed_mm_s = 100;
+    cmd.value.distance.speed_mm_s = 50;
     check(motion_init() == MOTION_RESULT_OK, "task initialises");
     check(motion_submit(&cmd) == MOTION_RESULT_OK, "command accepted");
     motion_loop();
+    check(test_duty[0] == 25U && test_duty[1] == 25U,
+          "50 mm/s command receives bounded startup drive");
     test_clock = 20000U;
     test_encoder.left_counts = 25;
     test_encoder.right_counts = 25;
@@ -136,8 +143,9 @@ int main(void)
     cmd.sequence_id = 3U;
     check(motion_submit(&cmd) == MOTION_RESULT_OK, "timing regression command accepted");
     motion_loop();
-    /* 800 counts over 120 ms is about 477 mm/s, below the physical bound.
-       Pairing the counts with a pre-snapshot 20 ms timestamp falsely faults. */
+    /* 800 counts over 120 ms is about 544 mm/s with the loaded distance
+       scale, below the physical bound. Pairing the counts with a
+       pre-snapshot 20 ms timestamp falsely faults. */
     test_clock += 20000U;
     snapshot_delay_us = 100000U;
     test_encoder.left_counts += 800;
@@ -148,13 +156,13 @@ int main(void)
           "preemption before snapshot does not create a false count fault");
     check(motion_status.encoder_sample_time_us == test_clock &&
           motion_status.encoder_snapshot_duration_us == 100000U &&
-          motion_status.left_speed_mm_s >= 470 && motion_status.left_speed_mm_s <= 480,
+          motion_status.left_speed_mm_s >= 540 && motion_status.left_speed_mm_s <= 550,
           "speed uses the count acquisition time, with acquisition delay retained");
     test_clock += 20000U;
     test_encoder.left_counts += 28;
     test_encoder.right_counts += 28;
     motion_loop();
-    check(motion_status.left_speed_mm_s >= 95 && motion_status.left_speed_mm_s <= 105,
+    check(motion_status.left_speed_mm_s >= 108 && motion_status.left_speed_mm_s <= 120,
           "sample after delayed acquisition uses its own 20 ms interval");
     drives_before = drive_calls;
     test_clock += 20000U;
@@ -185,5 +193,12 @@ int main(void)
           motion_status.encoder_fault_right_delta == 0 &&
           test_duty[0] == 0U && test_duty[1] == 0U,
           "reported 599/0 counts over 14063 us correctly latch a left fault and brake");
+    brake_result = MOTION_RESULT_HARDWARE;
+    (void)motion_stop();
+    motion_loop();
+    check(motion_status.state == MOTION_STATE_FAULT &&
+          motion_status.fault == MOTION_FAULT_HARDWARE_CONFIG &&
+          reinitialisation_required,
+          "brake write failure becomes a latched hardware fault");
     return 0;
 }
