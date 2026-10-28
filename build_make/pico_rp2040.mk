@@ -218,6 +218,18 @@ COMMS_FORMAT_SUFFIX := _json
 COMMS_JSON := 1
 endif
 
+# VC_OBSTACLE=0 builds APP=vc_car without Buddy 5's "obstacle ahead" (for
+# line-following tests while false obstacles are being fixed).  The car
+# then does NOT stop for real obstacles.  Image is named ..._noobst.
+VC_OBSTACLE ?= 1
+ifneq ($(filter $(VC_OBSTACLE),0 1),$(VC_OBSTACLE))
+$(error Unknown VC_OBSTACLE '$(VC_OBSTACLE)'; use 0 or 1)
+endif
+VC_OBSTACLE_SUFFIX :=
+ifeq ($(VC_OBSTACLE),0)
+VC_OBSTACLE_SUFFIX := _noobst
+endif
+
 ifeq ($(WIFI_NETIF),1)
 ifneq ($(WIFI_JOIN),1)
 $(error WIFI_NETIF=1 requires WIFI_JOIN=1)
@@ -269,7 +281,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)_$(APP)_$(BOARD)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)$(VC_OBSTACLE_SUFFIX)_$(APP)_$(BOARD)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -320,7 +332,7 @@ ASFLAGS += -DCNF_SMP=1
 endif
 
 # Fake-data driver for the comms API (app_program/comms_demo.c).
-CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON)
+CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE)
 
 # Rebuild the build stamp every time, so the date/time printed at boot and
 # published on robot/info always identifies the image actually flashed.
@@ -366,12 +378,15 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)
 PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
 $(info Build profile is now $(PROFILE_ID); discarding objects built for another profile.)
-$(shell find mtkernel_3 -name '*.o' -o -name '*.d' | xargs -r rm -f; \
+# /usr/bin/find, not "find": run from PowerShell, the shell's PATH puts
+# C:\Windows\system32 first, so "find" was Windows FIND.EXE, which deleted
+# nothing - every profile switch silently relinked stale objects.
+$(shell /usr/bin/find mtkernel_3 -name '*.o' -o -name '*.d' | xargs -r rm -f; \
 	  rm -f $(EXE_FILE).elf $(EXE_FILE).map $(EXE_FILE).uf2; \
 	  echo $(PROFILE_ID) > $(PROFILE_FILE))
 endif
