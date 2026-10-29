@@ -44,3 +44,10 @@ AGENTS.md
 docs/private
 /.vscode
 /personal/
+
+# Buddy 3 host unit-test binaries (rebuildable).
+tests/buddy3/*.exe
+# SDK installer log.
+InstallationLog.txt
+# Local Buddy 1 track-test telemetry captures (evidence; kept on disk, not in git).
+evidence/buddy1/

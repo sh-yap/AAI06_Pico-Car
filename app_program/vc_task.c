@@ -58,13 +58,23 @@
                                               127 -> about 89 deg/s.  Was
                                               400 (50 deg/s): too gentle,
                                               ran off bends (27 Oct).      */
+#define VC_TRACK_HALF_MM         (60)      /* Half the 119 mm track width. */
+#define VC_TURN_INNER_FLOOR_MM_S (10)      /* Keep the inner wheel at least
+                                              this fast forward in a turn so
+                                              it does not stall at low PWM
+                                              (29 Oct: both wheels stalled
+                                              on hard pivots).             */
+/* mdeg/s of turn that moves the inner wheel by 1 mm/s = 180000/pi / half. */
+#define VC_MDEGPS_PER_MM_S_DIFF  (57296 / VC_TRACK_HALF_MM)
 #define VC_STEER_RESEND          (8)       /* Re-send drive if steer moves
                                               this much (of 127).          */
 #define VC_SPEED_RESEND          (10)      /* ...or speed moves this much
                                               (mm/s).  The bend slowdown
                                               changes speed with every
                                               small steer change.          */
-#define VC_TURN_SPEED_MM_S       (80)      /* Validated loaded wheel speed. */
+#define VC_TURN_SPEED_MM_S       (80)      /* Wheel speed for encoder turns.
+                                              Buddy 2's validated loaded
+                                              wheel speed (was 100).        */
 #define VC_REVERSE_MM            (100)     /* Back off before a rescan.    */
 #define VC_REVERSE_SPEED_MM_S    (80)
 #define VC_STATIONARY_MM_S       (10)      /* Both wheels below = still.   */
@@ -638,8 +648,22 @@ drive (int16_t speed_mm_s, int8_t steer)
         cmd.timeout_ms                    = 0U;
         cmd.value.velocity.linear_mm_s    = speed_mm_s;
         /* Line to the right (+) needs the agreed positive right-turn rate. */
-        cmd.value.velocity.angular_mdeg_s = (int32_t) steer
-                                            * VC_STEER_GAIN_MDEG_S;
+        {
+            int32_t angular  = (int32_t) steer * VC_STEER_GAIN_MDEG_S;
+            int32_t lin      = (0 > speed_mm_s) ? -(int32_t) speed_mm_s
+                                                : (int32_t) speed_mm_s;
+            /* Cap the turn rate so the inner wheel keeps a small forward
+             * speed instead of being driven to zero/reverse, where it
+             * stalls at low PWM.  Only bites on hard steer; small
+             * corrections pass through unchanged. */
+            int32_t max_diff = lin - VC_TURN_INNER_FLOOR_MM_S;
+            int32_t max_ang;
+            if (0 > max_diff) { max_diff = 0; }
+            max_ang = max_diff * VC_MDEGPS_PER_MM_S_DIFF;
+            if (angular >  max_ang) { angular =  max_ang; }
+            if (angular < -max_ang) { angular = -max_ang; }
+            cmd.value.velocity.angular_mdeg_s = angular;
+        }
         result = motion_submit(&cmd);
 
         if (MOTION_RESULT_OK == result)
