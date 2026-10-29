@@ -135,14 +135,16 @@ typedef enum
 /** @brief Public status snapshot for the latest processed sample.
  *
  * Axis samples retain sensor coordinates after offset calibration. Filtered
- * axes and vertical deviation are in milli-g. NOTE: roll_mg and
- * roll_baseline_mg keep their names for the existing diagnostic formats but
- * carry the filtered incline of the configured hump axis, which is pitch
- * when the caster climbs the ramp. Hump peaks are absolute incline
+ * axes and vertical deviation are in milli-g. roll_mg and roll_baseline_mg
+ * carry the filtered incline of the configured hump axis, which is roll
+ * when a drive wheel climbs the ramp. Hump peaks are absolute incline
  * amplitudes in milli-g. A hump height estimate is a support-height
- * difference in micrometres, valid only after a settled window was measured
- * during that hump. Event flags describe the latest processed sample and are
- * not latched. Tilt and turn use configured signs.
+ * difference in micrometres, valid only when the hump completed after a
+ * full moving-mean window was measured. active_hump_height_um is the
+ * highest height so far in the hump in progress, zero when none is.
+ * Health is READY only after fresh level samples since the last data gap.
+ * Event flags describe the latest processed sample and are not latched.
+ * Tilt and turn use configured signs.
  */
 typedef struct
 {
@@ -165,6 +167,7 @@ typedef struct
     uint32_t highest_hump_peak_mg;
     uint32_t hump_peak_height_um;
     uint32_t highest_hump_height_um;
+    uint32_t active_hump_height_um;
     bool b_hump_height_valid;
     bool b_mag_valid;
     bool b_sample_stale;

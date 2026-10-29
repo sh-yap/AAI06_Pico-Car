@@ -6,20 +6,23 @@
  * taught in INF2004 Lecture 4.2, State Machines.
  *
  * A hump raises one contact while the others stay on the floor, so the
- * chassis tilts about the line through those pivot contacts. With only the
- * front caster on the ramp, the car pitches about the rear axle, and at rest
- * the configured hump axis measures gravity times the sine of that tilt. For
- * a lever L from the pivot to the raised contact and an incline change a in
- * milli-g:
+ * chassis tilts about the line through those pivot contacts. With the right
+ * drive wheel on the ramp and the left wheel and caster on the floor, the
+ * axle line rises by the ramp height across the track, so the lateral axis
+ * measures gravity times the sine of that tilt wherever the caster and IMU
+ * sit. For a lever L, the track, and an incline change a in milli-g:
  *
  *     height = L * a / g
  *
- * so the peak height follows from the mean of settled inclinometer windows,
- * not from integrating motion acceleration. The estimate assumes the pivot
- * and raised contacts stay at the lever distance and that tyre and caster
- * deformation are equal. Pointed-crest contacts and tyre loading can break
- * those assumptions, which is why the car test records the settled values
- * and validity flags for review instead of asserting a height blindly.
+ * The ramp crest is a point, so the wheel never rests at full height. The
+ * peak height is the highest value of a short moving mean of the filtered
+ * incline during the hump, not a settled window and not an integral of
+ * motion acceleration. Over a pointed crest the axle still rises the full
+ * ramp height. The estimate assumes equal tyre deformation on both sides.
+ *
+ * A gap in the sample stream or an invalid sample aborts a hump in progress
+ * as invalid, and health stays DEGRADED until fresh level samples confirm
+ * the car is back on flat ground.
  *
  * Thresholds remain provisional until stationary and vehicle traces are
  * recorded on the bench and then on the car.
@@ -48,12 +51,15 @@ typedef struct
     int32_t           incline_baseline_mg;
     uint32_t          active_peak_height_um;
     uint32_t          last_impact_timestamp_ms;
+    uint32_t          previous_timestamp_ms;
     uint32_t          mag_last_timestamp_ms;
     int64_t           turn_cross_accum;
     int16_t           mag_previous_x;
     int16_t           mag_previous_y;
     uint8_t           hump_confirm_count;
     uint8_t           hump_complete_count;
+    uint8_t           level_count;
+    uint8_t           baseline_step_count;
     uint8_t           incline_window_count;
     uint8_t           incline_window_next;
     bool              b_initialized;
@@ -61,7 +67,9 @@ typedef struct
     bool              b_previous_sample_valid;
     bool              b_have_last_impact;
     bool              b_incline_baseline_valid;
-    bool              b_active_height_settled;
+    bool              b_active_height_measured;
+    bool              b_active_height_tainted;
+    bool              b_level_since_gap;
     bool              b_mag_previous_valid;
     bool              b_mag_seen;
 } b4_proc_state_t;
@@ -151,15 +159,17 @@ b4_proc_push_incline (int32_t incline_mg);
 static uint32_t
 b4_proc_incline_spread_mg (void);
 
-/** @brief Return the mean of the newest settled window.
+/** @brief Return the mean of the newest incline samples.
  *
- * Averaging the settled window keeps sample noise from biasing the baseline
- * and the peak height upwards.
+ * Averaging keeps sample noise from biasing the baseline and the peak
+ * height upwards.
  *
+ * @param window_samples The number of newest samples to average, between
+ *                       2 and the history size.
  * @return The mean incline in milli-g.
  */
 static int32_t
-b4_proc_incline_mean_mg (void);
+b4_proc_incline_mean_mg (uint8_t window_samples);
 
 /** @brief Report whether the newest settled window is quiet enough.
  *
@@ -196,14 +206,27 @@ b4_proc_incline_delta_mg (void);
 static uint32_t
 b4_proc_height_um (int32_t delta_mg);
 
-/** @brief Track the tallest settled height of the active hump.
+/** @brief Track the tallest moving-mean height of the active hump.
  *
- * The height uses the settled window mean, not the newest sample.
- *
- * @param b_settled True when the settled window is quiet enough.
+ * The height uses the moving mean, not the newest sample.
  */
 static void
-b4_proc_update_height (bool b_settled);
+b4_proc_update_height (void);
+
+/** @brief Abort a hump when the sample stream breaks.
+ *
+ * A hump that had started is published as an invalid result, the run
+ * maximum is kept, and level ground must be confirmed again.
+ */
+static void
+b4_proc_abort_hump (void);
+
+/** @brief Count fresh level samples and set health from the result.
+ *
+ * @param amplitude_mg The absolute incline offset in milli-g.
+ */
+static void
+b4_proc_update_level (uint32_t amplitude_mg);
 
 /** @brief Find the largest raw axis change since the previous sample.
  *
@@ -243,7 +266,7 @@ b4_proc_advance_hump (uint32_t amplitude_mg, bool b_settled);
 static void
 b4_proc_update_motion (uint32_t sample_delta_mg);
 
-/** @brief Start a hump candidate above the configured threshold.
+/** @brief Start a hump candidate above the threshold from level ground.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -374,14 +397,23 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         g_b4_proc_state.status.b_hump_completed_event = false;
         g_b4_proc_state.status.tilt = B4_TILT_UNKNOWN;
         g_b4_proc_state.status.motion = B4_MOTION_QUIET;
-        b4_proc_reset_active_hump();
-        g_b4_proc_state.b_filter_ready = false;
+        b4_proc_abort_hump();
         g_b4_proc_state.b_previous_sample_valid = false;
     }
     else
     {
+        /* A late sample means the stream stalled, so anything measured
+         * across the gap cannot be trusted. */
+        if ((true == g_b4_proc_state.b_previous_sample_valid) &&
+            ((p_sample->timestamp_ms -
+              g_b4_proc_state.previous_timestamp_ms) >
+             g_b4_proc_state.config.stale_after_ms))
+        {
+            b4_proc_abort_hump();
+            g_b4_proc_state.b_previous_sample_valid = false;
+        }
+
         g_b4_proc_state.status.sample = *p_sample;
-        g_b4_proc_state.status.health = B4_HEALTH_READY;
         g_b4_proc_state.status.fault = B4_FAULT_NONE;
         g_b4_proc_state.status.b_sample_stale = false;
         g_b4_proc_state.status.b_impact_event = false;
@@ -422,10 +454,23 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         if (false == g_b4_proc_state.status.b_impact_event)
         {
             b4_proc_advance_hump(amplitude_mg, b_settled);
-            b4_proc_update_height(b_settled);
+            b4_proc_update_height();
+        }
+        else if ((B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
+                 (B4_HUMP_COMPLETE != g_b4_proc_state.status.hump_state))
+        {
+            /* The spike is already in the filter and the height window, so
+             * this crossing's height cannot be trusted. */
+            g_b4_proc_state.b_active_height_tainted = true;
+        }
+        else
+        {
+            /* No hump in progress: the spike only delays the next one. */
         }
 
+        b4_proc_update_level(amplitude_mg);
         b4_proc_update_motion(sample_delta_mg);
+        g_b4_proc_state.previous_timestamp_ms = p_sample->timestamp_ms;
         g_b4_proc_state.previous_x_mg = p_sample->accel_x_mg;
         g_b4_proc_state.previous_y_mg = p_sample->accel_y_mg;
         g_b4_proc_state.previous_z_mg = p_sample->accel_z_mg;
@@ -623,12 +668,41 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.incline_window_count = 0U;
         g_b4_proc_state.incline_window_next = 0U;
         g_b4_proc_state.b_incline_baseline_valid = false;
+        g_b4_proc_state.level_count = 0U;
+        g_b4_proc_state.b_level_since_gap = false;
         g_b4_proc_state.turn_cross_accum = 0;
         g_b4_proc_state.b_mag_previous_valid = false;
         g_b4_proc_state.status.roll_mg = 0;
         g_b4_proc_state.status.roll_baseline_mg = 0;
         g_b4_proc_state.status.turn_cross = 0;
         g_b4_proc_state.status.turn = B4_TURN_UNKNOWN;
+    }
+
+    return (result);
+}
+
+/** @brief Clear the run maximum and the latest result for a new run.
+ *
+ * The flat-ground baseline and level confirmation are kept, so a car that
+ * is ready at the start line stays ready.
+ *
+ * @return The clear result.
+ */
+b4_types_result_t
+b4_proc_clear_run_maximum (void)
+{
+    b4_types_result_t result = B4_RESULT_OK;
+
+    if (false == g_b4_proc_state.b_initialized)
+    {
+        result = B4_RESULT_NOT_INITIALIZED;
+    }
+    else
+    {
+        g_b4_proc_state.status.highest_hump_peak_mg = 0U;
+        g_b4_proc_state.status.highest_hump_height_um = 0U;
+        g_b4_proc_state.status.hump_peak_height_um = 0U;
+        g_b4_proc_state.status.b_hump_height_valid = false;
     }
 
     return (result);
@@ -864,9 +938,8 @@ b4_proc_incline_spread_mg (void)
 }
 
 static int32_t
-b4_proc_incline_mean_mg (void)
+b4_proc_incline_mean_mg (uint8_t window_samples)
 {
-    uint8_t window_samples = g_b4_proc_state.config.height_settle_samples;
     uint8_t index = g_b4_proc_state.incline_window_next;
     int32_t sum_mg = 0;
 
@@ -913,7 +986,8 @@ b4_proc_update_baseline (int32_t incline_mg, bool b_settled)
     {
         if (true == b_settled)
         {
-            g_b4_proc_state.incline_baseline_mg = b4_proc_incline_mean_mg();
+            g_b4_proc_state.incline_baseline_mg = b4_proc_incline_mean_mg(
+                g_b4_proc_state.config.height_settle_samples);
             g_b4_proc_state.b_incline_baseline_valid = true;
         }
     }
@@ -925,11 +999,28 @@ b4_proc_update_baseline (int32_t incline_mg, bool b_settled)
 
         if (delta_mg <= g_b4_proc_state.config.height_baseline_gate_mg)
         {
-            int32_t delta_value_mg =
-                incline_mg - g_b4_proc_state.incline_baseline_mg;
+            /* NOTE: Step 1 mg once per divisor settled samples. Dividing
+             * the gated delta instead always rounded to zero. */
+            g_b4_proc_state.baseline_step_count++;
 
-            g_b4_proc_state.incline_baseline_mg += (delta_value_mg /
-                (int32_t)g_b4_proc_state.config.height_baseline_divisor);
+            if (g_b4_proc_state.baseline_step_count >=
+                g_b4_proc_state.config.height_baseline_divisor)
+            {
+                g_b4_proc_state.baseline_step_count = 0U;
+
+                if (incline_mg > g_b4_proc_state.incline_baseline_mg)
+                {
+                    g_b4_proc_state.incline_baseline_mg++;
+                }
+                else if (incline_mg < g_b4_proc_state.incline_baseline_mg)
+                {
+                    g_b4_proc_state.incline_baseline_mg--;
+                }
+                else
+                {
+                    /* Already on the baseline. */
+                }
+            }
         }
     }
     else
@@ -973,14 +1064,16 @@ b4_proc_height_um (int32_t delta_mg)
 }
 
 static void
-b4_proc_update_height (bool b_settled)
+b4_proc_update_height (void)
 {
-    if ((true == b_settled) &&
-        (true == g_b4_proc_state.b_incline_baseline_valid) &&
+    uint8_t mean_samples = g_b4_proc_state.config.height_mean_samples;
+
+    if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
+        (g_b4_proc_state.incline_window_count >= mean_samples) &&
         (B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
         (B4_HUMP_COMPLETE != g_b4_proc_state.status.hump_state))
     {
-        int32_t delta_mg = b4_proc_incline_mean_mg() -
+        int32_t delta_mg = b4_proc_incline_mean_mg(mean_samples) -
                            g_b4_proc_state.incline_baseline_mg;
         uint32_t height_um = b4_proc_height_um(delta_mg);
 
@@ -989,7 +1082,74 @@ b4_proc_update_height (bool b_settled)
             g_b4_proc_state.active_peak_height_um = height_um;
         }
 
-        g_b4_proc_state.b_active_height_settled = true;
+        g_b4_proc_state.b_active_height_measured = true;
+        g_b4_proc_state.status.active_hump_height_um =
+            g_b4_proc_state.active_peak_height_um;
+    }
+}
+
+static void
+b4_proc_abort_hump (void)
+{
+    b4_types_hump_state_t state = g_b4_proc_state.status.hump_state;
+
+    /* A candidate is not yet a hump, so only a confirmed one produces an
+     * invalid result. The run maximum is never touched here. */
+    if ((B4_HUMP_ASCENDING == state) ||
+        (B4_HUMP_PEAK == state) ||
+        (B4_HUMP_DESCENDING == state))
+    {
+        g_b4_proc_state.status.hump_peak_height_um = 0U;
+        g_b4_proc_state.status.b_hump_height_valid = false;
+    }
+
+    b4_proc_reset_active_hump();
+
+    /* Filter and moving-mean history from before the break would blend
+     * old and new attitudes, so both restart. The baseline is kept. */
+    g_b4_proc_state.b_filter_ready = false;
+    g_b4_proc_state.incline_window_count = 0U;
+    g_b4_proc_state.incline_window_next = 0U;
+    g_b4_proc_state.level_count = 0U;
+    g_b4_proc_state.b_level_since_gap = false;
+}
+
+static void
+b4_proc_update_level (uint32_t amplitude_mg)
+{
+    b4_types_hump_state_t state = g_b4_proc_state.status.hump_state;
+    bool b_level =
+        (true == g_b4_proc_state.b_incline_baseline_valid) &&
+        ((B4_HUMP_NORMAL == state) || (B4_HUMP_COMPLETE == state)) &&
+        (amplitude_mg <= g_b4_proc_state.config.hump_complete_threshold_mg);
+
+    if (true == b_level)
+    {
+        if (g_b4_proc_state.level_count < B4_PROC_MAX_COUNTER)
+        {
+            g_b4_proc_state.level_count++;
+        }
+    }
+    else
+    {
+        g_b4_proc_state.level_count = 0U;
+    }
+
+    /* Once confirmed, a later hump does not withdraw readiness. Only a
+     * break in the sample stream does, through b4_proc_abort_hump. */
+    if (g_b4_proc_state.level_count >=
+        g_b4_proc_state.config.hump_complete_samples)
+    {
+        g_b4_proc_state.b_level_since_gap = true;
+    }
+
+    if (true == g_b4_proc_state.b_level_since_gap)
+    {
+        g_b4_proc_state.status.health = B4_HEALTH_READY;
+    }
+    else
+    {
+        g_b4_proc_state.status.health = B4_HEALTH_DEGRADED;
     }
 }
 
@@ -1073,7 +1233,9 @@ b4_proc_reset_active_hump (void)
     g_b4_proc_state.hump_confirm_count = 0U;
     g_b4_proc_state.hump_complete_count = 0U;
     g_b4_proc_state.active_peak_height_um = 0U;
-    g_b4_proc_state.b_active_height_settled = false;
+    g_b4_proc_state.status.active_hump_height_um = 0U;
+    g_b4_proc_state.b_active_height_measured = false;
+    g_b4_proc_state.b_active_height_tainted = false;
 }
 
 static void
@@ -1110,18 +1272,22 @@ b4_proc_advance_hump (uint32_t amplitude_mg, bool b_settled)
     }
 }
 
-/** @brief Start a hump candidate above the configured threshold.
+/** @brief Start a hump candidate above the threshold from level ground.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
 static void
 b4_proc_start_hump (uint32_t amplitude_mg)
 {
-    if (amplitude_mg >=
-        g_b4_proc_state.config.hump_start_threshold_mg)
+    /* NOTE: After a data gap the car may already be partway over a ramp,
+     * so a hump may start only from confirmed level ground. Otherwise the
+     * rest of the crossing would publish a partial height as valid. */
+    if ((true == g_b4_proc_state.b_level_since_gap) &&
+        (amplitude_mg >= g_b4_proc_state.config.hump_start_threshold_mg))
     {
         g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
-        g_b4_proc_state.b_active_height_settled = false;
+        g_b4_proc_state.b_active_height_measured = false;
+        g_b4_proc_state.b_active_height_tainted = false;
         g_b4_proc_state.active_peak_height_um = 0U;
         g_b4_proc_state.status.hump_state = B4_HUMP_CANDIDATE;
         g_b4_proc_state.hump_confirm_count = 1U;
@@ -1274,12 +1440,14 @@ b4_proc_update_hump_descending (uint32_t amplitude_mg, bool b_settled)
 static void
 b4_proc_complete_hump (void)
 {
+    bool b_height_valid = (g_b4_proc_state.b_active_height_measured &&
+                           !g_b4_proc_state.b_active_height_tainted);
+
     g_b4_proc_state.status.hump_state = B4_HUMP_COMPLETE;
     g_b4_proc_state.status.b_hump_completed_event = true;
     g_b4_proc_state.status.hump_peak_height_um =
         g_b4_proc_state.active_peak_height_um;
-    g_b4_proc_state.status.b_hump_height_valid =
-        g_b4_proc_state.b_active_height_settled;
+    g_b4_proc_state.status.b_hump_height_valid = b_height_valid;
 
     if (g_b4_proc_state.status.current_hump_peak_mg >
         g_b4_proc_state.status.highest_hump_peak_mg)
@@ -1289,7 +1457,7 @@ b4_proc_complete_hump (void)
     }
 
     /* An invalid height must never raise the run maximum. */
-    if ((true == g_b4_proc_state.b_active_height_settled) &&
+    if ((true == b_height_valid) &&
         (g_b4_proc_state.active_peak_height_um >
          g_b4_proc_state.status.highest_hump_height_um))
     {

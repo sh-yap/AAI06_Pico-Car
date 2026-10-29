@@ -35,4 +35,8 @@ b4_proc_get_status (uint32_t now_ms, b4_types_status_t * p_status);
 b4_types_result_t
 b4_proc_reset_run_stats (void);
 
+/** Clear the run maximum and latest result but keep the baseline. */
+b4_types_result_t
+b4_proc_clear_run_maximum (void);
+
 #endif /* B4_PROC_H */

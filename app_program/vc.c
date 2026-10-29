@@ -409,6 +409,9 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
     else
     {
         p_out->motion     = VC_MOTION_DRIVE;
+        /* NOTE: The terrain slowdown covers line following only. Search
+         * keeps its own speed even when Buddy 4 asks to slow, because
+         * Buddy 2 found 60 and 80 mm/s stalled the pivot. */
         p_out->speed_mm_s = VC_SPEED_SEARCH_MM_S;
         /* Curve towards where the line was last seen (straight if
          * unknown): the line sensors report a side only briefly before
@@ -441,7 +444,9 @@ step_state (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
             break;
 
         case VC_STATE_READY:
-            if (VC_CMD_START == p_in->cmd)
+            /* A run needs Buddy 4 ready, or a ramp could not be measured
+             * or slowed for.  A refused START is simply dropped. */
+            if ((VC_CMD_START == p_in->cmd) && p_in->b_terrain_ready)
             {
                 enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
             }

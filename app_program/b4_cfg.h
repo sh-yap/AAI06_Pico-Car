@@ -47,11 +47,13 @@
  * Processing thresholds are in milli-g. Sample age and event intervals are
  * in milliseconds. Sample counts are consecutive samples. A filter divisor
  * of one passes each input directly. hump_axis selects the sensor axis
- * whose inclination a hump changes, the forward axis when the caster climbs
- * the ramp. hump_lever_um is the distance in micrometres from the pivot
- * contacts to the raised contact, the rear axle to caster contact for a
- * caster hump. height_settle_band_mg is the largest peak-to-peak incline
- * spread that still counts as settled. height_baseline_gate_mg is the
+ * whose inclination a hump changes, the lateral axis when one drive wheel
+ * climbs the ramp. hump_lever_um is the distance in micrometres from the
+ * pivot to the raised contact, the wheel-contact track for a wheel hump.
+ * height_settle_band_mg is the largest peak-to-peak incline spread that
+ * still counts as settled, used for the flat-ground baseline.
+ * height_mean_samples is the moving-mean length whose highest value during
+ * a hump gives its height. height_baseline_gate_mg is the
  * incline deviation above which the flat-ground baseline stops adapting.
  * hump_confirm_samples is the number of consecutive samples above the start
  * threshold before a hump is accepted, so a brief motor jolt is rejected.
@@ -96,6 +98,7 @@ typedef struct
     uint32_t turn_cross_threshold;
     uint8_t filter_divisor;
     uint8_t height_settle_samples;
+    uint8_t height_mean_samples;
     uint8_t height_baseline_divisor;
     uint8_t turn_window_samples;
     uint8_t hump_confirm_samples;

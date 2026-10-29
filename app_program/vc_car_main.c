@@ -5,9 +5,10 @@
  * Starts comms (Buddy 1), Motion (Buddy 2) and the VC task.  The WiFi
  * radio task is started by the kernel when built with WIFI=cyw43.
  *
- * Also starts Buddy 3 (line + barcode) and Buddy 5 (obstacle ahead); the
- * VC reads them as switched on in vc_task.c.  Laptop "start" -> the car
- * follows the line; "stop" brakes at once.
+ * Also starts Buddy 3 (line + barcode), Buddy 4 (terrain) and Buddy 5
+ * (obstacle ahead); the VC reads them as switched on in vc_task.c.  Laptop
+ * "start" -> the car follows the line once Buddy 4 is ready; "stop" brakes
+ * at once.
  *
  * Deviations (BARR-C): usermain() returns INT, signature fixed by
  * micro T-Kernel; this file has no header as it exports only usermain().
@@ -28,6 +29,7 @@
 #include "buddy3_task.h"
 #include "obstacle_types.h"
 #include "obstacle_task.h"
+#include "b4_task.h"
 
 #if TM_WIFI_CYW43
 /* Plain C types on purpose - see the note in cyw43_utk.h. */
@@ -127,6 +129,7 @@ usermain (void)
     bool            b_comms_ok;
     bool            b_line_ok;
     bool            b_obstacle_ok;
+    bool            b_terrain_ok;
     bool            b_ok;
     bool            b_was_connected = false;
     bool            b_connected;
@@ -153,11 +156,17 @@ usermain (void)
     b_line_ok     = start_buddy3();
     b_obstacle_ok = obstacle_task_init() && obstacle_task_start();
 
+    /* A missing IMU does not fail this: the task keeps retrying, and the
+     * VC refuses START until Buddy 4 reports ready. */
+    b_terrain_ok  = b4_task_start();
+
     b_ok = b_comms_ok && (MOTION_RESULT_OK == motion_result) && b_line_ok
-           && b_obstacle_ok;
-    tm_printf((UB *) "[init] comms=%d motion=%d line=%d obstacle=%d -> %s\n",
+           && b_obstacle_ok && b_terrain_ok;
+    tm_printf((UB *) "[init] comms=%d motion=%d line=%d obstacle=%d"
+                     " terrain=%d -> %s\n",
               (INT) b_comms_ok, (INT) motion_result, (INT) b_line_ok,
-              (INT) b_obstacle_ok, b_ok ? "OK" : "FAILED");
+              (INT) b_obstacle_ok, (INT) b_terrain_ok,
+              b_ok ? "OK" : "FAILED");
 
     if (!vc_task_start(b_ok))
     {

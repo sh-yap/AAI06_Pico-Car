@@ -12,7 +12,10 @@
  *     fault from Buddy 5's task.  Scan and bypass are not written yet, so
  *     an obstacle stops the car and the scan timeout ends in
  *     EMERGENCY_STOP (fail safe);
- *   - Buddy 4 (hump): placeholder, never on a hump.
+ *   - Buddy 4 (terrain), VC_HAVE_BUDDY4: packed terrain words from Buddy
+ *     4's task.  The car slows on a ramp and whenever Buddy 4 is not
+ *     ready or silent, and START waits for it.  With 0 the car never
+ *     slows for terrain and START is always allowed.
  *
  * Motion (Buddy 2) keeps velocity updates inside one controller run and
  * serialises stop handling. The VC still holds for VC_STOP_HOLD_STEPS steps
@@ -34,12 +37,21 @@
 #define VC_HAVE_BUDDY3           (1)    /* Line + barcode from Buddy 3.   */
 #endif
 
+#ifndef VC_HAVE_BUDDY4
+#define VC_HAVE_BUDDY4           (1)    /* Ramp status from Buddy 4.      */
+#endif
+
 #ifndef VC_HAVE_BUDDY5
 #define VC_HAVE_BUDDY5           (1)    /* Obstacle ahead from Buddy 5.   */
 #endif
 
 #if VC_HAVE_BUDDY3
 #include "buddy3_task.h"
+#endif
+
+#if VC_HAVE_BUDDY4
+#include "b4_types.h"
+#include "b4_task.h"
 #endif
 
 #if VC_HAVE_BUDDY5
@@ -88,6 +100,13 @@
 #define VC_TEST_RUN_MS           (5000U)   /* Placeholder-line run length. */
 #define VC_LINE_STALE_MS         (100U)    /* No Buddy 3 data = line lost. */
 #define VC_LINE_DRAIN_MAX        (16U)     /* Messages read per step, max. */
+#define VC_TERRAIN_STALE_MS      (100U)    /* No Buddy 4 word = not ready.
+                                              Five VC steps. The queue
+                                              holds two words, so a word
+                                              is at most 40 ms old when
+                                              received.                    */
+#define VC_TERRAIN_DRAIN_MAX     (8U)      /* Buddy 4 words read per step. */
+#define VC_TRACE_STEPS           (5U)      /* Run trace every 100 ms.      */
 
 /* ------------------------------------------------------------------------ *
  * Private data (used only by the VC task)
@@ -116,6 +135,8 @@ static bool     g_b_run_active;
 static uint32_t g_run_start_ms;
 static uint32_t g_overruns;            /* Steps that started late.        */
 static uint16_t g_faults_seen;         /* Faults since the run started.   */
+static int32_t  g_left_mm_s;           /* Measured wheel speeds, for the  */
+static int32_t  g_right_mm_s;          /* run trace.                      */
 
 /* VC state -> the state codes comms publishes today (tracker item C5). */
 static comms_state_t const g_comms_state[VC_STATE_COUNT] =
@@ -234,6 +255,8 @@ read_motion (vc_inputs_t * p_in)
             /* Nothing new. */
         }
 
+        g_left_mm_s             = status.left_speed_mm_s;
+        g_right_mm_s            = status.right_speed_mm_s;
         report.speed_left_mm_s  = status.left_speed_mm_s;
         report.speed_right_mm_s = status.right_speed_mm_s;
         report.encoder_left     = status.left_encoder_counts;
@@ -457,6 +480,91 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 }
 
 #endif /* VC_HAVE_BUDDY3 */
+
+
+#if VC_HAVE_BUDDY4
+
+/* A completed hump: report a valid height to the laptop, log either way. */
+static void
+report_hump (b4_task_terrain_t const * p_terrain)
+{
+    UINT const height = (UINT) p_terrain->current_height_dmm;
+    UINT const highest = (UINT) p_terrain->highest_height_dmm;
+
+    if (p_terrain->b_height_valid)
+    {
+        (void) comms_event_hump((int32_t) p_terrain->current_height_dmm);
+        tm_printf((UB *) "[b4] hump %u.%u mm, run max %u.%u mm\n",
+                  height / 10U, height % 10U, highest / 10U, highest % 10U);
+    }
+    else
+    {
+        tm_printf((UB *) "[b4] hump with no valid height, run max %u.%u mm\n",
+                  highest / 10U, highest % 10U);
+    }
+}
+
+/* Drain Buddy 4's terrain words (the latest wins).  The car slows unless
+ * a fresh READY word shows no ramp, so a ramp, a Buddy 4 fault and silence
+ * all mean "slow", never "stop".  Returns the IMU fault bit for the
+ * published fault word only. */
+static uint16_t
+read_terrain (vc_inputs_t * p_in, uint32_t now)
+{
+    static b4_task_terrain_t s_terrain;
+    static uint32_t          s_seen_ms = 0U;
+    static bool              s_b_seen  = false;
+    static uint8_t           s_humps   = 0U;
+    uint32_t                 word;
+    uint32_t                 i;
+    bool                     b_more = true;
+    bool                     b_ready;
+    bool                     b_ramp;
+
+    for (i = 0U; b_more && (i < VC_TERRAIN_DRAIN_MAX); i++)
+    {
+        b_more = b4_task_receive_word(&word);
+
+        if (b_more)
+        {
+            b4_task_unpack(word, &s_terrain);
+
+            /* The count, not a one-sample flag, marks a completed hump,
+             * so a word lost in between cannot hide one. */
+            if (s_b_seen && (s_terrain.hump_count != s_humps))
+            {
+                report_hump(&s_terrain);
+            }
+
+            s_humps   = s_terrain.hump_count;
+            s_seen_ms = now;
+            s_b_seen  = true;
+        }
+    }
+
+    b_ready = s_b_seen && ((now - s_seen_ms) < VC_TERRAIN_STALE_MS)
+              && (B4_HEALTH_READY == s_terrain.health);
+    b_ramp  = b4_task_is_ramp_active(&s_terrain);
+
+    p_in->b_hump          = (!b_ready) || b_ramp;
+    p_in->b_terrain_ready = b_ready && (!b_ramp);
+
+    return b_ready ? 0U : (uint16_t) VC_FAULT_IMU;
+}
+
+#else  /* No Buddy 4: never slow for terrain, never hold START. */
+
+static uint16_t
+read_terrain (vc_inputs_t * p_in, uint32_t now)
+{
+    (void) now;
+    p_in->b_hump          = false;
+    p_in->b_terrain_ready = true;
+
+    return 0U;
+}
+
+#endif /* VC_HAVE_BUDDY4 */
 
 
 #if VC_HAVE_BUDDY5
@@ -793,6 +901,9 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
             g_b_run_active = true;
             g_run_start_ms = now;
             (void) comms_begin_run();
+#if VC_HAVE_BUDDY4
+            b4_task_request_run_reset();    /* New run: clear max height. */
+#endif
         }
         else if (g_b_run_active
                  && ((VC_STATE_READY == to)
@@ -809,6 +920,29 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
     }
 }
 
+
+/* Every VC_TRACE_STEPS during a run: requested against measured speed, so
+ * a slowdown on the ramp is shown as physical, not just commanded. */
+static void
+report_trace (vc_inputs_t const * p_in)
+{
+    static uint32_t s_steps = 0U;
+
+    s_steps++;
+
+    if (g_b_run_active && (VC_TRACE_STEPS <= s_steps))
+    {
+        s_steps = 0U;
+        tm_printf((UB *) "[trace] t=%u st=%s req=%d L=%d R=%d steer=%d"
+                         " slow=%d ready=%d overruns=%u\n",
+                  (UINT) p_in->now_ms, (UB *) vc_state_name(g_vc.state),
+                  g_b_driving ? (INT) g_drive_speed : 0,
+                  (INT) g_left_mm_s, (INT) g_right_mm_s,
+                  (INT) g_drive_steer, (INT) p_in->b_hump,
+                  (INT) p_in->b_terrain_ready, (UINT) g_overruns);
+    }
+}
+
 /* ------------------------------------------------------------------------ *
  * The task
  * ------------------------------------------------------------------------ */
@@ -819,6 +953,7 @@ vc_task_entry (INT stacd, void * p_exinf)
     vc_inputs_t  in;
     vc_outputs_t out;
     vc_state_t   before;
+    uint16_t     terrain_fault;
     uint32_t     now;
     uint32_t     next;
     int32_t      wait;
@@ -843,7 +978,13 @@ vc_task_entry (INT stacd, void * p_exinf)
         read_motion(&in);
         read_line(&in, now);
         read_obstacle(&in, g_vc.state);
-        /* Buddy 4 placeholder: b_hump = false. */
+        terrain_fault = read_terrain(&in, now);
+
+        if ((VC_STATE_READY == g_vc.state) && (VC_CMD_START == in.cmd)
+            && (!in.b_terrain_ready))
+        {
+            tm_printf((UB *) "[vc] START refused: Buddy 4 not ready\n");
+        }
 
         before = g_vc.state;
         vc_step(&g_vc, &in, &out);
@@ -860,7 +1001,9 @@ vc_task_entry (INT stacd, void * p_exinf)
             g_faults_seen = 0U;                 /* New run: clean slate. */
         }
 
-        g_faults_seen = (uint16_t) (g_faults_seen | in.serious_faults);
+        /* The IMU bit joins the published word only, after vc_step(). */
+        g_faults_seen = (uint16_t) (g_faults_seen | in.serious_faults
+                                    | terrain_fault);
         comms_set_fault((uint32_t) g_faults_seen);
 
         if ((VC_STATE_EMERGENCY_STOP == out.state) && out.b_state_changed)
@@ -870,6 +1013,7 @@ vc_task_entry (INT stacd, void * p_exinf)
         }
 
         report_state(before, &out, now);
+        report_trace(&in);
 
         /* Fixed 20 ms rate from absolute time, so work time doesn't drift
          * the period; a late step is counted and the schedule resyncs. */

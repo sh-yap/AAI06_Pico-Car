@@ -120,9 +120,11 @@ b4_cfg_default (void)
     config.forward_axis = B4_CFG_AXIS_Y;
     config.lateral_axis = B4_CFG_AXIS_X;
     config.vertical_axis = B4_CFG_AXIS_Z;
-    /* NOTE: Only the front caster meets the ramp (user decision,
-     * 2026-10-17), so the hump pitches the car about the rear axle. */
-    config.hump_axis = B4_CFG_AXIS_Y;
+    /* NOTE: The ramp passes under the right drive wheel while the left
+     * wheel and caster stay on the floor, so the axle line tilts sideways
+     * by height / track and the lateral axis carries the height. Speed
+     * changes do not disturb it, unlike the forward axis. */
+    config.hump_axis = B4_CFG_AXIS_X;
     config.forward_sign = 1;
     config.lateral_sign = 1;
     config.vertical_sign = 1;
@@ -134,22 +136,35 @@ b4_cfg_default (void)
     config.tilt_threshold_mg = 250U;
     config.impact_delta_threshold_mg = 700U;
     config.impact_refractory_ms = 200U;
-    config.hump_start_threshold_mg = 50U;
-    config.hump_hysteresis_mg = 25U;
-    config.hump_complete_threshold_mg = 25U;
+    /* WARNING: Provisional until a flat-ground and ramp roll trace is
+     * recorded on the car. With the 115 mm track one milli-g of roll is
+     * about 0.115 mm, so 25 mg starts a hump near 3 mm of a 10 mm ramp. */
+    config.hump_start_threshold_mg = 25U;
+    config.hump_hysteresis_mg = 15U;
+    config.hump_complete_threshold_mg = 15U;
     config.calibration_noise_limit_mg = 35U;
-    /* Rear axle to caster contact, measured by ruler as about 80 mm. */
-    config.hump_lever_um = 80000U;
-    config.height_settle_band_mg = 20U;
-    config.height_baseline_gate_mg = 25U;
+    /* Left to right tyre contact distance, measured by the user as 115 mm
+     * on 2026-10-29. */
+    config.hump_lever_um = 115000U;
+    /* WARNING: A 30-sample window on the gentle ramp slope spreads about
+     * 14 mg at 50 mm/s, so a wider band let the baseline climb the ramp
+     * before the hump was confirmed and halved the height in a host
+     * simulation. Keep the band and gate below that slope spread. */
+    config.height_settle_band_mg = 10U;
+    config.height_baseline_gate_mg = 12U;
     config.turn_cross_threshold = 20000U;
     config.filter_divisor = 4U;
     config.height_settle_samples = 30U;
-    config.height_baseline_divisor = 8U;
+    /* NOTE: The ramp crest is a point, so the wheel is never still at full
+     * height. Eight samples is 80 ms at 100 Hz, about 4 mm of travel at
+     * 50 mm/s on a 95 mm slope, which lowers the peak by well under 1 mm. */
+    config.height_mean_samples = 8U;
+    /* NOTE: One 1 mg baseline step per 64 settled samples is about 1.6 mg/s
+     * at 100 Hz, too slow to follow a climb but enough for floor drift. */
+    config.height_baseline_divisor = 64U;
     config.turn_window_samples = 20U;
-    /* WARNING: Ten samples is about 0.3 s at the measured 31 Hz loop. Motor
-     * start and stop jolts on flat ground stayed under six samples, so
-     * retune this count if the acquisition rate changes. */
+    /* WARNING: Ten samples is 0.1 s at the planned 100 Hz rate. Retune this
+     * count from the measured rate and the flat-ground roll trace. */
     config.hump_confirm_samples = 10U;
     config.hump_complete_samples = 5U;
     config.max_consecutive_read_failures = 3U;
@@ -255,6 +270,8 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (p_config->filter_divisor > B4_CFG_MAX_FILTER_DIVISOR) ||
             (p_config->height_settle_samples < B4_CFG_MIN_SETTLE_SAMPLES) ||
             (p_config->height_settle_samples > B4_CFG_MAX_SETTLE_SAMPLES) ||
+            (p_config->height_mean_samples < B4_CFG_MIN_SETTLE_SAMPLES) ||
+            (p_config->height_mean_samples > B4_CFG_MAX_SETTLE_SAMPLES) ||
             (0U == p_config->height_baseline_divisor) ||
             (p_config->height_baseline_divisor >
              B4_CFG_MAX_BASELINE_DIVISOR) ||

@@ -61,6 +61,7 @@ reset (uint32_t start_ms)
     memset(&g_out, 0, sizeof(g_out));
     g_in.now_ms       = start_ms;
     g_in.line         = VC_LINE_CENTRE;
+    g_in.b_terrain_ready = true;
     g_in.b_stationary = true;
 }
 
@@ -133,10 +134,25 @@ test_start_up (void)
     step();
     CHECK_STATE(VC_STATE_READY);              /* No START yet. */
 
+    g_in.b_terrain_ready = false;             /* Buddy 4 not ready. */
+    g_in.cmd = VC_CMD_START;
+    step();
+    CHECK_STATE(VC_STATE_READY);              /* START refused. */
+    CHECK(!g_out.b_state_changed);
+    CHECK(VC_MOTION_DRIVE != g_out.motion);
+
+    g_in.b_terrain_ready = true;
     g_in.cmd = VC_CMD_START;
     step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(g_out.b_state_changed);
+
+    /* Once running, Buddy 4 losing readiness only slows the car. */
+    g_in.b_terrain_ready = false;
+    g_in.b_hump = true;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_SPEED_HUMP_MM_S == g_out.speed_mm_s);
 
     reset(0U);
     g_in.b_init_failed = true;
