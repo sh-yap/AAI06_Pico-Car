@@ -21,6 +21,7 @@
 #include "b4_imu.h"
 #include "b4_proc.h"
 #include "b4_task.h"
+#include "comms.h"
 
 /* Below the VC and Buddy 3 (5): a late sample only delays a reading,
  * because every sample carries its own timestamp. */
@@ -29,6 +30,20 @@
 #define B4_TASK_PERIOD_MS           (10U)     /* 100 Hz acquisition.     */
 #define B4_TASK_PUBLISH_SAMPLES     (2U)      /* 50 Hz words, VC step.   */
 #define B4_TASK_RETRY_MS            (500U)    /* Between IMU opens.      */
+
+/* TEMPORARY: remove once the hump rule is decided; permanent terrain
+ * telemetry belongs to Buddy 1.  1 repurposes the terrain fields on
+ * robot/telemetry/terrain with every terrain word.  hump_dmm carries the
+ * detector's own height, the absolute incline offset from the flat-ground
+ * baseline converted with the lever, held at its 200 ms peak, in 0.1 mm.
+ * tilt_mg carries the detectable height, the height of the live hump start
+ * threshold, in 0.1 mm and not held.  It prints one console line per word
+ * with t, roll change r, pitch change p, predicted pitch pp, magnitude
+ * residual mr, the consistency flag c, the hump state h, the noise
+ * estimate n in milli-g and the detectable height dh in micrometres. */
+#ifndef B4_TASK_DIAG_TERRAIN
+#define B4_TASK_DIAG_TERRAIN        (1)
+#endif
 #define B4_TASK_REPORT_MS           (5000U)   /* Console rate report.    */
 /* NOTE: Two slots keep any queued word within 40 ms of its sample, so
  * the VC can judge freshness when it receives a word. */
@@ -100,6 +115,20 @@ b4_task_count_events (b4_types_status_t const * p_status);
  */
 static uint32_t
 b4_task_pack (b4_types_status_t const * p_status);
+
+#if B4_TASK_DIAG_TERRAIN
+/** @brief TEMPORARY: report detector height, detectable height and state.
+ *
+ * The detector height is absolute and held at its peak over 200 ms. The
+ * detectable height is not held. One console line carries the unheld
+ * values.
+ *
+ * @param p_status The status after the latest sample.
+ */
+static void
+b4_task_diag_terrain (b4_types_status_t const * p_status);
+
+#endif /* B4_TASK_DIAG_TERRAIN */
 
 /** @brief Convert micrometres to clamped 0.1 mm steps.
  *
@@ -365,6 +394,104 @@ b4_task_pack (b4_types_status_t const * p_status)
     return (word);
 }
 
+#if B4_TASK_DIAG_TERRAIN
+static void
+b4_task_diag_terrain (b4_types_status_t const * p_status)
+{
+    comms_terrain_t terrain;
+    int32_t pitch_change_mg = 0;
+    int64_t height_dmm = 0;
+    int64_t incline_abs_mg = 0;
+    uint32_t detectable_dmm = 0U;
+    static int32_t peak_dmm = 0;
+    static uint8_t calls = 0U;
+
+    /* The status values are bounded by a few times 4000 milli-g, so the
+     * subtraction cannot overflow. */
+    pitch_change_mg = p_status->pitch_mg - p_status->pitch_baseline_mg;
+    tm_printf((UB *)"[b4t] t=%u r=%d p=%d pp=%d mr=%d c=%u h=%u"
+              " n=%d dh=%u\n",
+              (UINT)p_status->sample.timestamp_ms,
+              (INT)p_status->roll_change_mg,
+              (INT)pitch_change_mg,
+              (INT)(pitch_change_mg - p_status->tilt_residual_mg),
+              (INT)p_status->magnitude_residual_mg,
+              (UINT)(true == p_status->b_tilt_consistent),
+              (UINT)p_status->hump_state,
+              (INT)p_status->noise_mg,
+              (UINT)p_status->detectable_height_um);
+
+    incline_abs_mg = (int64_t)p_status->incline_delta_mg;
+    if (incline_abs_mg < 0)
+    {
+        incline_abs_mg = -incline_abs_mg;
+    }
+    else
+    {
+        /* Already a magnitude. */
+    }
+
+    /* The cast widens the lever so the product cannot overflow. */
+    height_dmm = ((int64_t)g_b4_task_config.hump_lever_um * incline_abs_mg) /
+                 (1000 * (int64_t)B4_TASK_UM_PER_DMM);
+    if (height_dmm > (int64_t)B4_TASK_HEIGHT_MAX_DMM)
+    {
+        height_dmm = (int64_t)B4_TASK_HEIGHT_MAX_DMM;
+    }
+    else
+    {
+        /* Already within the telemetry range. */
+    }
+
+    terrain.motion = COMMS_MOTION_QUIET;
+    if (true == p_status->b_impact_event)
+    {
+        terrain.motion = COMMS_MOTION_IMPACT;
+    }
+    else if ((B4_HUMP_CANDIDATE == p_status->hump_state) ||
+             (B4_HUMP_ASCENDING == p_status->hump_state) ||
+             (B4_HUMP_PEAK == p_status->hump_state))
+    {
+        terrain.motion = COMMS_MOTION_CLIMBING_HUMP;
+    }
+    else if (B4_HUMP_DESCENDING == p_status->hump_state)
+    {
+        terrain.motion = COMMS_MOTION_DESCENDING_HUMP;
+    }
+    else
+    {
+        /* Quiet, as set above. */
+    }
+
+    /* The helper clamps the height to the telemetry range. */
+    detectable_dmm = b4_task_height_dmm(p_status->detectable_height_um);
+    terrain.tilt_mg = (int32_t)detectable_dmm;
+    /* The cast narrows a value clamped to 0..800 above. */
+    if ((int32_t)height_dmm > peak_dmm)
+    {
+        peak_dmm = (int32_t)height_dmm;
+    }
+    else
+    {
+        /* The held peak is still the largest. */
+    }
+
+    terrain.hump_dmm = peak_dmm;
+    comms_report_terrain(&terrain);
+
+    calls++;
+    if (10U <= calls)
+    {
+        peak_dmm = 0;
+        calls = 0U;
+    }
+    else
+    {
+        /* The 200 ms window is still open. */
+    }
+}
+#endif /* B4_TASK_DIAG_TERRAIN */
+
 static uint32_t
 b4_task_height_dmm (uint32_t height_um)
 {
@@ -448,6 +575,9 @@ b4_task_sample_task (INT stacd, void * p_exinf)
             word = b4_task_pack(&status);
             (void)tk_snd_mbf(g_b4_task_mbf_id, &word, (INT)sizeof(word),
                              TMO_POL);
+#if B4_TASK_DIAG_TERRAIN
+            b4_task_diag_terrain(&status);
+#endif
         }
 
         if ((now_ms - report_ms) >= B4_TASK_REPORT_MS)

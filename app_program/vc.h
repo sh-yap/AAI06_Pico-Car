@@ -27,13 +27,13 @@
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
-#define VC_SPEED_NORMAL_MM_S    (80)     /* On the line, centred.  Buddy 2's
-                                            validated loaded course speed
-                                            (was 160); gentler on 2 sensors.*/
+#define VC_SPEED_NORMAL_MM_S    (100)    /* On the line, centred.  Matches
+                                            the ramp speed so the car does
+                                            not slow at the foot of it.      */
 #define VC_SPEED_CURVE_MM_S     (50)     /* At full steer: slow on a bend so
                                             the car stays on it.  Matches
                                             Buddy 2's validated slow speed.  */
-#define VC_SPEED_HUMP_MM_S      (50)     /* Validated slow terrain speed.    */
+#define VC_SPEED_HUMP_MM_S      (100)    /* Same as normal: keep momentum.   */
 #define VC_SPEED_SEARCH_MM_S    (120)    /* While searching.  Full-steer
                                             pivot: outer wheel runs, inner
                                             ~0, swings near the spot.  Buddy

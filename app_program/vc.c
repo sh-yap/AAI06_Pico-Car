@@ -16,6 +16,14 @@
 #include <stdbool.h>
 #include "vc.h"
 
+/* TEMP-STRAIGHT-TEST: remove before push. */
+/* Test-only: 1 = drive straight at normal speed and ignore the line
+ * sensors.  Default 0, so a normal build is unchanged. */
+#ifndef VC_STRAIGHT_TEST
+#define VC_STRAIGHT_TEST    (0)
+#endif
+/* TEMP-STRAIGHT-TEST end */
+
 /* ------------------------------------------------------------------------ *
  * Private data
  * ------------------------------------------------------------------------ */
@@ -235,6 +243,24 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 
     /* A barcode is only remembered here; it is acted on at the junction. */
     store_barcode(p_vc, p_in);
+
+#if VC_STRAIGHT_TEST
+    /* TEMP-STRAIGHT-TEST: remove before push. */
+    /* Line sensors ignored: no junction, no line loss, steer 0.  Finish
+     * or an obstacle stops the car cleanly. */
+    if ((p_in->b_finish) || (p_in->b_obstacle_ahead))
+    {
+        enter_state(p_vc, VC_STATE_FINISHED, p_in->now_ms, p_out);
+    }
+    else
+    {
+        p_out->motion     = VC_MOTION_DRIVE;
+        p_out->steer      = 0;
+        p_out->speed_mm_s = curve_speed(follow_speed(p_in), 0);
+    }
+    return;
+    /* TEMP-STRAIGHT-TEST end */
+#endif
 
     if (p_in->b_finish)
     {

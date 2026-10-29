@@ -31,12 +31,19 @@
 #define B4_CFG_MAX_AXIS                       2U
 #define B4_CFG_MIN_HUMP_LEVER_UM          50000U
 #define B4_CFG_MAX_HUMP_LEVER_UM         300000U
+#define B4_CFG_MIN_CASTER_FORWARD_UM      20000U
+#define B4_CFG_MAX_CASTER_FORWARD_UM     300000U
 #define B4_CFG_MAX_SETTLE_BAND_MG           500U
 #define B4_CFG_MIN_SETTLE_SAMPLES             2U
 #define B4_CFG_MAX_BASELINE_DIVISOR         100U
 #define B4_CFG_MAX_TURN_THRESHOLD     100000000U
 #define B4_CFG_MIN_TURN_WINDOW                2U
 #define B4_CFG_MAX_TURN_WINDOW              100U
+#define B4_CFG_MAX_NOISE_SAMPLES          10000U
+/* The warm-up count saturates at 255 in b4_proc.c, so a larger limit
+ * could never be reached. */
+#define B4_CFG_MAX_WARMUP_SAMPLES           255U
+#define B4_CFG_MAX_K_TENTHS                 200U
 
 /** @brief Return an absolute milli-g value without signed overflow.
  *
@@ -125,8 +132,11 @@ b4_cfg_default (void)
      * by height / track and the lateral axis carries the height. Speed
      * changes do not disturb it, unlike the forward axis. */
     config.hump_axis = B4_CFG_AXIS_X;
-    config.forward_sign = 1;
-    config.lateral_sign = 1;
+    /* NOTE: Bench hand tests on 2026-10-29 read negative for nose up and
+     * negative for right side up, so both axes read backwards. This is
+     * consistent with the IMU facing backwards on the chassis. */
+    config.forward_sign = -1;
+    config.lateral_sign = -1;
     config.vertical_sign = 1;
     config.turn_sign = 1;
     config.gravity_reference_mg = 1000U;
@@ -136,16 +146,41 @@ b4_cfg_default (void)
     config.tilt_threshold_mg = 250U;
     config.impact_delta_threshold_mg = 700U;
     config.impact_refractory_ms = 200U;
-    /* WARNING: Provisional until a flat-ground and ramp roll trace is
-     * recorded on the car. With the 115 mm track one milli-g of roll is
-     * about 0.115 mm, so 25 mg starts a hump near 3 mm of a 10 mm ramp. */
-    config.hump_start_threshold_mg = 25U;
-    config.hump_hysteresis_mg = 15U;
-    config.hump_complete_threshold_mg = 15U;
+    /* NOTE: The floor is the measured moving noise of this car, the
+     * settled estimate on flat floor at 100 mm/s. It was 11 to 16 mg in
+     * evidence/buddy1/20261030_025325_wifi_check.log and
+     * 20261030_030046_wifi_check.log, and the lower value is taken. It is
+     * a calibration of this car and sensor, so it is measured again with
+     * flat runs whenever the speed, surface, or chassis changes. It is
+     * never derived from the ramp. The estimate starts at the floor and
+     * never goes below it. */
+    config.noise_floor_mg = 12U;
+    /* The estimate rises over 10 s at 100 Hz, so a ramp edge or a snag
+     * cannot pull the threshold up quickly, and falls over 2 s, so a
+     * smoother surface is followed within seconds. */
+    config.noise_rise_samples = 1000U;
+    config.noise_fall_samples = 200U;
+    config.noise_warmup_samples = 100U;
+    /* WARNING: Provisional. Step 2 of the noise threshold plan sets both
+     * factors from flat runs with no ramp, never from the ramp's height. */
+    config.hump_start_k_tenths = 40U;
+    config.hump_complete_k_tenths = 20U;
     config.calibration_noise_limit_mg = 35U;
     /* Left to right tyre contact distance, measured by the user as 115 mm
      * on 2026-10-29. */
     config.hump_lever_um = 115000U;
+    /* NOTE: These are the effective contact geometry, calibrated from the
+     * two static ramp lifts on 2026-10-29. After the sign flip the right
+     * lift gave a roll of about +95 mg with a pitch of about -49 mg, and the
+     * left lift gave about -91 mg with about -40 mg. The tape-measured
+     * caster distance is 80 mm and the gap is unexplained. The values are
+     * not fitted to snag data. */
+    config.caster_forward_um = 120000U;
+    config.caster_lateral_um = 4600;
+    /* WARNING: Both consistency bands are provisional. They are set from
+     * the residual peaks of the coming driving runs. */
+    config.tilt_residual_band_mg = 30U;
+    config.tilt_magnitude_band_mg = 30U;
     /* WARNING: A 30-sample window on the gentle ramp slope spreads about
      * 14 mg at 50 mm/s, so a wider band let the baseline climb the ramp
      * before the hump was confirmed and halved the height in a host
@@ -156,9 +191,9 @@ b4_cfg_default (void)
     config.filter_divisor = 4U;
     config.height_settle_samples = 30U;
     /* NOTE: The ramp crest is a point, so the wheel is never still at full
-     * height. Eight samples is 80 ms at 100 Hz, about 4 mm of travel at
-     * 50 mm/s on a 95 mm slope, which lowers the peak by well under 1 mm. */
-    config.height_mean_samples = 8U;
+     * height. 24 samples is 240 ms at 100 Hz, which averages out the
+     * roughly 100 mm/s vibration at the cost of a small drop in the peak. */
+    config.height_mean_samples = 24U;
     /* NOTE: One 1 mg baseline step per 64 settled samples is about 1.6 mg/s
      * at 100 Hz, too slow to follow a climb but enough for floor drift. */
     config.height_baseline_divisor = 64U;
@@ -243,20 +278,34 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (p_config->impact_delta_threshold_mg >
              B4_CFG_MAX_THRESHOLD_MG) ||
             (0U == p_config->impact_refractory_ms) ||
-            (p_config->hump_start_threshold_mg <=
-             p_config->hump_complete_threshold_mg) ||
-            (p_config->hump_start_threshold_mg >
-             B4_CFG_MAX_THRESHOLD_MG) ||
-            (0U == p_config->hump_hysteresis_mg) ||
-            (p_config->hump_hysteresis_mg >
-             B4_CFG_MAX_THRESHOLD_MG) ||
-            (p_config->hump_complete_threshold_mg >
-             B4_CFG_MAX_THRESHOLD_MG) ||
+            (0U == p_config->noise_floor_mg) ||
+            (p_config->noise_floor_mg > B4_CFG_MAX_SETTLE_BAND_MG) ||
+            (0U == p_config->noise_rise_samples) ||
+            (p_config->noise_rise_samples > B4_CFG_MAX_NOISE_SAMPLES) ||
+            (0U == p_config->noise_fall_samples) ||
+            (p_config->noise_fall_samples > B4_CFG_MAX_NOISE_SAMPLES) ||
+            (0U == p_config->noise_warmup_samples) ||
+            (p_config->noise_warmup_samples > B4_CFG_MAX_WARMUP_SAMPLES) ||
+            (0U == p_config->hump_complete_k_tenths) ||
+            (p_config->hump_start_k_tenths <=
+             p_config->hump_complete_k_tenths) ||
+            (p_config->hump_start_k_tenths > B4_CFG_MAX_K_TENTHS) ||
             (0U == p_config->calibration_noise_limit_mg) ||
             (p_config->calibration_noise_limit_mg >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
             (p_config->hump_lever_um < B4_CFG_MIN_HUMP_LEVER_UM) ||
             (p_config->hump_lever_um > B4_CFG_MAX_HUMP_LEVER_UM) ||
+            (p_config->caster_forward_um < B4_CFG_MIN_CASTER_FORWARD_UM) ||
+            (p_config->caster_forward_um > B4_CFG_MAX_CASTER_FORWARD_UM) ||
+            ((int64_t)p_config->caster_lateral_um >=
+             (int64_t)(p_config->hump_lever_um / 2U)) ||
+            ((int64_t)p_config->caster_lateral_um <=
+             -(int64_t)(p_config->hump_lever_um / 2U)) ||
+            (0U == p_config->tilt_residual_band_mg) ||
+            (p_config->tilt_residual_band_mg > B4_CFG_MAX_SETTLE_BAND_MG) ||
+            (0U == p_config->tilt_magnitude_band_mg) ||
+            (p_config->tilt_magnitude_band_mg >
+             B4_CFG_MAX_SETTLE_BAND_MG) ||
             (0U == p_config->height_settle_band_mg) ||
             (p_config->height_settle_band_mg > B4_CFG_MAX_SETTLE_BAND_MG) ||
             (p_config->height_baseline_gate_mg <

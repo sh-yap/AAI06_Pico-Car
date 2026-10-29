@@ -995,15 +995,31 @@ vc_task_entry (INT stacd, void * p_exinf)
         /* Faults seen during a run stay in the published word until the
          * next start, so a fault that lasted one step still shows why the
          * car stopped.  Set before the state, so the state message that
-         * reports EMERGENCY_STOP already carries the reason. */
+         * reports EMERGENCY_STOP already carries the reason.  While
+         * idle, the IMU bit follows the live value instead. */
         if ((VC_STATE_READY == before) && (VC_STATE_READY != out.state))
         {
             g_faults_seen = 0U;                 /* New run: clean slate. */
         }
 
-        /* The IMU bit joins the published word only, after vc_step(). */
-        g_faults_seen = (uint16_t) (g_faults_seen | in.serious_faults
-                                    | terrain_fault);
+        if ((VC_STATE_INITIALISE == g_vc.state) ||
+            (VC_STATE_READY == g_vc.state))
+        {
+            /* Idle: the IMU bit shows whether START would be accepted
+             * now, so a not-ready spell at boot does not linger. Other
+             * bits stay, so the reason for a stop remains visible. */
+            g_faults_seen = (uint16_t) ((g_faults_seen
+                                         & (uint16_t) ~VC_FAULT_IMU)
+                                        | in.serious_faults
+                                        | terrain_fault);
+        }
+        else
+        {
+            /* The IMU bit joins the published word only, after
+             * vc_step(). */
+            g_faults_seen = (uint16_t) (g_faults_seen | in.serious_faults
+                                        | terrain_fault);
+        }
         comms_set_fault((uint32_t) g_faults_seen);
 
         if ((VC_STATE_EMERGENCY_STOP == out.state) && out.b_state_changed)
