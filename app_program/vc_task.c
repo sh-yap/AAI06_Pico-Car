@@ -54,10 +54,14 @@
 #define VC_TASK_PRIORITY         (5)       /* Just below Motion (4).       */
 #define VC_TASK_STACK_BYTES      (4096U)   /* SMP kernel path is deep.     */
 
-#define VC_STEER_GAIN_MDEG_S     (700)     /* Turn rate per steer unit;
-                                              127 -> about 89 deg/s.  Was
-                                              400 (50 deg/s): too gentle,
-                                              ran off bends (27 Oct).      */
+#define VC_STEER_GAIN_MDEG_S     (350)     /* Turn rate per steer unit;
+                                              127 -> about 44 deg/s.  700
+                                              suited 160 mm/s; at 80 mm/s it
+                                              turned twice as sharply per mm
+                                              and zig-zagged (29 Oct: full
+                                              left to full right in 0.2 s).
+                                              350 at 80 = 700 at 160 per mm.
+                                              400 at 160 ran off bends.    */
 #define VC_TRACK_HALF_MM         (60)      /* Half the 119 mm track width. */
 #define VC_TURN_INNER_FLOOR_MM_S (10)      /* Keep the inner wheel at least
                                               this fast forward in a turn so

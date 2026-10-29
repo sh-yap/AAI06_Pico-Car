@@ -30,6 +30,17 @@
 #define IR_CENTRE_THRESHOLD    1563U
 #define IR_RIGHT_THRESHOLD     1675U
 
+/*
+ * Centre reading with the sensor over the middle of the line
+ * (2026-10-29: ~2290).  Between this and IR_CENTRE_THRESHOLD the line
+ * is sliding off the centre sensor to the left (the right sensor sees
+ * it first if it moves right), so the error ramps 0 .. -LINE_ERROR_MAX
+ * instead of jumping to full left once the centre turns white.
+ * Re-measure if the sensor is moved; readings above it count as fully
+ * on the line.
+ */
+#define IR_CENTRE_FULL_BLACK   2300U
+
 
 /* Junction = both line sensors black for this many consecutive cycles. */
 #define JUNCTION_DEBOUNCE_COUNT    3U
@@ -179,6 +190,24 @@ int8_t line_get_error(ir_readings_t readings)
         }
 
         return (last_seen == LINE_RIGHT) ? LINE_ERROR_MAX : -LINE_ERROR_MAX;
+    }
+
+    /*
+     * Only the centre sensor on the line: steer left in proportion to
+     * how far its reading has dropped below fully-on-the-line.
+     */
+    if (right_strength == 0U)
+    {
+        if (readings.centre >= IR_CENTRE_FULL_BLACK)
+        {
+            return 0;
+        }
+
+        return (int8_t)(-(int32_t)(
+            (((uint32_t)(IR_CENTRE_FULL_BLACK - readings.centre)
+              * (uint32_t)LINE_ERROR_MAX)
+             + ((IR_CENTRE_FULL_BLACK - IR_CENTRE_THRESHOLD) / 2U))
+            / (IR_CENTRE_FULL_BLACK - IR_CENTRE_THRESHOLD)));
     }
 
     /* Rounded; result is 0..LINE_ERROR_MAX since right <= total. */
