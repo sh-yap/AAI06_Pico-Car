@@ -10,3 +10,6 @@ uint32_t in_w(uint32_t address);
 #define GPIO_PUE 2U
 #define GPIO_SHEMITT 4U
 void out_w(uint32_t address, uint32_t value);
+#define IO_BANK0_BASE 0x40014000U
+#define GPIO_IN 0xD0000004U
+void set_w(uint32_t address, uint32_t value);

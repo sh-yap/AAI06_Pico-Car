@@ -27,20 +27,14 @@
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
-#define VC_SPEED_NORMAL_MM_S    (160)    /* On the line, centred.  Was 200:
-                                            too fast for 2 line sensors.   */
-#define VC_SPEED_CURVE_MM_S     (90)     /* At full steer: slow down on a
-                                            bend so the car stays on it.   */
-#define VC_SPEED_HUMP_MM_S      (100)    /* 50 % cap while on a hump.        */
-#define VC_SPEED_SEARCH_MM_S    (120)    /* While searching.  With full steer
-                                            the outer wheel runs ~230 and the
-                                            inner ~0, so the car swings round
-                                            near the spot (steer 60 ran ~0.5
-                                            m past a bend, 27 Oct).  60 and
-                                            80 did not move on the floor.    */
+#define VC_SPEED_NORMAL_MM_S    (80)     /* Validated loaded course speed.   */
+#define VC_SPEED_CURVE_MM_S     (50)     /* At full steer: slow down on a
+                                            bend (validated slow speed).     */
+#define VC_SPEED_HUMP_MM_S      (50)     /* Validated slow terrain speed.     */
+#define VC_SPEED_SEARCH_MM_S    (50)     /* Validated slow line search.       */
 #define VC_SEARCH_STEER         (127)    /* Full steer towards the side the
                                             line was last seen on.           */
-#define VC_TURN_TIMEOUT_MS      (3000U)  /* TBC: 2 x expected turn time.     */
+#define VC_TURN_TIMEOUT_MS      (8000U)  /* Safe until Stage 7 timing data.   */
 #define VC_SCAN_TIMEOUT_MS      (3000U)  /* 1.5 s scan budget (A7) x 2.      */
 #define VC_BYPASS_TIMEOUT_MS    (6000U)  /* 3 s bypass target x 2.           */
 #define VC_REACQUIRE_TIMEOUT_MS (4000U)  /* TBC: from bypass geometry.       */

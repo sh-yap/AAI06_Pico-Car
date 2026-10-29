@@ -10,12 +10,63 @@
 - Clear lane length:
 - Tester: Suen Hong
 
-Correction from code review: each run requests a total of one second of RTOS
-delays, but actual wall time has not been measured. Tick rounding and scheduling
-make the real duration longer. Do not equate travel in millimetres with speed
-in mm/s or use these distances to calibrate a maximum physical speed.
+The original image requested one second by summing RTOS delays, so its earlier
+travel measurements must not be treated as exact mm/s. The rebuilt image now
+uses the RP2040 microsecond clock as its deadline and optionally prints the
+actual elapsed microseconds and wheel counts after braking. Earlier results
+below remain approximate historical evidence.
 Measure from the same point on the car each time. Record right drift as `R`,
 left drift as `L`, or `straight`. Record whether each wheel visibly starts.
+
+## Minimum clearance run - do this next
+
+The earlier sweep is enough to skip unused 275-350 permille cases. Select
+forward 200 permille and complete five trials, then select reverse 200 permille
+and complete five trials. If either direction has any failed start, switch
+only that direction to 225 permille and restart its five-trial set.
+
+| Direction | PWM permille | Trial | Travel mm | Drift | Both wheels start | Result code | Notes |
+| --- | ---: | ---: | ---: | --- | --- | ---: | --- |
+| Forward | 200 | 1 | | | | | |
+| Forward | 200 | 2 | | | | | |
+| Forward | 200 | 3 | | | | | |
+| Forward | 200 | 4 | | | | | |
+| Forward | 200 | 5 | | | | | |
+| Reverse | 200 | 1 | | | | | |
+| Reverse | 200 | 2 | | | | | |
+| Reverse | 200 | 3 | | | | | |
+| Reverse | 200 | 4 | | | | | |
+| Reverse | 200 | 5 | | | | | |
+
+Clearance criteria: both wheels start in all five trials in each direction;
+no result code 6 or 7; test setup fields are completed. High/nominal/minimum
+battery testing, WiFi/MQTT loading and unused high-duty cases are deferred.
+
+### User run reported after the software audit
+
+The tester completed five forward trials believed to be at 200 permille. The
+three reverse trials were initially reported as 200 permille, then corrected:
+the tester believes reverse 150 permille was selected. A separate forward
+150-permille check also travelled about 90 mm. Result beep codes and explicit
+per-wheel start observations were not recorded.
+
+| Direction | Selected PWM | Trial | Approx. travel | Drift/heading | Result code / wheel start |
+| --- | ---: | ---: | ---: | --- | --- |
+| Forward | 200 permille (believed) | 1 | 110 mm | Left | Not recorded; vehicle moved |
+| Forward | 200 permille (believed) | 2 | 130 mm | Straight | Not recorded; vehicle moved |
+| Forward | 200 permille (believed) | 3 | 130 mm | Straight | Not recorded; vehicle moved |
+| Forward | 200 permille (believed) | 4 | 130 mm | Straight | Not recorded; vehicle moved |
+| Forward | 200 permille (believed) | 5 | 130 mm | Straight | Not recorded; vehicle moved |
+| Reverse | 150 permille (corrected, believed) | 1 | 90 mm | Straight | Not recorded; vehicle moved |
+| Reverse | 150 permille (corrected, believed) | 2 | 90 mm | Slightly faced right | Not recorded; vehicle moved |
+| Reverse | 150 permille (corrected, believed) | 3 | 90 mm | Straight | Not recorded; vehicle moved |
+| Forward | 150 permille | extra check | 90 mm | Not recorded | Not recorded; vehicle moved |
+
+The user elected to skip the remaining two reverse repetitions and proceed to
+low-speed closed-loop work. Therefore Stage 4 is not formally cleared against
+the five-repeat criteria. The results are still sufficient to show that raw
+200 permille is faster than desired for the course and that raw PWM percentage
+is not an appropriate mission-speed command.
 
 ## Initial sweep
 
@@ -91,3 +142,8 @@ Repeat for forward and reverse.
 - First PWM with acceptable straightness:
 - Any result code 6 or 7:
 - Configuration changes selected from these measurements:
+- Five-repeat forward start passed:
+- Five-repeat reverse start passed:
+- Stage 4 clearance decision:
+- Tester decision: remaining reverse repeats intentionally skipped; proceed
+  provisionally to closed-loop low-speed testing.
