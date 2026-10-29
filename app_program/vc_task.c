@@ -353,7 +353,7 @@ nav_from_buddy3 (nav_command_t nav)
 static char
 barcode_char (barcode_t code)
 {
-    static char const g_chars[] = "-ABCDFZ?";  /* NONE, A..D, F, Z, INVALID */
+    static char const g_chars[] = "-AFZ?";     /* NONE, A, F, Z, INVALID */
     char              c         = '?';
 
     if ((uint32_t) code < (sizeof(g_chars) - 1U))

@@ -31,14 +31,39 @@
  * This is only a storage limit, NOT the assumed
  * barcode length.
  */
-#define BARCODE_MAX_EDGES    32U
+#define BARCODE_MAX_EDGES    64U
 
 /*
- * TEMPORARY end-of-barcode timeout, in milliseconds.
- * If no transition occurs for this long while a capture
+ * End of barcode, in encoder counts (average of both wheels).
+ * If the car travels this far with no transition while a capture
  * is in progress, the capture is assumed complete.
+ * Measured on the car 29 Oct (after Buddy 2's encoder changes):
+ * narrow 3 mm ~ 37 counts, wide 9 mm ~ 110, so ~12.3 counts/mm
+ * (matches Motion's 2536 counts/rev, 57.7 mm wheel, x1.14 floor
+ * scale).  240 counts ~ 19.5 mm: over twice the widest element and
+ * less than the white gap around a barcode.
+ * Distance, not time, so the car stopping or slowing on a
+ * barcode does not split the capture.
  */
-#define BARCODE_TIMEOUT_MS   200U
+#define BARCODE_END_GAP_COUNTS   240
+
+/*
+ * An edge that undoes the previous one within this many counts
+ * (~0.3 mm, a narrow element is ~37) is sensor flicker, e.g. while
+ * stopped on the boundary of a bar: both edges are dropped.
+ */
+#define BARCODE_MIN_ELEMENT_COUNTS   4
+
+/* Captures with fewer edges are specks/noise and are dropped silently. */
+#define BARCODE_MIN_EDGES        6U
+
+/*
+ * Duplicate guard: after a valid barcode, ignore the sensor for this
+ * many counts so one barcode gives at most one command (Tribunal 1).
+ * 2460 counts ~ 200 mm at ~12.3 counts/mm: longer than the barcode
+ * (141 mm) plus its white margins.
+ */
+#define BARCODE_GUARD_COUNTS     2460
 
 /* Code 39: 9 elements per character (5 bars, 4 spaces), 3 wide. */
 #define C39_ELEMENTS_PER_CHAR    9U
@@ -95,9 +120,10 @@ static c39_symbol_t const c39_table[] =
 
 /*
  * Course characters and the barcode they report.
- * PROVISIONAL: A-D per the write-up example. Edit this table
- * once the final course barcodes are confirmed (samples so far:
- * *A* and *Z*). Characters not listed are reported as INVALID.
+ * Course barcodes are *A*, *F* and *Z*.
+ * HARDCODED for now: update this table and barcode_get_command()
+ * if the codes change on exam day.
+ * Characters not listed are reported as INVALID.
  */
 typedef struct
 {
@@ -108,9 +134,6 @@ typedef struct
 static course_code_t const course_codes[] =
 {
     { 'A', BARCODE_A },
-    { 'B', BARCODE_B },
-    { 'C', BARCODE_C },
-    { 'D', BARCODE_D },
     { 'F', BARCODE_F },
     { 'Z', BARCODE_Z },
 };
@@ -140,16 +163,31 @@ static bool barcode_overflow = false;
 
 
 /*
- * Timestamp of the last recorded edge (or acquisition start,
- * if no edge has occurred yet). Used by barcode_check_timeout()
+ * Encoder position of the last recorded edge (or acquisition start,
+ * if no edge has occurred yet). Used by barcode_check_end()
  * to detect the end of a barcode.
  */
-static uint32_t last_activity_timestamp_ms = 0U;
+static int32_t last_activity_position = 0;
 
 
 /* Result decoded when the capture was finished. */
 static barcode_t decoded_code = BARCODE_NONE;
 static char decoded_char = C39_CHAR_NONE;
+
+
+/*
+ * Duplicate guard. Survives barcode_reset() on purpose, so that
+ * clearing a used capture does not re-arm the sensor early.
+ */
+static bool guard_active = false;
+static int32_t guard_position = 0;
+
+
+/* Distance in encoder counts, either direction. */
+static int32_t abs_counts(int32_t delta)
+{
+    return (delta < 0) ? -delta : delta;
+}
 
 
 /*
@@ -259,48 +297,47 @@ static char c39_decode(uint32_t const widths[C39_ELEMENTS], bool reversed)
 }
 
 
-/* Index of the first white->black edge (0, or 1 if capture began on black). */
-static uint8_t first_black_edge(void)
-{
-    return barcode_edges[0].is_black ? 0U : 1U;
-}
-
-
-/* Decode the captured edges into the data character, or C39_CHAR_NONE. */
+/*
+ * Decode the captured edges into the data character, or C39_CHAR_NONE.
+ * Specks or flicker before/after the barcode add extra edges, so every
+ * window of C39_EDGES edges starting on a white->black edge is tried;
+ * the '*' start/stop check rejects the wrong ones.
+ */
 static char barcode_decode_char(void)
 {
     uint32_t widths[C39_ELEMENTS];
     uint8_t first;
     uint8_t i;
-    int32_t width;
-    char character;
+    char character = C39_CHAR_NONE;
 
-    if (barcode_overflow)
+    if (barcode_overflow || (edge_count < C39_EDGES))
     {
         return C39_CHAR_NONE;
     }
 
-    first = first_black_edge();
-
-    if ((uint8_t)(edge_count - first) != C39_EDGES)
+    for (first = 0U;
+         (first + C39_EDGES <= edge_count) && (character == C39_CHAR_NONE);
+         first++)
     {
-        return C39_CHAR_NONE;
-    }
+        if (!barcode_edges[first].is_black)
+        {
+            continue;
+        }
 
-    /* Absolute width, so reversing wheels still gives positive widths. */
-    for (i = 0U; i < C39_ELEMENTS; i++)
-    {
-        width = barcode_edges[first + i + 1U].encoder_position
-                - barcode_edges[first + i].encoder_position;
+        /* Absolute width, so reversing wheels still gives positive widths. */
+        for (i = 0U; i < C39_ELEMENTS; i++)
+        {
+            widths[i] = (uint32_t)abs_counts(
+                barcode_edges[first + i + 1U].encoder_position
+                - barcode_edges[first + i].encoder_position);
+        }
 
-        widths[i] = (width < 0) ? (uint32_t)(-width) : (uint32_t)width;
-    }
+        character = c39_decode(widths, false);
 
-    character = c39_decode(widths, false);
-
-    if (character == C39_CHAR_NONE)
-    {
-        character = c39_decode(widths, true);
+        if (character == C39_CHAR_NONE)
+        {
+            character = c39_decode(widths, true);
+        }
     }
 
     return character;
@@ -326,6 +363,7 @@ static barcode_t course_code_of(char character)
 
 void barcode_init(void)
 {
+    guard_active = false;
     barcode_reset();
 }
 
@@ -361,16 +399,34 @@ void barcode_update(
 
 
     /*
+     * Duplicate guard: ignore the sensor until the car has
+     * moved BARCODE_GUARD_COUNTS past the last valid barcode.
+     * Measured either way, so reversing or a U-turn over the
+     * same barcode does not trigger it again.
+     */
+    if (guard_active)
+    {
+        if (abs_counts(encoder_position - guard_position)
+            < BARCODE_GUARD_COUNTS)
+        {
+            return;
+        }
+
+        guard_active = false;
+    }
+
+
+    /*
      * First sample:
      * establish the initial black/white state.
      * No edge is recorded because no transition
-     * has happened yet. Acquisition timing starts here.
+     * has happened yet. Acquisition distance starts here.
      */
     if (!state_valid)
     {
         previous_state = is_black;
         state_valid = true;
-        last_activity_timestamp_ms = timestamp_ms;
+        last_activity_position = encoder_position;
         return;
     }
 
@@ -388,7 +444,18 @@ void barcode_update(
      * A black/white transition has occurred.
      */
     previous_state = is_black;
-    last_activity_timestamp_ms = timestamp_ms;
+    last_activity_position = encoder_position;
+
+
+    /* Flicker: this edge undoes the last one almost in place. */
+    if ((edge_count > 0U) &&
+        (abs_counts(encoder_position -
+                    barcode_edges[edge_count - 1U].encoder_position)
+         < BARCODE_MIN_ELEMENT_COUNTS))
+    {
+        edge_count--;
+        return;
+    }
 
 
     /*
@@ -406,12 +473,6 @@ void barcode_update(
             encoder_position;
 
         edge_count++;
-
-        /* All edges of a *X* barcode seen: finish now, not after the timeout. */
-        if (edge_count == (uint8_t)(first_black_edge() + C39_EDGES))
-        {
-            barcode_finish_capture();
-        }
     }
     else
     {
@@ -436,17 +497,24 @@ void barcode_finish_capture(void)
      * so that barcode_get_code() can return
      * BARCODE_INVALID.
      */
-    if (edge_count >= 2U)
+    if (edge_count >= BARCODE_MIN_EDGES)
     {
         decoded_char = barcode_decode_char();
         decoded_code = course_code_of(decoded_char);
         barcode_ready = true;
+
+        /* Valid course barcode: start the duplicate guard at its last edge. */
+        if (decoded_code != BARCODE_INVALID)
+        {
+            guard_active = true;
+            guard_position = last_activity_position;
+        }
     }
     else
     {
         /*
-         * Too few edges to be a barcode (e.g. a single stray
-         * edge). Discard it so it is not merged into the next
+         * Too few edges to be a barcode (a stray edge or a
+         * speck). Discard it so it is not merged into the next
          * capture.
          */
         barcode_reset();
@@ -454,12 +522,10 @@ void barcode_finish_capture(void)
 }
 
 
-void barcode_check_timeout(uint32_t timestamp_ms)
+void barcode_check_end(int32_t encoder_position)
 {
-    uint32_t elapsed_ms;
-
     /*
-     * Nothing to time out if no acquisition is in
+     * Nothing to end if no acquisition is in
      * progress, or a completed capture is already
      * waiting to be processed.
      */
@@ -468,14 +534,9 @@ void barcode_check_timeout(uint32_t timestamp_ms)
         return;
     }
 
-    /*
-     * Unsigned subtraction handles timestamp wraparound
-     * correctly as long as the true elapsed time is less
-     * than about half the uint32_t range.
-     */
-    elapsed_ms = timestamp_ms - last_activity_timestamp_ms;
-
-    if (elapsed_ms >= BARCODE_TIMEOUT_MS)
+    /* Either direction counts as travel. */
+    if (abs_counts(encoder_position - last_activity_position)
+        >= BARCODE_END_GAP_COUNTS)
     {
         barcode_finish_capture();
     }
@@ -510,6 +571,24 @@ char barcode_get_char(void)
 }
 
 
+uint8_t barcode_get_edge_count(void)
+{
+    return edge_count;
+}
+
+
+bool barcode_get_edge(uint8_t index, barcode_edge_t *p_edge)
+{
+    if ((p_edge == 0) || (index >= edge_count))
+    {
+        return false;
+    }
+
+    *p_edge = barcode_edges[index];
+    return true;
+}
+
+
 nav_command_t barcode_get_command(void)
 {
     barcode_t code;
@@ -533,30 +612,18 @@ nav_command_t barcode_get_command(void)
      * Convert the decoded barcode into the
      * corresponding navigation command.
      */
-    /*
-     * COURSE MAPPING - the lecturer gives the meaning of A, F and Z on the
-     * day.  Until then: A = LEFT, F = RIGHT, Z = U-TURN (team choice for
-     * testing).  Change only the A / F / Z lines below.  B, C, D are the
-     * brief's example codes, kept for bench tests.
-     */
     switch (code)
     {
-        case BARCODE_A:                 /* Course code. */
+        case BARCODE_A:
             command = NAV_LEFT;
             break;
 
-        case BARCODE_F:                 /* Course code. */
-        case BARCODE_B:
+        case BARCODE_F:
             command = NAV_RIGHT;
             break;
 
-        case BARCODE_C:
+        case BARCODE_Z:
             command = NAV_STRAIGHT;
-            break;
-
-        case BARCODE_Z:                 /* Course code. */
-        case BARCODE_D:
-            command = NAV_UTURN;
             break;
 
         case BARCODE_NONE:

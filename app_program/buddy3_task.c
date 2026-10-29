@@ -23,11 +23,19 @@
 
 /*
  * Threshold for the dedicated barcode IR sensor (GP28 / ADC2).
- * Measured 2026-10-27, room light:
- *   white paper <= 277, track tape >= 2725,
- *   inkjet barcode: wide bar ~600, thin bar ~240 (not visible in IR).
+ * Measured 2026-10-27, room light, on the course barcode print, after
+ * rotating the sensor so emitter and receiver sit side by side along
+ * the bars (across the direction of travel), ~3-5 mm above the paper
+ * (car stationary, sensor centred on each element):
+ *   thin 3 mm white gap between bars ~1060, thin 3 mm bar ~3730.
+ * 2026-10-29 driving test (*F*): white ~150-260, but a thin bar next to
+ * a wide white space read only ~2080, so 2400 missed it and the capture
+ * ended early.  PROVISIONAL: ~midway between thin gap (~1060) and that
+ * thin bar (~2080).  Re-measure both (car still, sensor centred on the
+ * thin bar beside a wide space, and on the thin gap between two wide
+ * bars) and set the threshold midway.
  */
-#define BARCODE_IR_THRESHOLD     1300U
+#define BARCODE_IR_THRESHOLD     1600U
 
 /*
  * Output message buffer - default choice (message buffer, matching
@@ -48,6 +56,40 @@
 static const char *const line_state_name[] = {
     "LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION"
 };
+
+/*
+ * Print the finished capture: raw character, edge count, then each
+ * element as B (bar) or W (space) with its width in encoder counts
+ * (~12.3 counts/mm, so narrow ~37, wide ~110).
+ */
+static void debug_print_edges(void)
+{
+    uint8_t count = barcode_get_edge_count();
+    uint8_t i;
+    barcode_edge_t prev;
+    barcode_edge_t edge;
+    int32_t width;
+    char raw = barcode_get_char();
+
+    tm_printf((UB *)"[buddy3] edges=%d char=%c widths:",
+              (INT)count, (raw != '\0') ? raw : '?');
+
+    for (i = 1U; i < count; i++)
+    {
+        (void)barcode_get_edge((uint8_t)(i - 1U), &prev);
+        (void)barcode_get_edge(i, &edge);
+        width = edge.encoder_position - prev.encoder_position;
+
+        if (width < 0)
+        {
+            width = -width;
+        }
+
+        tm_printf((UB *)" %c%d", prev.is_black ? 'B' : 'W', (INT)width);
+    }
+
+    tm_printf((UB *)"\n");
+}
 #endif
 
 ID buddy3_output_mbfid = -1;
@@ -126,11 +168,16 @@ void buddy3_task(INT stacd, void *exinf)
             (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
 
         barcode_update(barcode_is_black, timestamp_ms, encoder_position);
-        barcode_check_timeout(timestamp_ms);
+        barcode_check_end(encoder_position);
 
 #if BUDDY3_DEBUG
         /* Sample before barcode_get_command(), which clears it. */
         barcode_was_ready = barcode_available();
+
+        if (barcode_was_ready)
+        {
+            debug_print_edges();
+        }
 #endif
 
         /*

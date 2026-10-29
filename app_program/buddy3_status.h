@@ -15,7 +15,7 @@
  *   bits  0-2   line state      3 bits  0 LEFT .. 4 JUNCTION, 5-7 reserved
  *   bits  3-10  line error      8 bits  signed, -127 left .. +127 right
  *   bits 11-12  line sensors    2 bits  LINE_SENSOR_* bits, 1 = black
- *   bits 13-15  barcode         3 bits  0 NONE .. 5 INVALID, 6-7 reserved
+ *   bits 13-15  barcode         3 bits  0 NONE .. 4 INVALID, 5-7 reserved
  *   bits 16-18  nav command     3 bits  0 NONE .. 4 UTURN, 5-7 reserved
  *   bits 19-31  reserved        always 0
  *

@@ -24,7 +24,8 @@
 #define WIDE_UM            9000     /* 9 mm  */
 #define QUIET_UM           30000    /* white before and after */
 #define SAMPLE_MS          10U      /* Buddy 3 task period */
-#define COUNTS_PER_M       12150    /* 2480 / (pi * 65 mm) per mm, x1000 */
+#define COUNTS_PER_M       12300    /* measured on the car 29 Oct: 3 mm ~ 37 counts */
+#define END_GAP            240      /* BARCODE_END_GAP_COUNTS */
 #define PHASES             50U      /* start offsets within one sample */
 
 #define MAX_ELEMENTS       29U
@@ -41,11 +42,9 @@ static uint32_t checks = 0U;
 /* Code 39 patterns, first element = bit 8, 1 = wide. */
 static uint16_t const PAT_STAR = 0x094U;
 static uint16_t const PAT_A    = 0x109U;
-static uint16_t const PAT_B    = 0x049U;
-static uint16_t const PAT_C    = 0x148U;
-static uint16_t const PAT_D    = 0x019U;
+static uint16_t const PAT_B    = 0x049U;   /* valid Code 39, not used */
 static uint16_t const PAT_E    = 0x118U;   /* valid Code 39, not used */
-static uint16_t const PAT_F    = 0x058U;   /* course code */
+static uint16_t const PAT_F    = 0x058U;
 static uint16_t const PAT_Z    = 0x0D0U;   /* sample *Z* from Barcode Sample.pdf */
 
 /* Element widths used by build(); half size for the small PDF print. */
@@ -164,7 +163,7 @@ drive(int32_t speed_mm_s, int32_t phase_um, int32_t direction)
 
         barcode_update(is_black_at(pos_um), t_ms,
                        (int32_t)(direction * counts));
-        barcode_check_timeout(t_ms);
+        barcode_check_end((int32_t)(direction * counts));
 
         if (barcode_available())
         {
@@ -190,11 +189,8 @@ test_decodes_each_code(void)
 {
     static struct { uint16_t pat; barcode_t code; nav_command_t nav; } const cases[] = {
         { PAT_A, BARCODE_A, NAV_LEFT },
-        { PAT_B, BARCODE_B, NAV_RIGHT },
-        { PAT_C, BARCODE_C, NAV_STRAIGHT },
-        { PAT_D, BARCODE_D, NAV_UTURN },
         { PAT_F, BARCODE_F, NAV_RIGHT },
-        { PAT_Z, BARCODE_Z, NAV_UTURN },
+        { PAT_Z, BARCODE_Z, NAV_STRAIGHT },
     };
     uint32_t i;
     uint32_t p;
@@ -237,9 +233,9 @@ test_decodes_each_code(void)
         for (t = 0U; t < 10000U; t += SAMPLE_MS)
         {
             int32_t pos = -QUIET_UM + (50 * (int32_t)t);
-            barcode_update(is_black_at(pos), t,
-                           (int32_t)(((int64_t)(pos + QUIET_UM) * COUNTS_PER_M) / 1000000));
-            barcode_check_timeout(t);
+            int32_t enc = (int32_t)(((int64_t)(pos + QUIET_UM) * COUNTS_PER_M) / 1000000);
+            barcode_update(is_black_at(pos), t, enc);
+            barcode_check_end(enc);
 
             if (barcode_available())
             {
@@ -256,11 +252,13 @@ test_decodes_each_code(void)
 static void
 test_rejects(void)
 {
-    /* Valid Code 39 character that is not A-D. */
+    /* Valid Code 39 characters that are not course codes. */
     build(PAT_E, false);
     check("unused character E is INVALID", drive(50, 0, 1) == BARCODE_INVALID);
+    build(PAT_B, false);
+    check("unused character B is INVALID", drive(50, 0, 1) == BARCODE_INVALID);
 
-    /* Sample *Z*: a course code, U-turn for testing. */
+    /* Sample *Z* from Barcode Sample.pdf. */
     build(PAT_Z, false);
     check("sample *Z* is BARCODE_Z", drive(50, 0, 1) == BARCODE_Z);
     check("sample *Z* raw character is 'Z'", last_char == 'Z');
@@ -294,17 +292,214 @@ test_rejects(void)
         check("equal widths are INVALID", drive(50, 0, 1) == BARCODE_INVALID);
     }
 
-    /* Too few edges, then timeout. */
+    /* A speck (too few edges) is dropped silently. */
     barcode_init();
     barcode_update(false, 0U, 0);
-    barcode_update(true, 10U, 100);
-    barcode_update(false, 20U, 200);
-    barcode_update(true, 30U, 300);
-    barcode_check_timeout(300U);
+    barcode_update(true, 10U, 20);
+    barcode_update(false, 20U, 40);
+    barcode_check_end(40 + END_GAP);
+    check("speck is not reported", !barcode_available());
+
+    /* Part of a barcode, then the end gap. */
+    {
+        uint32_t e;
+        barcode_init();
+        barcode_update(false, 0U, 0);
+
+        for (e = 1U; e <= 8U; e++)
+        {
+            barcode_update((e % 2U) == 1U, 10U * e, 37 * (int32_t)e);
+        }
+    }
+    barcode_check_end(37 * 8);
+    check("no end while still within the gap", !barcode_available());
+    barcode_check_end((37 * 8) + END_GAP);
     check("incomplete barcode is INVALID",
           barcode_available() && (barcode_get_code() == BARCODE_INVALID));
     check("INVALID gives NAV_NONE", barcode_get_command() == NAV_NONE);
     check("reset after command", !barcode_available());
+}
+
+
+/*
+ * Car stops for 2 s in the middle of the barcode (hand push, or the
+ * car braking), with the sensor flickering on a bar boundary: the
+ * capture must wait, not end early, and ignore the flicker.
+ */
+static void
+test_stop_mid_barcode(void)
+{
+    uint32_t t;
+    int32_t pos = -QUIET_UM;
+    int32_t const stop_at_um = 70000;    /* inside the data character */
+    uint32_t stopped_ms = 0U;
+    barcode_t code = BARCODE_NONE;
+    bool black;
+
+    build(PAT_Z, false);
+    barcode_init();
+
+    for (t = 0U; t < 20000U; t += SAMPLE_MS)
+    {
+        int32_t enc = (int32_t)(((int64_t)(pos + QUIET_UM) * COUNTS_PER_M) / 1000000);
+
+        black = is_black_at(pos);
+
+        if ((stopped_ms > 0U) && (stopped_ms < 2000U) && ((t / SAMPLE_MS) % 2U == 0U))
+        {
+            black = !black;    /* flicker while stopped */
+        }
+
+        barcode_update(black, t, enc);
+        barcode_check_end(enc);
+
+        if (barcode_available())
+        {
+            code = barcode_get_code();
+            (void)barcode_get_command();
+            break;
+        }
+
+        if ((pos >= stop_at_um) && (stopped_ms < 2000U))
+        {
+            stopped_ms += SAMPLE_MS;
+        }
+        else
+        {
+            pos += 50 * (int32_t)SAMPLE_MS;
+        }
+    }
+
+    check("2 s stop with flicker mid-barcode still decodes *Z*", code == BARCODE_Z);
+}
+
+
+/*
+ * Dark specks shortly before the barcode (paper edge, tape) and flicker
+ * at the start: seen on the car, they used to split the capture.
+ */
+static void
+test_specks_before_barcode(void)
+{
+    uint32_t t;
+    int32_t pos = -QUIET_UM;
+    barcode_t code = BARCODE_NONE;
+    bool black;
+
+    build(PAT_F, false);
+    barcode_init();
+
+    /* Flicker in place before moving. */
+    barcode_update(false, 0U, 0);
+    barcode_update(true, 0U, 0);
+    barcode_update(false, 0U, 1);
+    barcode_update(true, 0U, 1);
+    barcode_update(false, 0U, 1);
+
+    for (t = 0U; t < 20000U; t += SAMPLE_MS)
+    {
+        int32_t enc = (int32_t)(((int64_t)(pos + QUIET_UM) * COUNTS_PER_M) / 1000000);
+
+        /* Specks 12 and 7 mm before the first bar: within the end gap. */
+        black = is_black_at(pos) ||
+                ((pos >= -12000) && (pos < -10000)) ||
+                ((pos >= -7000) && (pos < -6000));
+
+        barcode_update(black, t, enc);
+        barcode_check_end(enc);
+
+        if (barcode_available())
+        {
+            code = barcode_get_code();
+            (void)barcode_get_command();
+            break;
+        }
+
+        pos += 50 * (int32_t)SAMPLE_MS;
+    }
+
+    check("specks + flicker before barcode still decodes *F*", code == BARCODE_F);
+}
+
+
+/*
+ * Drive at 100 mm/s over two copies of the current barcode, the second
+ * starting gap_mm after the first ends. Returns valid decodes seen.
+ */
+static uint32_t
+count_valid_two_barcodes(int32_t gap_mm)
+{
+    int32_t second_um = barcode_len_um + (gap_mm * 1000);
+    int32_t end_um = second_um + barcode_len_um + QUIET_UM;
+    int32_t pos_um;
+    int32_t enc;
+    uint32_t t_ms;
+    uint32_t valid = 0U;
+    barcode_t code;
+
+    barcode_init();
+
+    for (t_ms = 0U; ; t_ms += SAMPLE_MS)
+    {
+        pos_um = -QUIET_UM + (100 * (int32_t)t_ms);
+
+        if (pos_um > end_um)
+        {
+            break;
+        }
+
+        enc = (int32_t)(((int64_t)(pos_um + QUIET_UM) * COUNTS_PER_M) / 1000000);
+
+        barcode_update(is_black_at(pos_um) || is_black_at(pos_um - second_um),
+                       t_ms, enc);
+        barcode_check_end(enc);
+
+        if (barcode_available())
+        {
+            code = barcode_get_code();
+            (void)barcode_get_command();
+
+            if ((code != BARCODE_NONE) && (code != BARCODE_INVALID))
+            {
+                valid++;
+            }
+        }
+    }
+
+    return valid;
+}
+
+
+static void
+test_slow_and_guard(void)
+{
+    /* Encoder count at the barcode's last edge in drive(). */
+    int32_t const end_enc =
+        (int32_t)(((int64_t)(barcode_len_um + QUIET_UM) * COUNTS_PER_M) / 1000000);
+    uint32_t t;
+    bool any;
+
+    /* Distance-based end: slow cars are not cut off mid-barcode. */
+    build(PAT_A, false);
+    check("decodes at 20 mm/s", drive(20, 0, 1) == BARCODE_A);
+    check("decodes at 10 mm/s", drive(10, 0, 1) == BARCODE_A);
+
+    /* Duplicate guard: a barcode within 200 mm of the last one is ignored. */
+    check("second barcode 30 mm later is ignored",
+          count_valid_two_barcodes(30) == 1U);
+    check("second barcode 250 mm later is read",
+          count_valid_two_barcodes(250) == 2U);
+
+    /* Car stopped right after a barcode: flicker must not re-trigger it. */
+    (void)drive(50, 0, 1);
+    any = false;
+    for (t = 0U; t < 2000U; t += SAMPLE_MS)
+    {
+        barcode_update((t / SAMPLE_MS) % 2U == 0U, 100000U + t, end_enc + 300);
+        barcode_check_end(end_enc + 300);
+        any |= barcode_available();
+    }
+    check("guard holds while the car is not moving", !any);
 }
 
 
@@ -354,6 +549,9 @@ main(void)
 {
     test_decodes_each_code();
     test_rejects();
+    test_stop_mid_barcode();
+    test_slow_and_guard();
+    test_specks_before_barcode();
     jitter_ms = 2;
     report_speed_sweep(3000, "narrow 3 mm (course spec)");
     report_speed_sweep(1500, "narrow 1.5 mm (small PDF print)");

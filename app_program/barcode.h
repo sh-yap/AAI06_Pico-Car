@@ -7,17 +7,14 @@
 #include "navigation.h"
 
 
-/* Barcode identifiers. Code 39 *A* .. *D*; anything else is INVALID. */
+/* Barcode identifiers. Course codes *A*, *F*, *Z*; anything else is INVALID. */
 typedef enum
 {
     BARCODE_NONE = 0,
     BARCODE_A,
-    BARCODE_B,
-    BARCODE_C,
-    BARCODE_D,
-    BARCODE_F,          /* Course uses A, F, Z (lecturer's slide).      */
+    BARCODE_F,
     BARCODE_Z,
-    BARCODE_INVALID     /* = 7: same numbers as the MQTT barcode field. */
+    BARCODE_INVALID
 } barcode_t;
 
 
@@ -32,7 +29,10 @@ typedef struct
 
 void barcode_init(void);
 
-/* Reset acquisition - used for a new barcode or to recover from an invalid one. */
+/*
+ * Reset acquisition - used for a new barcode or to recover from an
+ * invalid one. Does not clear the duplicate guard (barcode_init() does).
+ */
 void barcode_reset(void);
 
 /* Update acquisition with the current black/white sensor state. */
@@ -52,12 +52,13 @@ void barcode_update(
 void barcode_finish_capture(void);
 
 /*
- * Call every cycle with the current timestamp. If a capture is
- * in progress and no transition has occurred for BARCODE_TIMEOUT_MS,
- * automatically finishes the capture (calls barcode_finish_capture()
- * internally). Safe to call every cycle regardless of state.
+ * Call every cycle with the current encoder position. If a capture
+ * is in progress and the car has travelled BARCODE_END_GAP_COUNTS
+ * with no transition, automatically finishes the capture (calls
+ * barcode_finish_capture() internally). Stopping does not end a
+ * capture. Safe to call every cycle regardless of state.
  */
-void barcode_check_timeout(uint32_t timestamp_ms);
+void barcode_check_end(int32_t encoder_position);
 
 /* True once a complete barcode has been captured and is ready to decode. */
 bool barcode_available(void);
@@ -72,9 +73,15 @@ barcode_t barcode_get_code(void);
  */
 char barcode_get_char(void);
 
+/* Debug: number of edges stored in the current capture. */
+uint8_t barcode_get_edge_count(void);
+
+/* Debug: copy stored edge 'index'; false if out of range. */
+bool barcode_get_edge(uint8_t index, barcode_edge_t *p_edge);
+
 /*
  * Converts the decoded barcode to a nav command
- * (A->LEFT, B->RIGHT, C->STRAIGHT, D->UTURN).
+ * (A->LEFT, F->RIGHT, Z->STRAIGHT).
  *
  * Self-clearing: internally resets acquisition state
  * before returning, so barcode_available() goes back
