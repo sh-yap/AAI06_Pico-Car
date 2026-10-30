@@ -37,6 +37,15 @@
 #define VC_SPEED_CURVE_MM_S     (50)     /* At full steer: slow on a bend so
                                             the car stays on it.  Matches
                                             Buddy 2's validated slow speed.  */
+#define VC_STEER_START          (64)     /* First steer off centre: half.
+                                            Both wheels stay driven above
+                                            Motion's 35 mm/s brake at 150:
+                                            150 -> 100 mm/s forward, +-23.5
+                                            mm/s per wheel.                  */
+#define VC_STEER_STEP           (4)      /* Added each 20 ms step while off
+                                            centre: full steer after about
+                                            320 ms, only if the line stays
+                                            off centre.                      */
 #define VC_SPEED_HUMP_MM_S      (100)    /* Ramp speed.  All ramp evidence is
                                             at 100 and 50 stalled on the
                                             slope, so the car slows from
@@ -204,7 +213,8 @@ typedef struct
     bool       b_init_failed;
     vc_cmd_t   cmd;                /* Event: laptop command.              */
     vc_line_t  line;               /* Latest line position.               */
-    int8_t     line_error;         /* -127 (left) .. +127 (right).        */
+    int8_t     line_error;         /* -127 (left) .. +127 (right).
+                                      Telemetry only: not used to steer.   */
     vc_nav_t   barcode;            /* Event: barcode decoded.             */
     bool       b_motion_done;      /* Event: turn / distance complete.    */
     bool       b_motion_failed;    /* Motion fault or command rejected.   */
@@ -332,6 +342,9 @@ typedef struct
     bool       b_junction_hold;    /* FOLLOW_LINE: driving straight across
                                       a junction (steer 0, LOST ignored). */
     int32_t    junction_origin_mm; /* travel_mm when the hold began.      */
+    int8_t     steer_side;         /* FOLLOW_LINE steer ramp: -1 left,
+                                      +1 right, 0 centred.                 */
+    int16_t    steer_mag;          /* Ramp magnitude 0 .. 127.            */
 } vc_t;
 
 /* ------------------------------------------------------------------------ *

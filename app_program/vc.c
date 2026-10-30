@@ -144,6 +144,11 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
             p_out->cal_req     = VC_CAL_REQ_BEGIN;
             break;
 
+        case VC_STATE_FOLLOW_LINE:
+            p_vc->steer_side = 0;           /* Never resume an old ramp. */
+            p_vc->steer_mag  = 0;
+            break;
+
         case VC_STATE_OBSTACLE_SCAN:
             p_out->motion   = VC_MOTION_STOP;   /* Stopped while scanning. */
             p_out->obstacle = VC_OBST_SCAN_REQUEST;
@@ -159,8 +164,8 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
 }
 
 
-/* Remember which side the line was last seen on (from the sign of a
- * non-zero line error while the line is visible). */
+/* Remember which side the line was last seen on (from the line state
+ * while the line is visible). */
 static void
 remember_side (vc_t * p_vc, vc_inputs_t const * p_in)
 {
@@ -169,11 +174,11 @@ remember_side (vc_t * p_vc, vc_inputs_t const * p_in)
     if ((VC_STATE_FOLLOW_LINE == p_vc->state)
         && (VC_LINE_LOST != line) && (VC_LINE_JUNCTION != line))
     {
-        if (0 > p_in->line_error)
+        if (VC_LINE_LEFT == line)
         {
             p_vc->last_side = -1;
         }
-        else if (0 < p_in->line_error)
+        else if (VC_LINE_RIGHT == line)
         {
             p_vc->last_side = 1;
         }
@@ -255,6 +260,57 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 }
 
 
+/**
+ * @brief  Graduated steer from the line state (the error value is unused).
+ *
+ * Off centre the steer starts at VC_STEER_START and grows by VC_STEER_STEP
+ * each step up to full.  A change of side restarts it; centre drops it to 0.
+ *
+ * @param  p_vc  VC state holding the ramp.
+ * @param  line  Line state this step (JUNCTION is treated as centre).
+ * @return Steer -127 (left) .. +127 (right).
+ */
+static int8_t
+follow_steer (vc_t * p_vc, vc_line_t line)
+{
+    int8_t side = 0;
+
+    if (VC_LINE_RIGHT == line)
+    {
+        side = 1;
+    }
+    else if (VC_LINE_LEFT == line)
+    {
+        side = -1;
+    }
+    else
+    {
+        /* Centre, junction or lost: no steer. */
+    }
+
+    if (0 == side)
+    {
+        p_vc->steer_mag = 0;
+    }
+    else if (side != p_vc->steer_side)
+    {
+        p_vc->steer_mag = VC_STEER_START;
+    }
+    else
+    {
+        p_vc->steer_mag += VC_STEER_STEP;
+        if (127 < p_vc->steer_mag)
+        {
+            p_vc->steer_mag = 127;
+        }
+    }
+    p_vc->steer_side = side;
+
+    /* Cast: steer_mag is at most 127, so side * steer_mag fits int8_t. */
+    return (int8_t) (side * p_vc->steer_mag);
+}
+
+
 /* FOLLOW_LINE: steer along the line; watch for obstacle, junction, loss. */
 static void
 step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
@@ -305,9 +361,9 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         p_out->motion     = VC_MOTION_DRIVE;
         /* Over a junction already handled, or still holding straight
          * across one: steer 0. */
-        p_out->steer      = ((VC_LINE_JUNCTION == line)
-                             || p_vc->b_junction_hold) ? 0
-                                                       : p_in->line_error;
+        p_out->steer      = follow_steer(p_vc,
+                                         p_vc->b_junction_hold
+                                         ? VC_LINE_JUNCTION : line);
         p_out->speed_mm_s = curve_speed(follow_speed(p_in), p_out->steer);
     }
 }
@@ -861,6 +917,8 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->b_reversing       = false;
         p_vc->prev_line         = VC_LINE_LOST;
         p_vc->last_side         = 0;
+        p_vc->steer_side        = 0;
+        p_vc->steer_mag         = 0;
         p_vc->search            = VC_SEARCH_NONE;
         p_vc->search_dir        = 0;
         p_vc->search_origin_mdeg = 0;

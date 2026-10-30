@@ -248,18 +248,53 @@ test_follow_line_and_hump (void)
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
     CHECK(!g_out.b_state_changed);
 
-    /* Off centre: steer by the error, and slow down for the bend. */
-    g_in.line_error = -40;
+    /* The error value never steers: centre with an error gives 0. */
+    g_in.line_error = 90;
     step();
-    CHECK(-40 == g_out.steer);
+    CHECK(0 == g_out.steer);
+    CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
+
+    /* Off centre: steer starts at half (64 at 150 -> 100 mm/s). */
+    g_in.line       = VC_LINE_LEFT;
+    g_in.line_error = 0;
+    step();
+    CHECK(-64 == g_out.steer);
+    CHECK(100 == g_out.speed_mm_s);
     CHECK(VC_SPEED_NORMAL_MM_S > g_out.speed_mm_s);
     CHECK(VC_SPEED_CURVE_MM_S < g_out.speed_mm_s);
 
-    g_in.line_error = 127;
+    /* Grows by 4 per step, capped at full. */
     step();
+    CHECK(-68 == g_out.steer);
+    {
+        int32_t n;
+
+        for (n = 0; 20 > n; n++)
+        {
+            step();
+        }
+    }
+    CHECK(-127 == g_out.steer);
     CHECK(VC_SPEED_CURVE_MM_S == g_out.speed_mm_s);
 
+    /* Side change restarts at half of the new sign. */
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    CHECK(64 == g_out.steer);
+    step();
+    CHECK(68 == g_out.steer);
+
+    /* Centre drops it at once, and the next off-centre restarts. */
+    g_in.line = VC_LINE_CENTRE;
+    step();
+    CHECK(0 == g_out.steer);
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    CHECK(64 == g_out.steer);
+
+    g_in.line       = VC_LINE_CENTRE;
     g_in.line_error = 0;
+    step();
 
     g_in.b_hump = true;
     step();
@@ -821,9 +856,8 @@ lose_line_after (int8_t side)
     if (0 != side)
     {
         g_in.line       = (0 > side) ? VC_LINE_LEFT : VC_LINE_RIGHT;
-        g_in.line_error = (0 > side) ? -127 : 63;
+        g_in.line_error = 0;              /* The error is ignored. */
         step();
-        g_in.line_error = 0;
     }
     g_in.line = VC_LINE_LOST;
     step();
@@ -846,7 +880,7 @@ test_search_towards_last_side (void)
     /* A centred reading in between keeps the last side. */
     go_to_follow_line(0U);
     g_in.line       = VC_LINE_RIGHT;
-    g_in.line_error = 63;
+    g_in.line_error = 0;
     step();
     g_in.line       = VC_LINE_CENTRE;
     g_in.line_error = 0;
@@ -1380,7 +1414,7 @@ test_junction_hold_straight (void)
     g_in.line       = VC_LINE_RIGHT;
     g_in.travel_mm  = 1000 + VC_JUNCTION_HOLD_MM;
     step();
-    CHECK(127 == g_out.steer);                /* Hold over: follow again. */
+    CHECK(64 == g_out.steer);                 /* Hold over: ramp restarts. */
 
     g_in.line = VC_LINE_LOST;                 /* Lost now: search starts. */
     step();
@@ -1406,7 +1440,7 @@ test_junction_hold_barcode_turn (void)
     step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     step();
-    CHECK(90 == g_out.steer);                 /* No hold after a turn. */
+    CHECK(64 == g_out.steer);                 /* No hold after a turn. */
 }
 
 static void
@@ -1425,14 +1459,14 @@ test_junction_hold_second_junction (void)
     CHECK(!g_out.b_state_changed);
     CHECK(0 == g_out.steer);
 
-    g_in.line       = VC_LINE_CENTRE;         /* Hold still from the first. */
+    g_in.line       = VC_LINE_RIGHT;          /* Hold still from the first. */
     g_in.line_error = 50;
     g_in.travel_mm  = 1000 + VC_JUNCTION_HOLD_MM - 1;
     step();
     CHECK(0 == g_out.steer);
     g_in.travel_mm  = 1000 + VC_JUNCTION_HOLD_MM;
     step();
-    CHECK(50 == g_out.steer);
+    CHECK(64 == g_out.steer);
 
     g_in.line = VC_LINE_JUNCTION;             /* A new junction: acted on. */
     step();
