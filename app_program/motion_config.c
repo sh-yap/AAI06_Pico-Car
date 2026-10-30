@@ -58,13 +58,25 @@ void motion_config_default(motion_config_t *config)
        Offsets were 59/57 (unloaded).  On the floor 200 mm/s needed about
        220-260 permille vs 160 predicted (27 Oct closed-loop test), so the
        offsets are raised on test_integrate - Buddy 2 to retune loaded. */
-    config->left_feedforward_offset_permille = 120U;
-    config->right_feedforward_offset_permille = 120U;
-    config->left_feedforward_slope_q10 = 318U;
-    config->right_feedforward_slope_q10 = 301U;
-    /* Extra slope above 100 mm/s, derived from the first 200 mm/s run. */
-    config->left_feedforward_high_slope_q10 = 400U;
-    config->right_feedforward_high_slope_q10 = 480U;
+    /* Loaded refit, 2026-10-30, from the two loaded points in this file's
+       evidence: the 28 Oct USB closed-loop run settled at 85-107 mm/s with
+       steady PWM 190-202 left and 184-193 right (about 190 permille at
+       100 mm/s), and the 27 Oct floor test needed 220-260 permille (about
+       240) at 200 mm/s.  A line through (100, 190) and (200, 240) has slope
+       0.5 permille per mm/s (512 in Q10) and offset 140.  The old unloaded
+       slope of about 0.31 left the feedforward about 40 permille short at
+       100 mm/s and made the PID wind up the rest, which is too slow for
+       line following.  Both wheels use the same values: the left/right
+       difference in those runs is within their scatter.  Below about
+       50 mm/s this is an extrapolation, not a measurement.  The two
+       points fit one straight line, so the high-speed slope is kept only
+       to satisfy the validator at a negligible value (16 Q10 = 0.016). */
+    config->left_feedforward_offset_permille = 140U;
+    config->right_feedforward_offset_permille = 140U;
+    config->left_feedforward_slope_q10 = 512U;
+    config->right_feedforward_slope_q10 = 512U;
+    config->left_feedforward_high_slope_q10 = 16U;
+    config->right_feedforward_high_slope_q10 = 16U;
     config->feedforward_knee_mm_s = 100U;
     /* Two unloaded -100 mm/s runs showed the left reverse direction about
        5-6 percent slow.  Directional trim avoids disturbing forward tuning. */

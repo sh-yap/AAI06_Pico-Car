@@ -78,6 +78,12 @@ typedef struct {
     int32_t right_encoder_counts;
     int32_t left_speed_mm_s;
     int32_t right_speed_mm_s;
+    int32_t left_target_mm_s;           /* Commanded wheel target.      */
+    int32_t right_target_mm_s;
+    int32_t left_slewed_target_mm_s;    /* Target after the slew limit. */
+    int32_t right_slewed_target_mm_s;
+    int32_t left_drive_permille;        /* Signed PWM applied this cycle. */
+    int32_t right_drive_permille;
     int32_t travelled_mm;
     int32_t target_mm;
     int32_t target_speed_mm_s;

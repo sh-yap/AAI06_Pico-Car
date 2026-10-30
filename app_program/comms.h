@@ -110,6 +110,12 @@ typedef struct
     int32_t encoder_left;       /* raw counts since boot                */
     int32_t encoder_right;
     int32_t distance_mm;        /* travelled since boot                 */
+    int32_t target_left_mm_s;   /* commanded wheel target               */
+    int32_t target_right_mm_s;
+    int32_t slewed_left_mm_s;   /* target after the slew limit          */
+    int32_t slewed_right_mm_s;
+    int32_t drive_left_permille;  /* applied PWM, signed (-1000 .. 1000)  */
+    int32_t drive_right_permille;
 } comms_motion_t;
 
 /* Buddy 3 - line sensing. */
@@ -120,6 +126,8 @@ typedef struct
     uint8_t          sensors;   /* bit0 centre (GP27), bit1 right
                                    (GP26); 1 = black.  2 line sensors
                                    (Buddy 3); GP28 is barcode only.    */
+    uint16_t         centre_adc; /* raw 12-bit readings, GP27 and GP26   */
+    uint16_t         right_adc;
 } comms_line_t;
 
 /* Buddy 4 - IMU / terrain (Buddy 4's own units). */
@@ -141,6 +149,45 @@ typedef struct
     int32_t       clear_right_mm;
     comms_avoid_t action;       /* recommended avoidance                */
 } comms_obstacle_t;
+
+/* START calibration result (VC), sent once per START as an event.  ADC
+ * values are the raw 12-bit readings of the sweep. */
+typedef enum
+{
+    COMMS_CAL_OK = 0,
+    COMMS_CAL_CONTRAST,         /* a line sensor saw too little contrast */
+    COMMS_CAL_LINE,             /* the sweep did not find the line       */
+    COMMS_CAL_BUDDY4,           /* Buddy 4 could not set its noise floor */
+    COMMS_CAL_SENSOR_GAP,       /* white gap between the two line sensors */
+    COMMS_CAL_COUNT
+} comms_cal_result_t;
+
+#define COMMS_CAL_OVERLAP_NOT_MEASURED  (-256)   /* 9-bit signed minimum */
+
+typedef struct
+{
+    comms_cal_result_t result;
+    uint16_t centre_low;
+    uint16_t centre_high;
+    uint16_t centre_threshold;
+    uint16_t centre_full_black;
+    uint16_t right_low;
+    uint16_t right_high;
+    uint16_t right_threshold;
+    uint16_t barcode_low;
+    uint16_t barcode_high;
+    uint16_t barcode_threshold; /* the one in use, learned or fallback   */
+    bool     b_barcode_learned; /* false = fallback constant             */
+    bool     b_first_right;     /* the sweep pivoted right first         */
+    int32_t  overlap_samples;   /* samples both line sensors were black at
+                                   once, negative = a white gap that long;
+                                   COMMS_CAL_OVERLAP_NOT_MEASURED if the
+                                   sweep data could not show it           */
+    uint32_t b4_floor_mg;       /* 1 .. 500, 0 if Buddy 4 failed         */
+    uint32_t b4_samples;        /* noise samples averaged, 0 .. 20000    */
+    int32_t  sweep_deg;         /* turned on the side that worked, or the
+                                   furthest on failure; whole degrees     */
+} comms_calibration_t;
 
 /* Counters for diagnostics and the resource report. */
 typedef struct
@@ -179,5 +226,6 @@ bool comms_event_barcode(char code, comms_nav_t command);
 bool comms_event_hump(int32_t peak_dmm);    /* 0.1 mm steps, 0 .. 800   */
 bool comms_event_obstacle(comms_obstacle_t const * p_obstacle);
 bool comms_event_motion(comms_motion_class_t motion);
+bool comms_event_calibration(comms_calibration_t const * p_calibration);
 
 #endif /* COMMS_H */

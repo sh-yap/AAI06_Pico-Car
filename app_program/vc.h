@@ -27,19 +27,20 @@
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
-#define VC_SPEED_NORMAL_MM_S    (70)     /* On the flat line.  Lower than the
-                                            ramp's 100 on purpose: with only
-                                            centre+right sensors the only
-                                            warning of a left bend is the
-                                            centre sensor dimming (a narrow
-                                            window), so a slower car has time
-                                            to steer back before it goes LOST.
-                                            Ramp speed is HUMP, so this does
-                                            not slow the ramp.               */
+#define VC_SPEED_NORMAL_MM_S    (150)    /* On the flat line.  Set to 150 by
+                                            the user on 30 Oct 2026 to cover
+                                            the course faster.  Was 70 (team-
+                                            mate, fewer lost left bends) before
+                                            Motion's low-speed tracking and
+                                            the pivot line search.  Full steer
+                                            still slows to CURVE.            */
 #define VC_SPEED_CURVE_MM_S     (50)     /* At full steer: slow on a bend so
                                             the car stays on it.  Matches
                                             Buddy 2's validated slow speed.  */
-#define VC_SPEED_HUMP_MM_S      (100)    /* Same as normal: keep momentum.   */
+#define VC_SPEED_HUMP_MM_S      (100)    /* Ramp speed.  All ramp evidence is
+                                            at 100 and 50 stalled on the
+                                            slope, so the car slows from
+                                            cruise on a ramp.                */
 #define VC_SPEED_SEARCH_MM_S    (120)    /* While searching.  Tried 60 (30 Oct)
                                             for a tighter pivot, but at 60 the
                                             search was too slow to reach the
@@ -58,6 +59,65 @@
 #define VC_REACQUIRE_TIMEOUT_MS (4000U)  /* TBC: from bypass geometry.       */
 #define VC_MAX_RESCANS          (2U)     /* Reverse + rescan attempts.       */
 
+/* After a junction taken straight across, hold steer 0 for this far.  It is
+ * twice the 18 mm line width in the course Barcode and Line Specification,
+ * so a crossing approached up to 60 degrees off square (which looks up to
+ * twice as wide) is fully passed before normal steering resumes. */
+#define VC_JUNCTION_HOLD_MM     (36)
+
+/* Line lost while following: stop, then pivot in place to find it again,
+ * towards the side it was last seen on first, then the other side.  The
+ * pivot is the same TURN_ANGLE as the calibration sweep, at 80 mm/s. */
+#define VC_SEARCH_LIMIT_MDEG    (90000)  /* Safety bound per side, measured
+                                            from the heading where the line
+                                            was lost: Buddy 2's validated
+                                            90 degree turn.  The line was
+                                            seen within the last 300 ms, so
+                                            it lies within a quarter turn on
+                                            the last-seen side, and the
+                                            second side covers a wrong guess.
+                                            It is a bound, not a stop point:
+                                            the search stops on what the
+                                            sensors see.  Both sides without
+                                            the line is a failure.          */
+#define VC_SEARCH_TIMEOUT_MS    (9000U)  /* Backstop only; the angle bound
+                                            ends a search first.  The two
+                                            pivots turn 90 + 180 = 270
+                                            degrees at about 77 degrees/s
+                                            (80 mm/s wheels, 119 mm track):
+                                            3.5 s, plus about 0.5 s each for
+                                            the stop and the ramp, so 4.5 s.
+                                            Twice that.                     */
+
+/* START calibration: still, pivot across the line (towards the side the
+ * right sensor says the line is on, else left first, then the other side
+ * if needed), pivot back. */
+#define VC_CAL_STILL_MS         (600U)   /* Still before the sweep.  Buddy 4
+                                            needs a 0.3 s settled window and
+                                            five level samples to take its
+                                            level reference again, plus a
+                                            word or two of delay.            */
+#define VC_CAL_STILL_TIMEOUT_MS (3000U)  /* Buddy 4 not ready by then: fail. */
+#define VC_CAL_LIMIT_MDEG       (45000)  /* Safety bound per side, measured
+                                            from the START heading: the most
+                                            the car may turn either way. It
+                                            is a bound, not a stop point:
+                                            the sweep stops on what the
+                                            sensors see, and a successful one
+                                            took about 12 degrees.  Kept
+                                            small so a failed search cannot
+                                            swing the car onto another part
+                                            of the course.  Reached without a
+                                            finished sweep on both sides is a
+                                            failure.                        */
+#define VC_CAL_BACK_MARGIN_MDEG (20000)  /* Turning back may pass the start
+                                            heading by this much (also covers
+                                            the turn while braking) before
+                                            the line is declared not found.  */
+#define VC_CAL_VERDICT_MS       (500U)   /* Wait this long for Buddy 3's or
+                                            Buddy 4's verdict, then fail.    */
+#define VC_CAL_TIMEOUT_MS       (20000U) /* Whole calibration: backstop.     */
+
 /* ------------------------------------------------------------------------ *
  * States (system-level statechart)
  * ------------------------------------------------------------------------ */
@@ -66,6 +126,7 @@ typedef enum
 {
     VC_STATE_INITIALISE = 0,
     VC_STATE_READY,
+    VC_STATE_CALIBRATE,
     VC_STATE_FOLLOW_LINE,
     VC_STATE_HANDLE_JUNCTION,
     VC_STATE_TURNING,
@@ -106,6 +167,25 @@ typedef enum                   /* Barcode navigation command, Buddy 3.    */
     VC_NAV_UTURN
 } vc_nav_t;
 
+typedef enum                   /* START calibration, from Buddy 3.        */
+{
+    VC_CAL_B3_IDLE = 0,
+    VC_CAL_B3_RUNNING,
+    VC_CAL_B3_OK,
+    VC_CAL_B3_FAIL_CONTRAST,   /* A line sensor saw too little contrast.   */
+    VC_CAL_B3_FAIL_LINE,       /* Contrast seen, sweep never finished.     */
+    VC_CAL_B3_FAIL_GAP         /* White gap between the two line sensors.  */
+} vc_cal_b3_t;
+
+typedef enum                   /* START calibration, from Buddy 4.        */
+{
+    VC_CAL_B4_IDLE = 0,
+    VC_CAL_B4_MEASURING,       /* Not enough noise samples yet.            */
+    VC_CAL_B4_ENOUGH,          /* Enough samples: the sweep may end.       */
+    VC_CAL_B4_DONE,            /* Noise floor set from the sweep.          */
+    VC_CAL_B4_FAILED
+} vc_cal_b4_t;
+
 typedef enum                   /* Avoidance recommendation, Buddy 5.      */
 {
     VC_AVOID_STOP = 0,
@@ -139,6 +219,13 @@ typedef struct
     bool       b_obstacle_passed;  /* Event: Buddy 5 OBSTACLE_PASSED.     */
     uint16_t   serious_faults;     /* Fault bits; 0 = none.               */
     bool       b_finish;           /* Finish condition met (TBC).         */
+    vc_cal_b3_t cal_b3;            /* Buddy 3 calibration state.          */
+    vc_cal_b4_t cal_b4;            /* Buddy 4 calibration state.          */
+    int32_t    cal_angle_mdeg;     /* Turned since the sweep began, from
+                                      the encoders; sign not relied on.   */
+    int32_t    travel_mm;          /* Mean of both wheels, from the
+                                      encoders: a running total.  Only
+                                      differences are used.               */
 } vc_inputs_t;
 
 /* ------------------------------------------------------------------------ *
@@ -152,8 +239,29 @@ typedef enum                   /* What to ask Buddy 2 for this step.      */
     VC_MOTION_TURN,            /* Encoder turn: see turn.                 */
     VC_MOTION_BYPASS,          /* Bypass manoeuvre: see bypass_side.      */
     VC_MOTION_REVERSE,         /* Short reverse before a rescan.          */
-    VC_MOTION_STOP             /* Urgent stop: motion_stop().             */
+    VC_MOTION_STOP,            /* Urgent stop: motion_stop().             */
+    VC_MOTION_PIVOT            /* Calibration pivot: see pivot_mdeg.      */
 } vc_motion_act_t;
+
+typedef enum                   /* What to ask Buddy 3 and 4 for.          */
+{
+    VC_CAL_REQ_NONE = 0,
+    VC_CAL_REQ_BEGIN,          /* Buddy 3 records; Buddy 4 retakes level. */
+    VC_CAL_REQ_SWEEP,          /* Pivot started: Buddy 4 measures noise;
+                                  the turned angle counts from now.       */
+    VC_CAL_REQ_JUDGE,          /* Pivot hit its limit: Buddy 3 judges.    */
+    VC_CAL_REQ_FINISH,         /* Back on the line: Buddy 4 sets floor.   */
+    VC_CAL_REQ_ABORT           /* Calibration over without a run.         */
+} vc_cal_req_t;
+
+typedef enum                   /* Why a calibration failed.               */
+{
+    VC_CAL_FAIL_NONE = 0,
+    VC_CAL_FAIL_CONTRAST,      /* A line sensor saw too little contrast.  */
+    VC_CAL_FAIL_LINE,          /* Line not found within the limit.        */
+    VC_CAL_FAIL_BUDDY4,        /* Buddy 4 not ready, or no valid floor.   */
+    VC_CAL_FAIL_GAP            /* White gap between the two line sensors. */
+} vc_cal_fail_t;
 
 typedef enum                   /* What to ask Buddy 5 for this step.      */
 {
@@ -173,7 +281,28 @@ typedef struct
     vc_nav_t        turn;           /* For VC_MOTION_TURN.                */
     vc_avoid_t      bypass_side;    /* For VC_MOTION_BYPASS.              */
     vc_obst_act_t   obstacle;
+    int32_t         pivot_mdeg;     /* For VC_MOTION_PIVOT: + is right.   */
+    vc_cal_req_t    cal_req;
+    vc_cal_fail_t   cal_fail;       /* Set on the step that returns to
+                                       READY after a failed calibration.  */
 } vc_outputs_t;
+
+typedef enum                   /* Pivot search after losing the line.     */
+{
+    VC_SEARCH_NONE = 0,        /* No pivot search (after a bypass: creep). */
+    VC_SEARCH_FIRST,           /* Pivoting towards where the line was.    */
+    VC_SEARCH_SECOND           /* Pivoting the other way.                 */
+} vc_search_t;
+
+typedef enum                   /* Where the calibration is.               */
+{
+    VC_CAL_STILL = 0,          /* Standing still; Buddy 4 levels.         */
+    VC_CAL_OUT,                /* Pivoting the first way, B3 and B4 measure. */
+    VC_CAL_OUT_OTHER,          /* First side hit its limit: other way.    */
+    VC_CAL_JUDGE,              /* Hit the limit; waiting for Buddy 3.     */
+    VC_CAL_BACK,               /* Pivoting back to the line.              */
+    VC_CAL_FINISH              /* Stopped on the line; waiting Buddy 4.   */
+} vc_cal_phase_t;
 
 /* Controller context.  Owned by the VC task; never shared. */
 typedef struct
@@ -187,6 +316,22 @@ typedef struct
     vc_line_t  prev_line;          /* Line position at the previous step. */
     int8_t     last_side;          /* -1 line last seen left, +1 right,
                                       0 unknown: where to search.          */
+    vc_search_t search;            /* Pivot search in REACQUIRE_LINE.     */
+    int32_t    search_dir;         /* Way it pivots now (+1 right).       */
+    int32_t    search_origin_mdeg; /* Turned-angle input when it began.   */
+    vc_cal_phase_t cal_phase;      /* Valid in CALIBRATE.                 */
+    uint32_t   cal_phase_ms;       /* When the phase began.               */
+    int32_t    cal_out_mdeg;       /* Turned by the end of a successful
+                                      sweep (magnitude), for the log.     */
+    int32_t    cal_far_mdeg;       /* Furthest turned from the start
+                                      heading (magnitude), for the log.   */
+    int32_t    cal_first_dir;      /* First way: +1 right, -1 left, 0 not
+                                      chosen yet.                         */
+    int32_t    cal_dir;            /* Way the car pivots now (+1 right,
+                                      -1 left); the way back in BACK.     */
+    bool       b_junction_hold;    /* FOLLOW_LINE: driving straight across
+                                      a junction (steer 0, LOST ignored). */
+    int32_t    junction_origin_mm; /* travel_mm when the hold began.      */
 } vc_t;
 
 /* ------------------------------------------------------------------------ *

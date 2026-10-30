@@ -71,6 +71,140 @@ static void check(bool ok, const char *name)
     printf("PASS: %s\n", name);
 }
 
+/* Run n Motion periods with the given wheel counts added each period. */
+static void run_periods(unsigned n, int32_t left_inc, int32_t right_inc)
+{
+    unsigned i;
+    for (i = 0U; i < n; i++) {
+        test_clock += 20000U;
+        test_encoder.left_counts += left_inc;
+        test_encoder.right_counts += right_inc;
+        test_encoder.irq_count += (uint32_t)(left_inc + right_inc);
+        motion_loop();
+    }
+}
+
+/* Steered velocity commands: a wheel told to go slower than the deadband
+ * power can drive is braked (duty 0), and the driven wheel is not stalled. */
+static void steered_low_target_checks(void)
+{
+    motion_command_t v = {0};
+    int32_t l, r;
+    int32_t ang;
+
+    v.type = MOTION_COMMAND_SET_VELOCITY;
+    v.timeout_ms = 10000U;
+    v.value.velocity.linear_mm_s = 50;
+
+    /* Full steer at 50 mm/s: 0 / 100 mm/s. The slower (right) wheel is the inner. */
+    ang = 48152;
+    (void)motion_velocity_targets(50, ang, 119, motion_config.max_speed_mm_s, &l, &r);
+    check(r <= 1 && l >= 99, "full steer targets are about 0 and 100");
+    v.sequence_id = 10U;
+    v.value.velocity.angular_mdeg_s = ang;
+    check(motion_submit(&v) == MOTION_RESULT_OK, "full steer command accepted");
+    /* The outer (left) wheel turns at about 100 mm/s: 28 counts per 20 ms. */
+    run_periods(80U, 28, 0);
+    check(motion_status.state == MOTION_STATE_RUNNING &&
+          motion_status.fault == MOTION_FAULT_NONE,
+          "inner wheel at 0 mm/s: no stall or fault in 1.6 s");
+    check(test_duty[1] == 0U, "inner wheel target 0 gives duty 0, not the deadband floor");
+    check(test_duty[0] > 80U, "outer wheel is still driven");
+
+    /* Small non-zero inner targets (15 and 25 mm/s) are also braked. */
+    ang = 48152 * 7 / 10;     /* 70 mm/s difference: 15 / 85 */
+    v.sequence_id = 11U;
+    v.value.velocity.angular_mdeg_s = ang;
+    (void)motion_submit(&v);
+    run_periods(40U, 24, 0);
+    check(test_duty[1] == 0U && test_duty[0] > 80U, "inner target 15 mm/s is braked");
+    ang = 48152 / 2;          /* 50 mm/s difference: 25 / 75 */
+    v.sequence_id = 12U;
+    v.value.velocity.angular_mdeg_s = ang;
+    (void)motion_submit(&v);
+    run_periods(40U, 20, 0);
+    check(test_duty[1] == 0U && test_duty[0] > 80U, "inner target 25 mm/s is braked");
+
+    /* 40 mm/s difference gives an inner target of 30: still braked.
+       30 mm/s difference gives 35: driven (at least the deadband floor). */
+    ang = 48152 * 3 / 10;
+    v.sequence_id = 13U;
+    v.value.velocity.angular_mdeg_s = ang;
+    (void)motion_submit(&v);
+    run_periods(40U, 18, 10);
+    check(test_duty[1] >= 80U && test_duty[0] > 80U, "inner target 35 mm/s is driven");
+
+    /* A straight command at low speed is not affected. */
+    v.sequence_id = 14U;
+    v.value.velocity.linear_mm_s = 30;
+    v.value.velocity.angular_mdeg_s = 0;
+    (void)motion_submit(&v);
+    run_periods(40U, 8, 8);
+    check(test_duty[1] >= 80U && test_duty[0] >= 80U,
+          "straight command at 30 mm/s keeps both wheels driven");
+
+    (void)motion_stop();
+    motion_loop();
+    reset_velocity_control();
+    encoder_sample_valid = false;
+    test_clock = 0U;
+    memset(&test_encoder, 0, sizeof(test_encoder));
+    test_duty[1] = 0U;
+    test_duty[0] = 0U;
+}
+
+/* Braking the forward part is immediate, speeding up stays slewed. */
+static void forward_brake_checks(void)
+{
+    motion_command_t v = {0};
+    int32_t i;
+    int32_t before;
+
+    v.type = MOTION_COMMAND_SET_VELOCITY;
+    v.timeout_ms = 10000U;
+    v.sequence_id = 20U;
+    v.value.velocity.linear_mm_s = 150;
+    check(motion_submit(&v) == MOTION_RESULT_OK, "cruise command accepted");
+    run_periods(30U, 42, 42);
+    check(motion_status.left_slewed_target_mm_s >= 148 &&
+          motion_status.right_slewed_target_mm_s >= 148,
+          "forward part has slewed up to 150 mm/s");
+
+    /* Full steer at 50 mm/s: the inner wheel must drop at once. */
+    v.sequence_id = 21U;
+    v.value.velocity.linear_mm_s = 50;
+    v.value.velocity.angular_mdeg_s = 48152;
+    (void)motion_submit(&v);
+    run_periods(1U, 42, 42);
+    check(motion_status.right_slewed_target_mm_s <= 35,
+          "150 to 50 with full steer: inner target is at the command on the first period");
+
+    /* Straight at 50, then speed up to 150: rise stays within 6 mm/s per period. */
+    v.sequence_id = 22U;
+    v.value.velocity.angular_mdeg_s = 0;
+    (void)motion_submit(&v);
+    run_periods(5U, 14, 14);
+    v.sequence_id = 23U;
+    v.value.velocity.linear_mm_s = 150;
+    (void)motion_submit(&v);
+    for (i = 0; i < 5; i++) {
+        before = motion_status.left_slewed_target_mm_s;
+        run_periods(1U, 14, 14);
+        check(motion_status.left_slewed_target_mm_s > before &&
+              motion_status.left_slewed_target_mm_s - before <= 6,
+              "speeding up 50 to 150 rises by at most 6 mm/s per period");
+    }
+
+    (void)motion_stop();
+    motion_loop();
+    reset_velocity_control();
+    encoder_sample_valid = false;
+    test_clock = 0U;
+    memset(&test_encoder, 0, sizeof(test_encoder));
+    test_duty[1] = 0U;
+    test_duty[0] = 0U;
+}
+
 int main(void)
 {
     motion_status_t first_fault;
@@ -84,6 +218,8 @@ int main(void)
     cmd.value.distance.distance_mm = 300;
     cmd.value.distance.speed_mm_s = 50;
     check(motion_init() == MOTION_RESULT_OK, "task initialises");
+    steered_low_target_checks();
+    forward_brake_checks();
     check(motion_submit(&cmd) == MOTION_RESULT_OK, "command accepted");
     motion_loop();
     check(test_duty[0] == 25U && test_duty[1] == 25U,

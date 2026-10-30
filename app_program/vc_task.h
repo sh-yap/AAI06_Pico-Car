@@ -32,6 +32,17 @@
                                                4 alone must not stop the
                                                car.                         */
 #define VC_FAULT_ULTRASONIC      (1U << 5)  /* Buddy 5: sensor fault.       */
+/* START calibration failed (the car stays in READY).  One bit says why;
+ * they stay until the next START.  PROPOSED: Buddy 1 to agree the bits and
+ * add the names to the dashboard (bits 6 to 9 of the 10 sent). */
+#define VC_FAULT_CAL_CONTRAST    (1U << 6)  /* A line sensor saw too little
+                                               black or white.              */
+#define VC_FAULT_CAL_LINE        (1U << 7)  /* Line not found within the
+                                               pivot limit.                 */
+#define VC_FAULT_CAL_BUDDY4      (1U << 8)  /* Buddy 4 not ready or no
+                                               valid noise floor.           */
+#define VC_FAULT_CAL_GAP         (1U << 9)  /* White gap between the two
+                                               line sensors.                */
 
 /* Create and start the VC task.  b_init_ok: every subsystem started
  * (otherwise the VC goes straight to EMERGENCY_STOP).  Call once from

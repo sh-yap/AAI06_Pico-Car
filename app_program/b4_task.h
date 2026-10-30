@@ -84,4 +84,47 @@ b4_task_is_ramp_active (b4_task_terrain_t const * p_terrain);
 void
 b4_task_request_run_reset (void);
 
+/** @brief START calibration steps, requested by the Vehicle Controller.
+ */
+typedef enum
+{
+    B4_TASK_CAL_LEVEL = 0,   /**< Car is still: take the level reference
+                                  again.                                  */
+    B4_TASK_CAL_MEASURE,     /**< Car is pivoting: measure the noise.     */
+    B4_TASK_CAL_END          /**< Sweep over: make the mean the floor.    */
+} b4_task_cal_request_t;
+
+/** @brief Where the START calibration stands. */
+typedef enum
+{
+    B4_TASK_CAL_IDLE = 0,
+    B4_TASK_CAL_MEASURING,   /**< Not enough samples yet.                 */
+    B4_TASK_CAL_ENOUGH,      /**< Enough samples; the sweep may end.      */
+    B4_TASK_CAL_DONE,        /**< The floor is set from the sweep.        */
+    B4_TASK_CAL_FAILED       /**< Too few samples, or no valid floor.     */
+} b4_task_cal_state_t;
+
+/** @brief Ask the task to take one calibration step before its next sample.
+ *
+ * @param request The step.
+ */
+void
+b4_task_request_calibration (b4_task_cal_request_t request);
+
+/** @brief Report where the calibration stands.
+ *
+ * @param p_floor_mg Receives the floor in milli-g, or NULL. Zero until the
+ *        state is DONE.
+ * @return The state.
+ */
+b4_task_cal_state_t
+b4_task_get_calibration (uint32_t * p_floor_mg);
+
+/** @brief Noise samples the last calibration averaged (0 until it ends).
+ *
+ * @return The count, at most 20000.
+ */
+uint32_t
+b4_task_get_calibration_samples (void);
+
 #endif /* B4_TASK_H */

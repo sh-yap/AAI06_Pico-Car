@@ -47,6 +47,7 @@
 
 #if VC_HAVE_BUDDY3
 #include "buddy3_task.h"
+#include "line_follow.h"
 #endif
 
 #if VC_HAVE_BUDDY4
@@ -75,15 +76,23 @@
                                               350 at 80 = 700 at 160 per mm.
                                               400 at 160 ran off bends.    */
 #define VC_TRACK_HALF_MM         (60)      /* Half the 119 mm track width. */
-#define VC_TURN_INNER_FLOOR_MM_S (10)      /* Keep the inner wheel at least
-                                              this fast forward in a turn so
-                                              it does not stall at low PWM
+#define VC_TURN_INNER_FLOOR_MM_S (0)       /* Slowest the inner wheel may be
+                                              told to go in a turn.  Was 10
                                               (29 Oct: both wheels stalled
-                                              on hard pivots).             */
+                                              on hard pivots, with the old
+                                              feedforward).  0 lets full
+                                              steer at 50 mm/s turn about
+                                              the inner wheel (0/100 mm/s,
+                                              about 60 mm radius); Motion
+                                              brakes a wheel told to go
+                                              slower than it can drive.    */
 /* mdeg/s of turn that moves the inner wheel by 1 mm/s = 180000/pi / half. */
 #define VC_MDEGPS_PER_MM_S_DIFF  (57296 / VC_TRACK_HALF_MM)
-#define VC_STEER_RESEND          (8)       /* Re-send drive if steer moves
-                                              this much (of 127).          */
+#define VC_STEER_RESEND          (1)       /* Re-send drive on every steer
+                                              change (of 127).  Motion and
+                                              the controller both run every
+                                              20 ms, so this is at most one
+                                              command per Motion cycle.    */
 #define VC_SPEED_RESEND          (10)      /* ...or speed moves this much
                                               (mm/s).  The bend slowdown
                                               changes speed with every
@@ -91,6 +100,14 @@
 #define VC_TURN_SPEED_MM_S       (80)      /* Wheel speed for encoder turns.
                                               Buddy 2's validated loaded
                                               wheel speed (was 100).        */
+/* Turn per encoder count of left-minus-right difference, in a pivot:
+ * (wheel circumference 181 mm / 2536 counts) / 119 mm track, in mdeg.
+ * Motion's own configuration (motion_config.c), good to about 1 percent;
+ * enough for a safety limit and a log. */
+#define VC_CAL_MDEG_PER_COUNT    (34)
+/* Distance per encoder count: 181 mm wheel circumference per 2536 counts. */
+#define VC_WHEEL_MM              (181)
+#define VC_WHEEL_COUNTS          (2536)
 #define VC_REVERSE_MM            (100)     /* Back off before a rescan.    */
 #define VC_REVERSE_SPEED_MM_S    (80)
 #define VC_STATIONARY_MM_S       (10)      /* Both wheels below = still.   */
@@ -137,12 +154,16 @@ static uint32_t g_overruns;            /* Steps that started late.        */
 static uint16_t g_faults_seen;         /* Faults since the run started.   */
 static int32_t  g_left_mm_s;           /* Measured wheel speeds, for the  */
 static int32_t  g_right_mm_s;          /* run trace.                      */
+static int32_t  g_diff_counts;         /* Left minus right encoder counts. */
+static int32_t  g_sweep_origin_counts; /* g_diff_counts when the sweep began.*/
 
 /* VC state -> the state codes comms publishes today (tracker item C5). */
 static comms_state_t const g_comms_state[VC_STATE_COUNT] =
 {
     COMMS_STATE_INIT,           /* INITIALISE      */
     COMMS_STATE_READY,          /* READY           */
+    COMMS_STATE_READY,          /* CALIBRATE: comms has no state for it
+                                   yet; Buddy 1 to add one              */
     COMMS_STATE_LINE_FOLLOW,    /* FOLLOW_LINE     */
     COMMS_STATE_EXECUTE_NAV,    /* HANDLE_JUNCTION */
     COMMS_STATE_EXECUTE_NAV,    /* TURNING         */
@@ -171,6 +192,17 @@ static int32_t
 abs_i32 (int32_t value)
 {
     return (0 > value) ? -value : value;
+}
+
+
+/* Encoder counts to mm.  The whole revolutions and the remainder are scaled
+ * separately, so the product stays below 2536 * 181 and cannot overflow for
+ * any int32 count (a plain counts * 181 would, after about 840 m). */
+static int32_t
+counts_to_mm (int32_t counts)
+{
+    return ((counts / VC_WHEEL_COUNTS) * VC_WHEEL_MM)
+           + (((counts % VC_WHEEL_COUNTS) * VC_WHEEL_MM) / VC_WHEEL_COUNTS);
 }
 
 
@@ -257,11 +289,24 @@ read_motion (vc_inputs_t * p_in)
 
         g_left_mm_s             = status.left_speed_mm_s;
         g_right_mm_s            = status.right_speed_mm_s;
+        g_diff_counts           = status.left_encoder_counts
+                                  - status.right_encoder_counts;
+        p_in->cal_angle_mdeg    = (g_diff_counts - g_sweep_origin_counts)
+                                  * VC_CAL_MDEG_PER_COUNT;
+        p_in->travel_mm         = counts_to_mm(status.left_encoder_counts / 2)
+                                  + counts_to_mm(status.right_encoder_counts
+                                                 / 2);
         report.speed_left_mm_s  = status.left_speed_mm_s;
         report.speed_right_mm_s = status.right_speed_mm_s;
         report.encoder_left     = status.left_encoder_counts;
         report.encoder_right    = status.right_encoder_counts;
         report.distance_mm      = status.travelled_mm;
+        report.target_left_mm_s  = status.left_target_mm_s;
+        report.target_right_mm_s = status.right_target_mm_s;
+        report.slewed_left_mm_s  = status.left_slewed_target_mm_s;
+        report.slewed_right_mm_s = status.right_slewed_target_mm_s;
+        report.drive_left_permille  = status.left_drive_permille;
+        report.drive_right_permille = status.right_drive_permille;
         comms_report_motion(&report);
     }
     else
@@ -401,6 +446,7 @@ report_line (buddy3_status_t const * p_status, vc_nav_t nav)
     report.position = (comms_line_pos_t) p_status->line_state; /* Same order. */
     report.error    = p_status->line_error;
     report.sensors  = p_status->line_sensors;
+    buddy3_get_readings(&report.centre_adc, &report.right_adc);
     comms_report_line(&report);
 
     if (BARCODE_NONE != p_status->barcode)
@@ -419,6 +465,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 {
     static vc_line_t s_line    = VC_LINE_LOST;
     static int8_t    s_error   = 0;
+    static vc_cal_b3_t s_cal   = VC_CAL_B3_IDLE;
     static uint32_t  s_seen_ms = 0U;
     static bool      s_b_seen  = false;
     buddy3_packed_t  packed;
@@ -436,6 +483,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         {
             s_line    = line_from_buddy3(status.line_state);
             s_error   = status.line_error;      /* Already -127..+127. */
+            s_cal     = (vc_cal_b3_t) status.cal_state;     /* Same order. */
             s_seen_ms = now;
             s_b_seen  = true;
             nav       = nav_from_buddy3(status.nav_command);
@@ -448,6 +496,8 @@ read_line (vc_inputs_t * p_in, uint32_t now)
             report_line(&status, nav);
         }
     }
+
+    p_in->cal_b3 = s_cal;
 
     if (s_b_seen && ((now - s_seen_ms) < VC_LINE_STALE_MS))
     {
@@ -469,6 +519,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 {
     p_in->line       = VC_LINE_CENTRE;
     p_in->line_error = 0;
+    p_in->cal_b3     = VC_CAL_B3_OK;        /* Nothing to calibrate.       */
 
     /* Bench safety: end the run by itself, exactly like a laptop STOP. */
     if (g_b_run_active && ((now - g_run_start_ms) >= VC_TEST_RUN_MS)
@@ -548,6 +599,8 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
 
     p_in->b_hump          = (!b_ready) || b_ramp;
     p_in->b_terrain_ready = b_ready && (!b_ramp);
+    p_in->cal_b4          = (vc_cal_b4_t) b4_task_get_calibration(NULL);
+                                                        /* Same order.     */
 
     return b_ready ? 0U : (uint16_t) VC_FAULT_IMU;
 }
@@ -560,6 +613,7 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     (void) now;
     p_in->b_hump          = false;
     p_in->b_terrain_ready = true;
+    p_in->cal_b4          = VC_CAL_B4_DONE;     /* Nothing to calibrate.   */
 
     return 0U;
 }
@@ -719,6 +773,23 @@ queue_turn (vc_nav_t turn)
 }
 
 
+/* Calibration pivot: an encoder turn at Buddy 2's validated wheel speed,
+ * so the inner wheel is not held forward as in a drive command.  The VC
+ * stops it early when the sensors have seen enough; the angle is only the
+ * safety limit.  Positive = right. */
+static void
+queue_pivot (int32_t angle_mdeg)
+{
+    motion_command_t cmd = {0};
+
+    cmd.type                        = MOTION_COMMAND_TURN_ANGLE;
+    cmd.timeout_ms                  = VC_TURN_TIMEOUT_MS;
+    cmd.value.turn.wheel_speed_mm_s = VC_TURN_SPEED_MM_S;
+    cmd.value.turn.angle_mdeg       = angle_mdeg;
+    queue_manoeuvre(&cmd);
+}
+
+
 static void
 queue_reverse (void)
 {
@@ -860,6 +931,10 @@ act_on_motion (vc_outputs_t const * p_out)
             queue_reverse();
             break;
 
+        case VC_MOTION_PIVOT:
+            queue_pivot(p_out->pivot_mdeg);
+            break;
+
         case VC_MOTION_BYPASS:
             /* Buddy 5 bypass not integrated: stop; the VC's bypass
              * timeout then ends in EMERGENCY_STOP (fail safe). */
@@ -877,6 +952,174 @@ act_on_motion (vc_outputs_t const * p_out)
     }
 
     service_pending();
+}
+
+
+/* Calibration requests to Buddy 3 and Buddy 4, and the console log.  The
+ * sensor tables are printed by Buddy 3 and Buddy 4 themselves. */
+static void
+act_on_calibration (vc_outputs_t const * p_out)
+{
+    static char const * const names[] = {"none", "line sensor contrast",
+                                         "line not found", "Buddy 4",
+                                         "sensor gap"};
+
+    switch (p_out->cal_req)
+    {
+        case VC_CAL_REQ_BEGIN:
+#if VC_HAVE_BUDDY3
+            buddy3_calibration_request(BUDDY3_CAL_BEGIN);
+#endif
+#if VC_HAVE_BUDDY4
+            b4_task_request_calibration(B4_TASK_CAL_LEVEL);
+#endif
+            break;
+
+        case VC_CAL_REQ_SWEEP:
+            g_sweep_origin_counts = g_diff_counts;
+#if VC_HAVE_BUDDY3
+            buddy3_calibration_request(BUDDY3_CAL_SWEEP);
+#endif
+#if VC_HAVE_BUDDY4
+            b4_task_request_calibration(B4_TASK_CAL_MEASURE);
+#endif
+            break;
+
+        case VC_CAL_REQ_JUDGE:
+#if VC_HAVE_BUDDY3
+            buddy3_calibration_request(BUDDY3_CAL_END);
+#endif
+            tm_printf((UB *) "[cal] vc both sides hit the %d mdeg bound\n",
+                      (INT) VC_CAL_LIMIT_MDEG);
+            break;
+
+        case VC_CAL_REQ_FINISH:
+#if VC_HAVE_BUDDY4
+            b4_task_request_calibration(B4_TASK_CAL_END);
+#endif
+            tm_printf((UB *) "[cal] vc swept %d mdeg, centre back on"
+                             " the line\n", (INT) g_vc.cal_out_mdeg);
+            break;
+
+        case VC_CAL_REQ_ABORT:
+#if VC_HAVE_BUDDY3
+            buddy3_calibration_request(BUDDY3_CAL_ABORT);
+#endif
+            break;
+
+        case VC_CAL_REQ_NONE:
+        default:
+            break;
+    }
+
+    if (VC_CAL_FAIL_NONE != p_out->cal_fail)
+    {
+        tm_printf((UB *) "[cal] vc FAILED: %s\n",
+                  (UB *) names[p_out->cal_fail]);
+    }
+}
+
+
+/* Send the calibration result to the laptop: what Buddy 3 learned, what
+ * Buddy 4 set, how far the car swept.  Queued, never blocks; a full queue
+ * only loses this event (comms counts it). */
+static void
+publish_calibration (comms_cal_result_t result, int32_t angle_mdeg,
+                     bool b_first_right)
+{
+    comms_calibration_t cal = {0};
+    int32_t             sweep_mdeg = (0 > angle_mdeg) ? -angle_mdeg
+                                                      : angle_mdeg;
+#if VC_HAVE_BUDDY3
+    line_cal_result_t   lines;
+
+    line_cal_get_result(&lines);
+    cal.centre_low        = lines.centre.low;
+    cal.centre_high       = lines.centre.high;
+    cal.centre_threshold  = lines.centre.threshold;
+    cal.centre_full_black = lines.centre_full_black;
+    cal.right_low         = lines.right.low;
+    cal.right_high        = lines.right.high;
+    cal.right_threshold   = lines.right.threshold;
+    cal.barcode_low       = lines.barcode.low;
+    cal.barcode_high      = lines.barcode.high;
+    cal.overlap_samples   = lines.gap_measured ? lines.gap_overlap
+                                               : COMMS_CAL_OVERLAP_NOT_MEASURED;
+    cal.barcode_threshold = buddy3_barcode_threshold();
+    cal.b_barcode_learned = (COMMS_CAL_OK == result)
+                            && (0U != lines.barcode.threshold);
+#else
+    cal.overlap_samples   = COMMS_CAL_OVERLAP_NOT_MEASURED;
+#endif
+#if VC_HAVE_BUDDY4
+    (void) b4_task_get_calibration(&cal.b4_floor_mg);
+    cal.b4_samples = b4_task_get_calibration_samples();
+#endif
+    cal.result      = result;
+    cal.b_first_right = b_first_right;
+    cal.sweep_deg = sweep_mdeg / 1000;
+    (void) comms_event_calibration(&cal);
+}
+
+
+static comms_cal_result_t
+cal_result_of (vc_cal_fail_t why)
+{
+    comms_cal_result_t result = COMMS_CAL_OK;
+
+    if (VC_CAL_FAIL_CONTRAST == why)
+    {
+        result = COMMS_CAL_CONTRAST;
+    }
+    else if (VC_CAL_FAIL_LINE == why)
+    {
+        result = COMMS_CAL_LINE;
+    }
+    else if (VC_CAL_FAIL_BUDDY4 == why)
+    {
+        result = COMMS_CAL_BUDDY4;
+    }
+    else if (VC_CAL_FAIL_GAP == why)
+    {
+        result = COMMS_CAL_SENSOR_GAP;
+    }
+    else
+    {
+        /* No failure. */
+    }
+
+    return result;
+}
+
+
+/* The fault bit that tells the laptop why a calibration failed. */
+static uint16_t
+cal_fault_bit (vc_cal_fail_t why)
+{
+    uint16_t bit = 0U;
+
+    if (VC_CAL_FAIL_CONTRAST == why)
+    {
+        bit = (uint16_t) VC_FAULT_CAL_CONTRAST;
+    }
+    else if (VC_CAL_FAIL_LINE == why)
+    {
+        bit = (uint16_t) VC_FAULT_CAL_LINE;
+    }
+    else if (VC_CAL_FAIL_BUDDY4 == why)
+    {
+        bit = (uint16_t) VC_FAULT_CAL_BUDDY4;
+    }
+    else if (VC_CAL_FAIL_GAP == why)
+    {
+        bit = (uint16_t) VC_FAULT_CAL_GAP;
+    }
+    else
+    {
+        /* No failure. */
+    }
+
+    return bit;
 }
 
 
@@ -991,6 +1234,24 @@ vc_task_entry (INT stacd, void * p_exinf)
 
         act_on_motion(&out);
         act_on_obstacle(&out);
+        act_on_calibration(&out);
+
+        /* One calibration event per START, on success and on failure. */
+        if (VC_CAL_FAIL_NONE != out.cal_fail)
+        {
+            publish_calibration(cal_result_of(out.cal_fail),
+                                g_vc.cal_far_mdeg, 0 < g_vc.cal_first_dir);
+        }
+        else if ((VC_STATE_CALIBRATE == before)
+                 && (VC_STATE_FOLLOW_LINE == out.state))
+        {
+            publish_calibration(COMMS_CAL_OK, g_vc.cal_out_mdeg,
+                                0 < g_vc.cal_first_dir);
+        }
+        else
+        {
+            /* No calibration result this step. */
+        }
 
         /* Faults seen during a run stay in the published word until the
          * next start, so a fault that lasted one step still shows why the
@@ -1020,6 +1281,10 @@ vc_task_entry (INT stacd, void * p_exinf)
             g_faults_seen = (uint16_t) (g_faults_seen | in.serious_faults
                                         | terrain_fault);
         }
+        /* A failed calibration is back in READY: its reason stays in the
+         * word until the next START clears it. */
+        g_faults_seen = (uint16_t) (g_faults_seen
+                                    | cal_fault_bit(out.cal_fail));
         comms_set_fault((uint32_t) g_faults_seen);
 
         if ((VC_STATE_EMERGENCY_STOP == out.state) && out.b_state_changed)

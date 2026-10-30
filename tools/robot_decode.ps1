@@ -5,8 +5,8 @@
 #
 # Dot-source it, then call ConvertTo-RobotJson:
 #   . tools\robot_decode.ps1
-#   ConvertTo-RobotJson -Topic robot/heartbeat -Hex 3a5900001c0304c17f
-#     -> {"v":2,"t":5710,"seq":199,"state":"READY","fault":260,"ev_drop":255}
+#   ConvertTo-RobotJson -Topic robot/heartbeat -Hex 3a5900001c030481ff
+#     -> {"v":2,"t":5710,"seq":199,"state":"READY","fault":516,"ev_drop":255}
 #
 # A binary message decodes to the same JSON the firmware would have sent in
 # JSON format (only "v" differs: 1 = JSON, 2 = binary), so every tool that
@@ -24,6 +24,7 @@ $script:Motion  = @('QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IM
 $script:Avoid   = @('STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY')
 $script:Cmd     = @('unknown','start','stop','status')
 $script:Run     = @('END','BEGIN')
+$script:CalResult = @('OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP')
 $script:Barcode = @('','A','B','C','D','F','Z','INVALID')
 
 $script:VersionBits = 2          # binary header: 2-bit version (2), 32-bit time
@@ -36,15 +37,29 @@ function F([string]$Key, [string]$Kind, [int]$Bits, $Names = $null) {
 
 $script:RobotFormat = @{
     'robot/telemetry/motion'  = @((F spd_l_mm_s s 10), (F spd_r_mm_s s 10),
-                                  (F enc_l s 19), (F enc_r s 19), (F dist_mm s 16))
-    'robot/telemetry/line'    = @((F pos n 3 $script:Line), (F err s 8), (F sensors u 2))
+                                  (F enc_l s 19), (F enc_r s 19), (F dist_mm s 16),
+                                  (F tgt_l_mm_s s 10), (F tgt_r_mm_s s 10),
+                                  (F slew_l_mm_s s 10), (F slew_r_mm_s s 10),
+                                  (F pwm_l s 11), (F pwm_r s 11))
+    'robot/telemetry/line'    = @((F pos n 3 $script:Line), (F err s 8), (F sensors u 2),
+                                  (F centre_adc u 12), (F right_adc u 12))
     'robot/telemetry/terrain' = @((F motion n 3 $script:Motion), (F tilt_mg s 11),
                                   (F hump_dmm u 10), (F max_hump_dmm u 10))
     'robot/heartbeat'         = @((F seq u 16), (F state n 4 $script:States),
-                                  (F fault u 9), (F ev_drop u 8))
-    'robot/state'             = @((F state n 4 $script:States), (F fault u 9))
+                                  (F fault u 10), (F ev_drop u 8))
+    'robot/state'             = @((F state n 4 $script:States), (F fault u 10))
     'robot/event/barcode'     = @((F code n 3 $script:Barcode), (F command n 3 $script:Nav))
     'robot/event/hump'        = @((F peak_dmm u 10), (F max_dmm u 10))
+    'robot/event/calibration' = @((F result n 3 $script:CalResult),
+                                  (F centre_low u 12), (F centre_high u 12),
+                                  (F centre_thr u 12), (F centre_full u 12),
+                                  (F right_low u 12), (F right_high u 12),
+                                  (F right_thr u 12), (F barcode_low u 12),
+                                  (F barcode_high u 12), (F barcode_thr u 12),
+                                  (F barcode_learned u 1), (F first_right u 1),
+                                  (F overlap s 9),
+                                  (F b4_floor_mg u 9),
+                                  (F b4_samples u 15), (F sweep_deg u 8))
     'robot/event/obstacle'    = @((F dist_mm u 12), (F angle_deg u 8), (F width_mm u 10),
                                   (F clear_l_mm u 12), (F clear_r_mm u 12),
                                   (F action n 3 $script:Avoid))

@@ -55,6 +55,7 @@
 #define B4_PROC_NOISE_HALF_SCALE     128
 #define B4_PROC_K_TENTHS_PER_ONE      10U
 #define B4_PROC_MIN_THRESHOLD_MG       1U
+#define B4_PROC_CAL_MAX_SAMPLES    20000U
 
 /** @brief Private terrain state, including unpublished filter history.
  */
@@ -76,6 +77,8 @@ typedef struct
     uint32_t          magnitude_baseline_mg;
     uint32_t          active_peak_height_um;
     uint32_t          noise_warmup_count;
+    uint32_t          cal_sum_mg;
+    uint32_t          cal_count;
     uint32_t          start_threshold_mg;
     uint32_t          complete_threshold_mg;
     uint32_t          last_impact_timestamp_ms;
@@ -103,6 +106,7 @@ typedef struct
     bool              b_launch_settled;
     bool              b_mag_previous_valid;
     bool              b_mag_seen;
+    bool              b_cal_measuring;
 } b4_proc_state_t;
 
 static b4_proc_state_t g_b4_proc_state = {0};
@@ -877,6 +881,117 @@ b4_proc_clear_run_maximum (void)
     return (result);
 }
 
+b4_types_result_t
+b4_proc_calibrate_level (void)
+{
+    b4_types_result_t result = B4_RESULT_OK;
+
+    if (false == g_b4_proc_state.b_initialized)
+    {
+        result = B4_RESULT_NOT_INITIALIZED;
+    }
+    else
+    {
+        /* The same restart as after a data gap, plus the baseline: it is
+         * captured again from the next settled window, so a car put down
+         * at a new tilt gets a new level reference. */
+        g_b4_proc_state.incline_window_count = 0U;
+        g_b4_proc_state.incline_window_next = 0U;
+        g_b4_proc_state.incline_baseline_mg = 0;
+        g_b4_proc_state.b_incline_baseline_valid = false;
+        g_b4_proc_state.level_count = 0U;
+        g_b4_proc_state.b_level_since_gap = false;
+        g_b4_proc_state.launch_settle_count = 0U;
+        g_b4_proc_state.b_launch_settled = false;
+        g_b4_proc_state.cal_sum_mg = 0U;
+        g_b4_proc_state.cal_count = 0U;
+        g_b4_proc_state.b_cal_measuring = false;
+        b4_proc_clear_residuals();
+    }
+
+    return (result);
+}
+
+b4_types_result_t
+b4_proc_calibrate_measure (void)
+{
+    b4_types_result_t result = B4_RESULT_OK;
+
+    if (false == g_b4_proc_state.b_initialized)
+    {
+        result = B4_RESULT_NOT_INITIALIZED;
+    }
+    else
+    {
+        g_b4_proc_state.cal_sum_mg = 0U;
+        g_b4_proc_state.cal_count = 0U;
+        g_b4_proc_state.b_cal_measuring = true;
+    }
+
+    return (result);
+}
+
+uint32_t
+b4_proc_calibrate_samples (void)
+{
+    return (g_b4_proc_state.cal_count);
+}
+
+b4_types_result_t
+b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg)
+{
+    b4_types_result_t result = B4_RESULT_INVALID_ARGUMENT;
+    uint32_t old_floor_mg = 0U;
+    uint32_t floor_mg = 0U;
+
+    if (NULL != p_floor_mg)
+    {
+        *p_floor_mg = 0U;
+        result = B4_RESULT_NOT_INITIALIZED;
+
+        if (true == g_b4_proc_state.b_initialized)
+        {
+            g_b4_proc_state.b_cal_measuring = false;
+            result = B4_RESULT_TIMEOUT;
+
+            if ((0U != g_b4_proc_state.cal_count) &&
+                (g_b4_proc_state.cal_count >= min_samples))
+            {
+                /* The sum is at most 8000 milli-g times the sample cap,
+                 * 1.6e8, so the rounded mean cannot overflow. */
+                floor_mg = (g_b4_proc_state.cal_sum_mg +
+                            (g_b4_proc_state.cal_count / 2U)) /
+                           g_b4_proc_state.cal_count;
+                if (0U == floor_mg)
+                {
+                    /* A zero floor is invalid and a flat trace is not
+                     * a reason to fail: take the smallest floor. */
+                    floor_mg = 1U;
+                }
+                *p_floor_mg = floor_mg;
+
+                old_floor_mg = g_b4_proc_state.config.noise_floor_mg;
+                g_b4_proc_state.config.noise_floor_mg = floor_mg;
+                result = b4_cfg_validate(&g_b4_proc_state.config);
+
+                if (B4_RESULT_OK == result)
+                {
+                    /* The estimate starts at the new floor, as at init. */
+                    g_b4_proc_state.noise_q8 =
+                        (int32_t)floor_mg * B4_PROC_NOISE_SCALE;
+                    b4_proc_refresh_thresholds();
+                }
+                else
+                {
+                    g_b4_proc_state.config.noise_floor_mg = old_floor_mg;
+                }
+            }
+        }
+    }
+
+    return (result);
+}
+
 static uint32_t
 b4_proc_abs_mg (int32_t value_mg)
 {
@@ -1602,6 +1717,16 @@ b4_proc_update_noise (uint32_t amplitude_mg)
         int32_t tau = 0;
         int32_t target_q8 = 0;
         int32_t floor_q8 = 0;
+
+        /* The calibration mean takes the same samples as the estimate
+         * and is not clipped: it must learn the floor from the sweep,
+         * not from the old floor. */
+        if ((true == g_b4_proc_state.b_cal_measuring) &&
+            (g_b4_proc_state.cal_count < B4_PROC_CAL_MAX_SAMPLES))
+        {
+            g_b4_proc_state.cal_sum_mg += amplitude_mg;
+            g_b4_proc_state.cal_count++;
+        }
 
         if (input_mg > g_b4_proc_state.complete_threshold_mg)
         {

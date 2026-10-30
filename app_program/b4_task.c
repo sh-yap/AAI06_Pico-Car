@@ -50,6 +50,19 @@
 #define B4_TASK_WORD_SLOTS          (2U)
 #define B4_TASK_FLAG_RUN_RESET      (0x00000001U)
 #define B4_TASK_FLAG_TICK           (0x00000002U)
+#define B4_TASK_FLAG_CAL_LEVEL      (0x00000004U)
+#define B4_TASK_FLAG_CAL_MEASURE    (0x00000008U)
+#define B4_TASK_FLAG_CAL_END        (0x00000010U)
+#define B4_TASK_FLAG_ALL            (B4_TASK_FLAG_RUN_RESET |                                      B4_TASK_FLAG_TICK |                                      B4_TASK_FLAG_CAL_LEVEL |                                      B4_TASK_FLAG_CAL_MEASURE |                                      B4_TASK_FLAG_CAL_END)
+/* The floor is the mean of this many 100 Hz samples at least.  The mean of
+ * N samples of a noise as large as its own mean is off by about 1/sqrt(N),
+ * 14 percent at 50, small beside the factor of four the hump start
+ * threshold is set above the noise. */
+#define B4_TASK_CAL_MIN_SAMPLES     (50U)
+/* The calibration result is one word, written by this task and read by the
+ * VC: the state in bits 0-2 and the floor in milli-g above it. */
+#define B4_TASK_CAL_STATE_MASK      (0x7U)
+#define B4_TASK_CAL_FLOOR_SHIFT     (3U)
 #define B4_TASK_UM_PER_DMM          (100U)
 
 #define B4_TASK_HEALTH_SHIFT        (0U)
@@ -79,6 +92,8 @@ static uint8_t          g_b4_task_humps = 0U;
 static uint8_t          g_b4_task_impacts = 0U;
 static bool             g_b4_task_b_imu_open = false;
 static volatile uint32_t g_b4_task_ticks = 0U;
+static volatile uint32_t g_b4_task_cal_word = 0U;
+static volatile uint32_t g_b4_task_cal_samples = 0U;
 
 /** @brief Return the kernel time in milliseconds.
  *
@@ -267,6 +282,111 @@ b4_task_request_run_reset (void)
     if (0 < g_b4_task_flag_id)
     {
         (void)tk_set_flg(g_b4_task_flag_id, B4_TASK_FLAG_RUN_RESET);
+    }
+}
+
+void
+b4_task_request_calibration (b4_task_cal_request_t request)
+{
+    static uint32_t const flags[] = {B4_TASK_FLAG_CAL_LEVEL,
+                                     B4_TASK_FLAG_CAL_MEASURE,
+                                     B4_TASK_FLAG_CAL_END};
+
+    if ((0 < g_b4_task_flag_id) && ((uint32_t)request < 3U))
+    {
+        (void)tk_set_flg(g_b4_task_flag_id, flags[request]);
+    }
+}
+
+b4_task_cal_state_t
+b4_task_get_calibration (uint32_t * p_floor_mg)
+{
+    uint32_t word = g_b4_task_cal_word;
+
+    if (NULL != p_floor_mg)
+    {
+        *p_floor_mg = word >> B4_TASK_CAL_FLOOR_SHIFT;
+    }
+
+    return ((b4_task_cal_state_t)(word & B4_TASK_CAL_STATE_MASK));
+}
+
+uint32_t
+b4_task_get_calibration_samples (void)
+{
+    return g_b4_task_cal_samples;
+}
+
+/** @brief Publish the calibration state and floor.
+ *
+ * @param state The state.
+ * @param floor_mg The floor in milli-g, zero unless DONE.
+ */
+static void
+b4_task_set_calibration (b4_task_cal_state_t state, uint32_t floor_mg)
+{
+    g_b4_task_cal_word = ((uint32_t)state & B4_TASK_CAL_STATE_MASK) |
+                         (floor_mg << B4_TASK_CAL_FLOOR_SHIFT);
+}
+
+/** @brief Take the calibration steps requested since the last sample, and
+ *         note when the measurement holds enough samples.
+ *
+ * @param pattern The flags that woke the task.
+ */
+static void
+b4_task_calibrate (UINT pattern)
+{
+    b4_task_cal_state_t state = B4_TASK_CAL_IDLE;
+    uint32_t floor_mg = 0U;
+    uint32_t samples = 0U;
+
+    if (0U != (pattern & B4_TASK_FLAG_CAL_LEVEL))
+    {
+        (void)b4_proc_calibrate_level();
+        g_b4_task_cal_samples = 0U;
+        b4_task_set_calibration(B4_TASK_CAL_IDLE, 0U);
+    }
+
+    if (0U != (pattern & B4_TASK_FLAG_CAL_MEASURE))
+    {
+        (void)b4_proc_calibrate_measure();
+        b4_task_set_calibration(B4_TASK_CAL_MEASURING, 0U);
+    }
+
+    state = b4_task_get_calibration(NULL);
+
+    if (0U != (pattern & B4_TASK_FLAG_CAL_END))
+    {
+        samples = b4_proc_calibrate_samples();
+        g_b4_task_cal_samples = samples;    /* Before the state: DONE/FAILED
+                                               tells the reader it is set. */
+
+        if (((B4_TASK_CAL_MEASURING == state) ||
+             (B4_TASK_CAL_ENOUGH == state)) &&
+            (B4_RESULT_OK == b4_proc_calibrate_apply(B4_TASK_CAL_MIN_SAMPLES,
+                                                     &floor_mg)))
+        {
+            b4_task_set_calibration(B4_TASK_CAL_DONE, floor_mg);
+        }
+        else
+        {
+            b4_task_set_calibration(B4_TASK_CAL_FAILED, 0U);
+        }
+
+        tm_printf((UB *)"[cal] b4 %s floor=%u mg samples=%u\n",
+                  (UB *)((B4_TASK_CAL_DONE == b4_task_get_calibration(NULL))
+                         ? "ok" : "FAILED"),
+                  (UINT)floor_mg, (UINT)samples);
+    }
+    else if ((B4_TASK_CAL_MEASURING == state) &&
+             (B4_TASK_CAL_MIN_SAMPLES <= b4_proc_calibrate_samples()))
+    {
+        b4_task_set_calibration(B4_TASK_CAL_ENOUGH, 0U);
+    }
+    else
+    {
+        /* Nothing to publish. */
     }
 }
 
@@ -538,14 +658,15 @@ b4_task_sample_task (INT stacd, void * p_exinf)
         uint32_t ticks = 0U;
 
         pattern = 0U;
-        (void)tk_wai_flg(g_b4_task_flag_id,
-                         B4_TASK_FLAG_TICK | B4_TASK_FLAG_RUN_RESET,
+        (void)tk_wai_flg(g_b4_task_flag_id, B4_TASK_FLAG_ALL,
                          TWF_ORW | TWF_BITCLR, &pattern, TMO_FEVR);
 
         if (0U != (pattern & B4_TASK_FLAG_RUN_RESET))
         {
             (void)b4_proc_clear_run_maximum();
         }
+
+        b4_task_calibrate(pattern);
 
         if (0U == (pattern & B4_TASK_FLAG_TICK))
         {

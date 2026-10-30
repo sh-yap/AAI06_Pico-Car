@@ -146,14 +146,15 @@ b4_cfg_default (void)
     config.tilt_threshold_mg = 250U;
     config.impact_delta_threshold_mg = 700U;
     config.impact_refractory_ms = 200U;
-    /* NOTE: The floor is the measured moving noise of this car, the
-     * settled estimate on flat floor at 100 mm/s. It was 11 to 16 mg in
+    /* NOTE: This is only the starting floor, until the first START
+     * calibration. Every START measures the moving noise in its pivot
+     * sweep and replaces it (b4_proc_calibrate_apply), so it follows the
+     * floor and chassis of the day. The value is the settled estimate on
+     * flat floor at 100 mm/s, 11 to 16 mg in
      * evidence/buddy1/20261030_025325_wifi_check.log and
-     * 20261030_030046_wifi_check.log, and the lower value is taken. It is
-     * a calibration of this car and sensor, so it is measured again with
-     * flat runs whenever the speed, surface, or chassis changes. It is
-     * never derived from the ramp. The estimate starts at the floor and
-     * never goes below it. */
+     * 20261030_030046_wifi_check.log, taking the lower. It is never
+     * derived from the ramp. The estimate starts at the floor and never
+     * goes below it. */
     config.noise_floor_mg = 12U;
     /* The estimate rises over 10 s at 100 Hz, so a ramp edge or a snag
      * cannot pull the threshold up quickly, and falls over 2 s, so a

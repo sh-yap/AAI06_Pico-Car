@@ -25,6 +25,19 @@
 #define MOTION_STALL_MS 1000U
 #define MOTION_MIN_ACTIVE_SPEED_MM_S 50
 #define MOTION_ZERO_SPEED_MM_S 20
+/* Slowest wheel speed a steered velocity command can ask for.  The motor
+   layer raises any drive below deadband_permille (80) to 80, and on the
+   floor that power turned a wheel at about 32-36 mm/s (30 Oct track logs
+   car_b2, mean 36 over 65 samples and 32 over 446 samples at 80 permille).
+   The feedforward line (140 + 0.5 x v) cannot give this speed: it reaches
+   80 permille only at a negative speed, so it does not describe the wheel
+   below about 50 mm/s.  A target below the speed the floor power produces
+   cannot be followed, and the PID then switches the wheel between 0 and 80
+   permille.  So such a wheel is braked instead: the inner wheel speed falls
+   from about 35 mm/s to 0 once, as steer grows, and never rises again.
+   Applies to steered velocity commands only (angle not 0); a straight
+   command, a pivot (80 mm/s wheels) or a distance move never reaches it. */
+#define MOTION_STEERED_MIN_WHEEL_MM_S 35
 #define MOTION_MAX_TURN_ANGLE_MDEG 360000
 #define MOTION_INVALID_TRANSITIONS_PER_SAMPLE 8U
 #define MOTION_TARGET_SLEW_MM_S_PER_PERIOD 6.0f
@@ -40,8 +53,17 @@ static motion_status_t motion_status;
 /* kp/ki were 0.15/0.30 (unloaded): on the floor a slowed wheel gained only
    ~60 permille per second and stalled (27 Oct closed-loop test).  Faster
    test_integrate values - Buddy 2 to retune loaded. */
-static motion_pid_t left_pid = { 0.40f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
-static motion_pid_t right_pid = { 0.40f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
+/* 2026-10-30: kp raised to 0.60 for line following.  The loaded plant needs
+   about 0.5 permille per mm/s (motion_config.c), so kp 0.50 would cancel a
+   speed error in one 20 ms sample if the wheel responded at once; 0.60 is
+   1.2 times that.  A wheel lag of 30-80 ms (assumed, not measured) cuts the
+   gain seen per sample to about 0.4-0.7 of that, so the loop stays damped:
+   a step simulation overshoots by up to about 10 percent for the
+   shortest lag and not at all for the longest.  The speed
+   is one encoder count (about 5 mm/s at 20 ms) of quantisation, which kp
+   turns into about 3 permille of PWM jitter.  ki is unchanged. */
+static motion_pid_t left_pid = { 0.60f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
+static motion_pid_t right_pid = { 0.60f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
 static motion_command_t command_queue[MOTION_QUEUE_DEPTH];
 static uint8_t command_buffer[sizeof(command_queue) + MOTION_QUEUE_DEPTH * 8U];
 static UW motion_stack[MOTION_STACK_SIZE / sizeof(UW)];
@@ -192,6 +214,13 @@ static void start_command(const motion_command_t *command,
             active_elapsed = 0U;
             command_origin_left = encoder->left_counts;
             command_origin_right = encoder->right_counts;
+        } else if ((command->value.velocity.angular_mdeg_s == 0) &&
+                   active_command &&
+                   (active_type == MOTION_COMMAND_SET_VELOCITY) &&
+                   (motion_status.target_angle_mdeg != 0)) {
+            /* A new straight holds the heading it began with, not the start heading. */
+            command_origin_left = encoder->left_counts;
+            command_origin_right = encoder->right_counts;
         }
 
         motion_status.active_sequence_id = command->sequence_id;
@@ -252,6 +281,20 @@ static int32_t motion_clamp_target(int32_t target)
         return -motion_config.max_speed_mm_s;
     }
     return target;
+}
+
+/* Forward part of a velocity command. A smaller magnitude with the same sign
+   (or zero) is taken at once. Speeding up, or a sign change, is slewed. */
+static float motion_forward_target(float current, float target, float max_delta)
+{
+    float current_mag = (current < 0.0f) ? -current : current;
+    float target_mag = (target < 0.0f) ? -target : target;
+    bool same_sign = (current * target) >= 0.0f;
+
+    if (same_sign && (target_mag < current_mag)) {
+        return target;
+    }
+    return motion_slew_target(current, target, max_delta);
 }
 
 static float motion_clamp_output(float output)
@@ -333,6 +376,9 @@ static void motion_loop(void)
     uint32_t invalid_delta;
     float correction;
     float slew_delta;
+    float forward_part;
+    float forward_limit;
+    float steer_part;
     float pwm_slew_delta;
     bool status_locked = false;
     bool command_locked = false;
@@ -494,6 +540,12 @@ static void motion_loop(void)
     motion_status.encoder_irq_count = enc.irq_count;
     motion_status.left_speed_mm_s = left_speed;
     motion_status.right_speed_mm_s = right_speed;
+    motion_status.left_target_mm_s = 0;
+    motion_status.right_target_mm_s = 0;
+    motion_status.left_slewed_target_mm_s = 0;
+    motion_status.right_slewed_target_mm_s = 0;
+    motion_status.left_drive_permille = 0;
+    motion_status.right_drive_permille = 0;
 
     motion_update_travelled(&enc, left_mm_per_count_q16,
                             right_mm_per_count_q16);
@@ -546,10 +598,37 @@ static void motion_loop(void)
         right_target_speed = motion_clamp_target(right_target_speed);
         slew_delta = MOTION_TARGET_SLEW_MM_S_PER_PERIOD
                      * ((float)elapsed_ms / (float)MOTION_PERIOD_MS);
-        slewed_left_target = motion_slew_target(slewed_left_target,
-            (float)left_target_speed, slew_delta);
-        slewed_right_target = motion_slew_target(slewed_right_target,
-            (float)right_target_speed, slew_delta);
+        if (active_type == MOTION_COMMAND_SET_VELOCITY) {
+            /* Slew only the forward speed, and only when speeding up. The
+               left-right difference follows the command directly so steering
+               is not delayed. Braking takes effect at once so a full steer
+               tightens the turn immediately. */
+            steer_part = ((float)left_target_speed
+                          - (float)right_target_speed) * 0.5f;
+            forward_limit = (float)motion_config.max_speed_mm_s
+                            - (steer_part < 0.0f ? -steer_part : steer_part);
+            forward_part = motion_forward_target(
+                (slewed_left_target + slewed_right_target) * 0.5f,
+                ((float)left_target_speed + (float)right_target_speed) * 0.5f,
+                slew_delta);
+            /* Keep both wheels inside the speed limit after recombining. */
+            if (forward_part > forward_limit) {
+                forward_part = forward_limit;
+            } else if (forward_part < -forward_limit) {
+                forward_part = -forward_limit;
+            }
+            slewed_left_target = forward_part + steer_part;
+            slewed_right_target = forward_part - steer_part;
+        } else {
+            slewed_left_target = motion_slew_target(slewed_left_target,
+                (float)left_target_speed, slew_delta);
+            slewed_right_target = motion_slew_target(slewed_right_target,
+                (float)right_target_speed, slew_delta);
+        }
+        motion_status.left_target_mm_s = left_target_speed;
+        motion_status.right_target_mm_s = right_target_speed;
+        motion_status.left_slewed_target_mm_s = (int32_t)slewed_left_target;
+        motion_status.right_slewed_target_mm_s = (int32_t)slewed_right_target;
         left_output = motion_pid_step(&left_pid, slewed_left_target,
                                       (float)left_speed,
                                       (float)elapsed_ms / 1000.0f);
@@ -578,6 +657,29 @@ static void motion_loop(void)
         if (slewed_left_target < 0.0f && left_output.output > 0.0f) left_output.output = 0.0f;
         if (slewed_right_target > 0.0f && right_output.output < 0.0f) right_output.output = 0.0f;
         if (slewed_right_target < 0.0f && right_output.output > 0.0f) right_output.output = 0.0f;
+        /* A steered wheel told to go slower than the deadband power can
+           drive is braked, and its PID forgets the error so it does not
+           wind up while it waits.  Done before the startup boost, which
+           still applies when the commanded speed is 50 mm/s or more. The
+           stall check below only looks at commanded speeds of 50 mm/s or
+           more, so a braked wheel is never a stall; the driven wheel is. */
+        if (active_type == MOTION_COMMAND_SET_VELOCITY
+            && motion_status.target_angle_mdeg != 0) {
+            if (motion_abs_i32((int32_t)slewed_left_target)
+                < MOTION_STEERED_MIN_WHEEL_MM_S) {
+                left_output.output = 0.0f;
+                left_applied_output = 0.0f;
+                left_pid.integral = 0.0f;
+                left_pid.previous_error = 0.0f;
+            }
+            if (motion_abs_i32((int32_t)slewed_right_target)
+                < MOTION_STEERED_MIN_WHEEL_MM_S) {
+                right_output.output = 0.0f;
+                right_applied_output = 0.0f;
+                right_pid.integral = 0.0f;
+                right_pid.previous_error = 0.0f;
+            }
+        }
         /* Apply a short, bounded boost only while a wheel is stationary.
            This overcomes static friction without becoming a permanent PWM
            offset once encoder feedback is present. */
@@ -629,6 +731,14 @@ static void motion_loop(void)
         } else if (motion_status.state == MOTION_STATE_RUNNING) {
             right_applied_output = right_output.output;
         }
+        /* Signed duty actually applied: the direction of the output with the
+           duty the motor layer last set (after its own limits). */
+        motion_status.left_drive_permille = left_output.output < 0.0f
+            ? -(int32_t)motion_motor_last_duty(0U)
+            : (int32_t)motion_motor_last_duty(0U);
+        motion_status.right_drive_permille = right_output.output < 0.0f
+            ? -(int32_t)motion_motor_last_duty(1U)
+            : (int32_t)motion_motor_last_duty(1U);
         active_elapsed += elapsed_ms;
         if (motion_target_reached(
                 motion_status.target_mm,

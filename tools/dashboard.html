@@ -175,16 +175,18 @@ const MOTION=['QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IMPACT']
 const AVOID=['STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY'];
 const CMD=['unknown','start','stop','status'];
 const RUN=['END','BEGIN'];
+const CALRES=['OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP'];
 const BARCODE=['','A','B','C','D','F','Z','INVALID'];
 const F=(k,kind,bits,names)=>({k,kind,bits,names});
 const FMT={
-  'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16)],
-  'robot/telemetry/line':[F('pos','n',3,LINE),F('err','s',8),F('sensors','u',2)],
+  'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16),F('tgt_l_mm_s','s',10),F('tgt_r_mm_s','s',10),F('slew_l_mm_s','s',10),F('slew_r_mm_s','s',10),F('pwm_l','s',11),F('pwm_r','s',11)],
+  'robot/telemetry/line':[F('pos','n',3,LINE),F('err','s',8),F('sensors','u',2),F('centre_adc','u',12),F('right_adc','u',12)],
   'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10)],
-  'robot/heartbeat':[F('seq','u',16),F('state','n',4,STATES),F('fault','u',9),F('ev_drop','u',8)],
-  'robot/state':[F('state','n',4,STATES),F('fault','u',9)],
+  'robot/heartbeat':[F('seq','u',16),F('state','n',4,STATES),F('fault','u',10),F('ev_drop','u',8)],
+  'robot/state':[F('state','n',4,STATES),F('fault','u',10)],
   'robot/event/barcode':[F('code','n',3,BARCODE),F('command','n',3,NAV)],
   'robot/event/hump':[F('peak_dmm','u',10),F('max_dmm','u',10)],
+  'robot/event/calibration':[F('result','n',3,CALRES),F('centre_low','u',12),F('centre_high','u',12),F('centre_thr','u',12),F('centre_full','u',12),F('right_low','u',12),F('right_high','u',12),F('right_thr','u',12),F('barcode_low','u',12),F('barcode_high','u',12),F('barcode_thr','u',12),F('barcode_learned','u',1),F('first_right','u',1),F('overlap','s',9),F('b4_floor_mg','u',9),F('b4_samples','u',15),F('sweep_deg','u',8)],
   'robot/event/obstacle':[F('dist_mm','u',12),F('angle_deg','u',8),F('width_mm','u',10),F('clear_l_mm','u',12),F('clear_r_mm','u',12),F('action','n',3,AVOID)],
   'robot/event/motion':[F('motion','n',3,MOTION)],
   'robot/event/run':[F('run','n',1,RUN)],
@@ -214,7 +216,7 @@ function decode(topic,bytes){
 const STATE_DEF=[['READY','','Ready'],['LINE_FOLLOW','sem-ok','Line follow'],['LINE_RECOVERY','sem-warn','Line search'],
   ['EXECUTE_NAV','sem-accent','Barcode turn'],['OBSTACLE_SCAN','sem-warn','Obstacle scan'],['BYPASS','sem-accent','Obstacle bypass'],
   ['OBSTACLE_STOP','sem-warn','Obstacle stop'],['FINISHED','sem-ok','Finished'],['SAFE_STOP','sem-bad','Safe stop']];
-const FAULT_BITS=[[1,'STALL'],[2,'ENCODER'],[4,'MOTION-CMD'],[32,'ULTRASONIC']];
+const FAULT_BITS=[[1,'STALL'],[2,'ENCODER'],[4,'MOTION-CMD'],[32,'ULTRASONIC'],[64,'CAL-CONTRAST'],[128,'CAL-LINE-NOT-FOUND'],[256,'CAL-BUDDY4'],[512,'CAL-SENSOR-GAP']];
 const faultName=f=>{f=+f||0;if(!f)return'';const b=FAULT_BITS.filter(x=>f&x[0]).map(x=>x[1]);return b.length?b.join('+'):('f'+f);};
 const stateSem=s=>{const d=STATE_DEF.find(x=>x[0]===s);return d?d[1]:'';};
 const shortTime=iso=>{const m=/T?(\d\d:\d\d:\d\d)\.(\d{3})/.exec(iso);if(m)return m[1]+'.'+m[2];const n=/(\d\d:\d\d:\d\d)/.exec(iso);return n?n[1]:iso;};
@@ -237,6 +239,7 @@ function handle(M,ts,topic,j){
   else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+j.command});trim(M);}
   else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm → '+j.action+(d===0?' (false)':'')});trim(M);}
   else if(topic==='robot/telemetry/terrain'){if(j.max_hump_dmm!=null)M.maxHump=Math.max(M.maxHump,+j.max_hump_dmm||0);if(j.tilt_mg!=null)M.tilt=+j.tilt_mg;trim(M);}
+  else if(topic==='robot/event/calibration'){M.events.push({ts,t:tt,tag:'state',txt:'Calibration '+j.result+' — centre thr '+j.centre_thr+' ('+j.centre_low+'-'+j.centre_high+'), right thr '+j.right_thr+' ('+j.right_low+'-'+j.right_high+'), barcode thr '+j.barcode_thr+(+j.barcode_learned?' learned':' fallback')+' ('+j.barcode_low+'-'+j.barcode_high+'), B4 floor '+j.b4_floor_mg+' mg ('+j.b4_samples+' samples), swept '+j.sweep_deg+'° ('+(+j.first_right?'right':'left')+' first), sensors '+(+j.overlap===-256?'overlap not measured':(+j.overlap<0?'gap '+(-j.overlap)+' samples':'overlap '+j.overlap+' samples'))});trim(M);}
   else if(topic==='robot/event/hump'){M.humps++;M.events.push({ts,t:tt,tag:'hump',txt:'Hump — peak '+(+j.peak_dmm||0)+' dmm (max '+(+j.max_dmm||0)+')'});trim(M);}
 }
 function trim(M){if(M.motion.length>CAP_PTS)M.motion.splice(0,M.motion.length-CAP_PTS);if(M.line.length>CAP_PTS)M.line.splice(0,M.line.length-CAP_PTS);if(M.events.length>CAP_EV)M.events.splice(0,M.events.length-CAP_EV);}

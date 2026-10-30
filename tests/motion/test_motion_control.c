@@ -156,6 +156,66 @@ int main(void)
     expect(pid_result.output <= 100.0f && pid_result.output > 0.0f, "PID saturation");
     pid_result = motion_pid_step(&pid, 0.0f, 100.0f, 0.02f);
     expect(pid_result.output < 0.0f, "PID reverse output");
+    motion_config_default(&config);
+    expect(motion_feedforward_permille(
+               100, config.left_feedforward_offset_permille,
+               config.left_feedforward_slope_q10,
+               config.left_feedforward_high_slope_q10,
+               config.feedforward_knee_mm_s, 0U,
+               config.deadband_permille, config.max_pwm_permille) == 190,
+           "default feedforward is 190 permille at 100 mm/s (loaded data)");
+    expect(motion_feedforward_permille(
+               200, config.left_feedforward_offset_permille,
+               config.left_feedforward_slope_q10,
+               config.left_feedforward_high_slope_q10,
+               config.feedforward_knee_mm_s, 0U,
+               config.deadband_permille, config.max_pwm_permille) == 242,
+           "default feedforward is inside 220-260 permille at 200 mm/s");
+    {
+        /* Steer step 70/70 -> 89/11 mm/s: feedforward, the Motion PID (kp
+           0.60, ki 1.20, as in motion_task.c) and the 25 permille per
+           period drive slew, on a first-order wheel model of 0.5 permille
+           per mm/s above 140 and a 50 ms lag (assumed, not measured). */
+        motion_pid_t pids[2] = {
+            { 0.60f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f },
+            { 0.60f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f } };
+        float speeds[2] = { 70.0f, 70.0f };
+        float pwm[2] = { 210.0f, 210.0f };     /* steady for 70 mm/s */
+        int32_t targets[2] = { 89, 11 };
+        float difference = 0.0f;
+        float peak = 0.0f;
+        int reached_period = -1;
+        int period;
+        int wheel;
+        for (period = 1; period <= 15; ++period) {
+            for (wheel = 0; wheel < 2; ++wheel) {
+                float want;
+                pid_result = motion_pid_step(&pids[wheel],
+                    (float)targets[wheel], speeds[wheel], 0.02f);
+                want = pid_result.output + (float)motion_feedforward_permille(
+                    targets[wheel], config.left_feedforward_offset_permille,
+                    config.left_feedforward_slope_q10,
+                    config.left_feedforward_high_slope_q10,
+                    config.feedforward_knee_mm_s, 0U,
+                    config.deadband_permille, config.max_pwm_permille);
+                pwm[wheel] = motion_slew_target(pwm[wheel], want, 25.0f);
+                speeds[wheel] += (((pwm[wheel] - 140.0f) * 2.0f)
+                                  - speeds[wheel]) * (20.0f / 50.0f);
+            }
+            difference = speeds[0] - speeds[1];
+            if (difference > peak) {
+                peak = difference;
+            }
+            if (reached_period < 0 && difference >= 0.9f * 78.0f) {
+                reached_period = period;
+            }
+        }
+        expect(reached_period > 0 && reached_period <= 5,
+               "steer step: 90 percent of 78 mm/s difference within 100 ms");
+        expect(peak <= 78.0f * 1.2f, "steer step: overshoot below 20 percent");
+        expect(difference > 70.0f && difference < 86.0f,
+               "steer step: settles near the commanded difference");
+    }
     expect(motion_stage4_case_count() == 18U, "Stage 4 sweep case count");
     expect(motion_stage4_case_get(0U, &stage4_case) &&
            stage4_case.direction == MOTION_STAGE4_FORWARD &&

@@ -39,4 +39,28 @@ b4_proc_reset_run_stats (void);
 b4_types_result_t
 b4_proc_clear_run_maximum (void);
 
+/** Forget the flat-ground reference so it is taken again from the next
+ * settled samples, and clear any noise measurement. Health stays below
+ * READY until the car has been still long enough to confirm level. */
+b4_types_result_t
+b4_proc_calibrate_level (void);
+
+/** Start measuring the moving noise: from now on every sample the noise
+ * estimate would accept is also added to a plain mean. */
+b4_types_result_t
+b4_proc_calibrate_measure (void);
+
+/** Return how many samples the measurement holds. */
+uint32_t
+b4_proc_calibrate_samples (void);
+
+/** Stop measuring and make the mean the noise floor.
+ *
+ * Fails when the measurement holds fewer than min_samples, or the mean is
+ * not a valid floor. The floor stays as it was on failure. *p_floor_mg
+ * receives the measured mean in milli-g either way, 0 if nothing was
+ * measured. */
+b4_types_result_t
+b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg);
+
 #endif /* B4_PROC_H */

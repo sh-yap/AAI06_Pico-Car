@@ -17,7 +17,7 @@ function Check([bool]$Ok, [string]$What) {
 }
 
 Write-Host "golden motion message"
-$m = Read-RobotPayload 'robot/telemetry/motion' (ConvertFrom-RobotHex '2aa30c002493330a00b0ff4f0100')
+$m = Read-RobotPayload 'robot/telemetry/motion' (ConvertFrom-RobotHex '2aa30c002493330a00b0ff4f01a00fe2c870ee8bb703')
 Check ($m.v -eq 2)            "v = 2"
 Check ($m.t -eq 207050)       "t = 207050"
 Check ($m.spd_l_mm_s -eq 201) "spd_l = 201"
@@ -25,11 +25,34 @@ Check ($m.spd_r_mm_s -eq -199) "spd_r = -199 (signed)"
 Check ($m.enc_l -eq 40)       "enc_l = 40"
 Check ($m.enc_r -eq -40)      "enc_r = -40 (signed)"
 Check ($m.dist_mm -eq 20)     "dist = 20"
+Check ($m.tgt_l_mm_s -eq 250)  "tgt_l = 250"
+Check ($m.tgt_r_mm_s -eq -120) "tgt_r = -120 (signed)"
+Check ($m.slew_l_mm_s -eq 200) "slew_l = 200"
+Check ($m.slew_r_mm_s -eq -100) "slew_r = -100 (signed)"
+Check ($m.pwm_l -eq 190)         "pwm_l = 190"
+Check ($m.pwm_r -eq -145)        "pwm_r = -145 (signed, 11 bits)"
+
+Write-Host "golden line message"
+$l = Read-RobotPayload 'robot/telemetry/line' (ConvertFrom-RobotHex '2aa30c00643f0e4638')
+Check ($l.pos -eq 'CENTRE')    "pos = CENTRE"
+Check ($l.err -eq -5)          "err = -5 (signed)"
+Check ($l.sensors -eq 1)       "sensors = 1"
+Check ($l.centre_adc -eq 3100) "centre_adc = 3100"
+Check ($l.right_adc -eq 1800)  "right_adc = 1800"
+
+Write-Host "golden calibration message (sensor gap)"
+$c = Read-RobotPayload 'robot/event/calibration' (ConvertFrom-RobotHex '027d0000103238d8da90953e70d7da580290ad6dfd0000001e')
+Check ($c.result -eq 'SENSOR_GAP') "result = SENSOR_GAP"
+Check ($c.centre_thr -eq 1750)     "centre_thr = 1750"
+Check ($c.first_right -eq 1)       "first_right = 1"
+Check ($c.overlap -eq -6)          "overlap = -6 (a 6 sample gap, signed)"
+Check ($c.sweep_deg -eq 30)        "sweep_deg = 30"
 
 Write-Host "golden heartbeat message"
-$json = ConvertTo-RobotJson -Topic 'robot/heartbeat' -Hex '3a5900001c0304c17f'
-Check ($json -eq '{"v":2,"t":5710,"seq":199,"state":"READY","fault":260,"ev_drop":255}') "heartbeat JSON line: $json"
+$json = ConvertTo-RobotJson -Topic 'robot/heartbeat' -Hex '3a5900001c030481ff'
+Check ($json -eq '{"v":2,"t":5710,"seq":199,"state":"READY","fault":516,"ev_drop":255}') "heartbeat JSON line: $json"
 $hb = $json | ConvertFrom-Json
+Check ($hb.fault -eq 516) "heartbeat fault is 10 bits (512 = sensor gap, 4 = motion cmd)"
 Check ($hb.seq -eq 199) "heartbeat readable by ConvertFrom-Json (mqtt_check.ps1)"
 
 Write-Host "barcode codes: A-D and the course's F, Z"
