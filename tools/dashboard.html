@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pico Car Live Dashboard</title>
+<!-- Bundled locally so this works at the track with no internet. -->
+<script src="chart.umd.min.js"></script>
+<script src="mqtt.min.js"></script>
+<style>
+  :root{
+    --bg:#eef1f6; --surface:#fff; --surface-2:#f3f6fa; --border:#d7dee8;
+    --fg:#192231; --muted:#5a6878; --accent:#2f6fed;
+    --ok:#17935a; --warn:#bd7d18; --bad:#d23f3f;
+    --left:#2f6fed; --right:#e07b2f; --err:#7a5bff; --dist:#17968a;
+    --font:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+    color-scheme:light;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0e131b; --surface:#151d28; --surface-2:#1b2531; --border:#293543;
+    --fg:#e6edf6; --muted:#93a2b5; --accent:#5b8cff;
+    --ok:#33bd79; --warn:#e0a548; --bad:#ef6a6a;
+    --left:#5b8cff; --right:#ff9f5c; --err:#a593ff; --dist:#3cc4b4;
+    color-scheme:dark;
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --bg:#0e131b; --surface:#151d28; --surface-2:#1b2531; --border:#293543;
+    --fg:#e6edf6; --muted:#93a2b5; --accent:#5b8cff;
+    --ok:#33bd79; --warn:#e0a548; --bad:#ef6a6a;
+    --left:#5b8cff; --right:#ff9f5c; --err:#a593ff; --dist:#3cc4b4;
+    color-scheme:dark;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);line-height:1.45;font-size:14px}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 16px 40px}
+  h1{margin:0;font-size:18px;font-weight:700;letter-spacing:-.01em}
+
+  header{position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1px solid var(--border)}
+  header .in{max-width:1120px;margin:0 auto;padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .brand{margin-right:auto;min-width:0}
+  .brand span{display:block;font-size:12px;color:var(--muted)}
+
+  .conn{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .conn input{font-family:var(--mono);font-size:13px;background:var(--surface-2);color:var(--fg);
+    border:1px solid var(--border);border-radius:7px;padding:7px 9px}
+  .conn input.host{width:130px}.conn input.port{width:66px}
+  .status{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:var(--muted)}
+  .status .dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
+  .status.on .dot{background:var(--ok)} .status.connecting .dot{background:var(--warn)}
+  .status.err .dot{background:var(--bad)} .status.on{color:var(--ok)}
+
+  .btn{font-family:var(--font);font-size:13px;font-weight:600;color:#fff;background:var(--accent);
+    border:none;border-radius:8px;padding:8px 14px;cursor:pointer}
+  .btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--border)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  .cmdbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:16px;
+    background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+  .cmdbar .lab{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-right:auto}
+  .cmd{font-size:15px;font-weight:700;padding:11px 22px;border-radius:9px;border:none;cursor:pointer;color:#fff}
+  .cmd.start{background:var(--ok)} .cmd.stop{background:var(--bad)} .cmd.restart{background:var(--accent)}
+  .cmd:disabled{opacity:.4;cursor:not-allowed}
+
+  .meta{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:16px}
+  .meta b{color:var(--fg);font-weight:600;font-family:var(--mono)}
+
+  .drop{margin-top:12px;border:1.5px dashed var(--border);border-radius:12px;background:var(--surface-2);
+    padding:10px 14px;font-size:12.5px;color:var(--muted);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .drop.hot{border-color:var(--accent)}
+
+  .section-title{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:24px 0 12px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .kpi{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;min-width:0}
+  .kpi .label{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .kpi .val{font-family:var(--mono);font-weight:600;font-size:26px;line-height:1.15;margin-top:6px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+  .kpi .val small{font-size:14px;color:var(--muted);font-weight:500}
+  .kpi.state .val{font-size:18px}
+  .pill{display:inline-block;font-family:var(--mono);font-weight:600;font-size:13px;padding:4px 10px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border)}
+  .pill.ok{color:var(--ok)} .pill.warn{color:var(--warn)} .pill.bad{color:var(--bad)}
+
+  .states{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  .chip{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:11px 13px;opacity:.5;min-width:0}
+  .chip.on{opacity:1;background:var(--surface)} .chip.final{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .chip .nm{font-weight:600;font-size:13.5px;display:flex;align-items:center;gap:7px}
+  .chip .nm::before{content:"";width:9px;height:9px;border-radius:2px;background:var(--muted);flex:none}
+  .chip.sem-ok .nm::before{background:var(--ok)} .chip.sem-warn .nm::before{background:var(--warn)}
+  .chip.sem-bad .nm::before{background:var(--bad)} .chip.sem-accent .nm::before{background:var(--accent)}
+  .chip .sub{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:5px}
+
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px 10px;min-width:0}
+  .card.full{grid-column:1/-1}
+  .card h3{margin:0 0 2px;font-size:14px;font-weight:600}
+  .card .cap{font-size:12px;color:var(--muted);margin-bottom:10px}
+  .plot{position:relative;height:230px}.plot.tall{height:260px}
+
+  .bars{display:flex;flex-direction:column;gap:9px}
+  .brow{display:grid;grid-template-columns:78px 1fr 52px;align-items:center;gap:10px;font-size:13px}
+  .brow .track{height:14px;border-radius:7px;background:var(--surface-2);overflow:hidden}
+  .brow .fill{height:100%;border-radius:7px}
+  .brow .pct{font-family:var(--mono);text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+  .brow .nm{font-weight:600}
+
+  .timeline{display:flex;flex-direction:column;max-height:360px;overflow:auto;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
+  .ev{display:grid;grid-template-columns:76px 86px 1fr;gap:12px;padding:8px 14px;font-size:13px;align-items:baseline;border-bottom:1px solid var(--border)}
+  .ev:last-child{border-bottom:none}
+  .ev .t{font-family:var(--mono);color:var(--muted);font-size:12px}
+  .ev .tag{font-family:var(--mono);font-size:11px;font-weight:600;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--muted);text-align:center}
+  .ev .tag.state{color:var(--accent)} .ev .tag.fault{color:var(--bad)} .ev .tag.obst{color:var(--warn)} .ev .tag.bcode{color:var(--err)} .ev .tag.hump{color:var(--dist)}
+  .ev .d{min-width:0;overflow-wrap:anywhere} .ev .d b{font-family:var(--mono)}
+  .foot{font-size:12px;color:var(--muted);margin-top:18px}
+  code{font-family:var(--mono);background:var(--surface-2);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<header>
+  <div class="in">
+    <div class="brand"><h1>Pico Car Live Dashboard</h1><span>AAI06 · connect to the robot and drive it from here</span></div>
+    <div class="conn">
+      <input class="host" id="host" value="localhost" title="Broker host / IP">
+      <input class="port" id="port" value="9001" title="Websocket port">
+      <button class="btn" id="connectBtn">Connect</button>
+      <span class="status" id="status"><span class="dot"></span><span id="statusText">offline</span></span>
+      <button class="btn ghost" id="themeBtn">Theme</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="cmdbar">
+    <span class="lab">Robot commands</span>
+    <button class="cmd start" id="cmdStart" disabled>▶ Start</button>
+    <button class="cmd stop" id="cmdStop" disabled>■ Stop</button>
+    <button class="cmd restart" id="cmdRestart" disabled>⟳ Stop → Start</button>
+  </div>
+
+  <div class="meta" id="meta"></div>
+
+  <div class="drop" id="drop">
+    <div style="flex:1;min-width:180px"><b style="color:var(--fg)">Not connected?</b> Drop a recorded <code>evidence\buddy1\*.log</code> here to review it offline.</div>
+    <input type="file" id="file" accept=".log,.txt" hidden>
+    <button class="btn ghost" id="loadBtn">Load .log</button>
+  </div>
+
+  <div class="section-title">Run summary</div>
+  <div class="kpis" id="kpis"></div>
+
+  <div class="section-title">State machine</div>
+  <div class="states" id="states"></div>
+
+  <div class="section-title">Charts</div>
+  <div class="charts">
+    <div class="card full"><h3>Wheel speed</h3><div class="cap">Measured left / right wheel speed (mm/s). Target is 80 mm/s.</div><div class="plot tall"><canvas id="cSpeed"></canvas></div></div>
+    <div class="card"><h3>Line error</h3><div class="cap">−127 = hard left · 0 = centred · +127 = hard right.</div><div class="plot"><canvas id="cErr"></canvas></div></div>
+    <div class="card"><h3>Distance travelled</h3><div class="cap">Cumulative distance (mm) from the encoders.</div><div class="plot"><canvas id="cDist"></canvas></div></div>
+  </div>
+
+  <div class="section-title">Where the line was seen</div>
+  <div class="card"><div class="bars" id="posBars"></div></div>
+
+  <div class="section-title">Event timeline</div>
+  <div class="timeline" id="timeline"></div>
+
+  <p class="foot" id="foot"></p>
+</div>
+
+<script>
+/* ---------- binary decoder (ports tools/robot_decode.ps1) ---------- */
+const STATES=['INIT','READY','LINE_FOLLOW','EXECUTE_NAV','OBSTACLE_STOP','OBSTACLE_SCAN','BYPASS','LINE_RECOVERY','FINISHED','SAFE_STOP'];
+const NAV=['NONE','LEFT','RIGHT','STRAIGHT','UTURN'];
+const LINE=['LEFT','CENTRE','RIGHT','LOST','JUNCTION'];
+const MOTION=['QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IMPACT'];
+const AVOID=['STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY'];
+const CMD=['unknown','start','stop','status'];
+const RUN=['END','BEGIN'];
+const BARCODE=['','A','B','C','D','F','Z','INVALID'];
+const F=(k,kind,bits,names)=>({k,kind,bits,names});
+const FMT={
+  'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16)],
+  'robot/telemetry/line':[F('pos','n',3,LINE),F('err','s',8),F('sensors','u',2)],
+  'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10)],
+  'robot/heartbeat':[F('seq','u',16),F('state','n',4,STATES),F('fault','u',9),F('ev_drop','u',8)],
+  'robot/state':[F('state','n',4,STATES),F('fault','u',9)],
+  'robot/event/barcode':[F('code','n',3,BARCODE),F('command','n',3,NAV)],
+  'robot/event/hump':[F('peak_dmm','u',10),F('max_dmm','u',10)],
+  'robot/event/obstacle':[F('dist_mm','u',12),F('angle_deg','u',8),F('width_mm','u',10),F('clear_l_mm','u',12),F('clear_r_mm','u',12),F('action','n',3,AVOID)],
+  'robot/event/motion':[F('motion','n',3,MOTION)],
+  'robot/event/run':[F('run','n',1,RUN)],
+  'robot/summary':[F('run_ms','u',20),F('dist_mm','s',16),F('max_hump_dmm','u',10),F('humps','u',8),F('barcodes','u',8),F('obstacles','u',8)],
+  'robot/event/command':[F('cmd','n',2,CMD),F('ok','u',1)],
+};
+function readBits(bytes,pos,n){let v=0,mult=1;for(let i=0;i<n;i++){const p=pos.v;if((p>>3)>=bytes.length)throw new Error('short');const bit=(bytes[p>>3]>>(p&7))&1;if(bit)v+=mult;mult*=2;pos.v=p+1;}return v;}
+function decode(topic,bytes){
+  const isBin=bytes.length>0 && bytes[0]!==0x7B && FMT[topic] && (bytes[0]&0x03)===2;
+  if(!isBin){ // text payload (JSON firmware, status, info, command, unknown)
+    let s='';try{s=new TextDecoder().decode(bytes);}catch(e){s='';}
+    if(s.startsWith('{')){try{return JSON.parse(s);}catch(e){return {_text:s};}}
+    return {_text:s};
+  }
+  const pos={v:0},out={};
+  out.v=readBits(bytes,pos,2); out.t=readBits(bytes,pos,32);
+  for(const f of FMT[topic]){
+    let raw=readBits(bytes,pos,f.bits);
+    if(f.kind==='s'){ if(raw>=Math.pow(2,f.bits-1)) raw-=Math.pow(2,f.bits); out[f.k]=raw; }
+    else if(f.kind==='n'){ out[f.k]=raw<f.names.length?f.names[raw]:'UNKNOWN'; }
+    else out[f.k]=raw;
+  }
+  return out;
+}
+
+/* ---------- model + per-record logic (shared with the .log parser) ---------- */
+const STATE_DEF=[['READY','','Ready'],['LINE_FOLLOW','sem-ok','Line follow'],['LINE_RECOVERY','sem-warn','Line search'],
+  ['EXECUTE_NAV','sem-accent','Barcode turn'],['OBSTACLE_SCAN','sem-warn','Obstacle scan'],['BYPASS','sem-accent','Obstacle bypass'],
+  ['OBSTACLE_STOP','sem-warn','Obstacle stop'],['FINISHED','sem-ok','Finished'],['SAFE_STOP','sem-bad','Safe stop']];
+const FAULT_BITS=[[1,'STALL'],[2,'ENCODER'],[4,'MOTION-CMD'],[32,'ULTRASONIC']];
+const faultName=f=>{f=+f||0;if(!f)return'';const b=FAULT_BITS.filter(x=>f&x[0]).map(x=>x[1]);return b.length?b.join('+'):('f'+f);};
+const stateSem=s=>{const d=STATE_DEF.find(x=>x[0]===s);return d?d[1]:'';};
+const shortTime=iso=>{const m=/T?(\d\d:\d\d:\d\d)\.(\d{3})/.exec(iso);if(m)return m[1]+'.'+m[2];const n=/(\d\d:\d\d:\d\d)/.exec(iso);return n?n[1]:iso;};
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const css=n=>getComputedStyle(document.body).getPropertyValue(n).trim();
+const CAP_PTS=4000, CAP_EV=600;
+
+function newModel(){return{build:'',first:null,last:null,motion:[],line:[],states:[],events:[],drops:0,pos:{},faults:[],finalState:null,peakSpeed:0,distance:0,runs:0,humps:0,maxHump:0,tilt:null,t0:null,prevState:null,prevFault:-1};}
+function handle(M,ts,topic,j){
+  if(!M.first)M.first=ts; M.last=ts;
+  const tt=j&&j.t!=null?+j.t:null;
+  if(tt!=null&&(M.t0==null||tt<M.t0))M.t0=tt;
+  if(topic==='robot/info'){M.build=j._text||'';return;}
+  if(topic==='robot/status'){const off=/offline/.test(j._text||'');if(off)M.drops++;M.events.push({ts,t:tt,tag:'conn',txt:'WiFi '+(off?'offline':'online')});trim(M);return;}
+  if(topic==='robot/telemetry/motion'){const o={ts,t:tt,l:+j.spd_l_mm_s||0,r:+j.spd_r_mm_s||0,dist:+j.dist_mm||0};M.motion.push(o);M.peakSpeed=Math.max(M.peakSpeed,Math.abs(o.l),Math.abs(o.r));M.distance=Math.max(M.distance,o.dist);trim(M);}
+  else if(topic==='robot/telemetry/line'){M.line.push({ts,t:tt,pos:j.pos,err:+j.err||0});if(j.pos)M.pos[j.pos]=(M.pos[j.pos]||0)+1;trim(M);}
+  else if(topic==='robot/state'){const s=j.state,f=+j.fault||0;if(s!==M.prevState||f!==M.prevFault){M.states.push({ts,t:tt,state:s,fault:f});if(f){M.events.push({ts,t:tt,tag:'fault',txt:s+' — fault '+faultName(f)});M.faults.push({name:faultName(f)});}else M.events.push({ts,t:tt,tag:'state',txt:s});M.prevState=s;M.prevFault=f;trim(M);}M.finalState={state:s,fault:f};}
+  else if(topic==='robot/event/command'){M.events.push({ts,t:tt,tag:'cmd',txt:'Command '+j.cmd+(j.ok?' ✓':' ✗')});if(j.cmd==='start')M.runs++;trim(M);}
+  else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});trim(M);}
+  else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+j.command});trim(M);}
+  else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm → '+j.action+(d===0?' (false)':'')});trim(M);}
+  else if(topic==='robot/telemetry/terrain'){if(j.max_hump_dmm!=null)M.maxHump=Math.max(M.maxHump,+j.max_hump_dmm||0);if(j.tilt_mg!=null)M.tilt=+j.tilt_mg;trim(M);}
+  else if(topic==='robot/event/hump'){M.humps++;M.events.push({ts,t:tt,tag:'hump',txt:'Hump — peak '+(+j.peak_dmm||0)+' dmm (max '+(+j.max_dmm||0)+')'});trim(M);}
+}
+function trim(M){if(M.motion.length>CAP_PTS)M.motion.splice(0,M.motion.length-CAP_PTS);if(M.line.length>CAP_PTS)M.line.splice(0,M.line.length-CAP_PTS);if(M.events.length>CAP_EV)M.events.splice(0,M.events.length-CAP_EV);}
+
+function parseLog(text){
+  const M=newModel();
+  for(const raw of text.split(/\r?\n/)){
+    if(!raw.trim())continue;
+    const sp=raw.indexOf(' ');if(sp<0)continue;
+    const ts=raw.slice(0,sp),rest=raw.slice(sp+1);
+    const sp2=rest.indexOf(' ');const topic=sp2<0?rest:rest.slice(0,sp2);
+    const payload=sp2<0?'':rest.slice(sp2+1);
+    let j;if(payload.startsWith('{')){try{j=JSON.parse(payload);}catch(e){continue;}}else j={_text:payload};
+    handle(M,ts,topic,j);
+  }
+  return M;
+}
+
+/* ---------- rendering ---------- */
+function fmtDur(ms){ms=Math.max(0,ms||0);const s=Math.round(ms/1000),m=Math.floor(s/60);return m+'m '+String(s%60).padStart(2,'0')+'s';}
+function render(M,live){
+  const span=(M.first&&M.last)?(shortTime(M.first)+' → '+shortTime(M.last)):'—';
+  let durMs=0;try{const a=Date.parse((M.first||'').slice(0,23)),b=Date.parse((M.last||'').slice(0,23));if(a&&b)durMs=b-a;}catch(e){}
+  document.getElementById('meta').innerHTML=
+    `<div>Mode <b>${live?'LIVE':'log file'}</b></div>`+(M.build?`<div>Build <b>${esc(M.build)}</b></div>`:'')+
+    `<div>Span <b>${span}</b></div><div>Runs <b>${M.runs}</b></div>`;
+
+  const fs=M.finalState||{state:'—',fault:0};
+  const sem=fs.fault?'bad':(stateSem(fs.state)==='sem-ok'?'ok':stateSem(fs.state)==='sem-warn'?'warn':'');
+  const faultText=M.faults.length?[...new Set(M.faults.map(f=>f.name))].join(', '):'none';
+  const kpis=[
+    {l:'Current state',v:`<span class="pill ${sem}">${esc(fs.state)}</span>`+(fs.fault?` <span class="pill bad">${faultName(fs.fault)}</span>`:''),cls:'state'},
+    {l:live?'Live duration':'Log duration',v:fmtDur(durMs)},
+    {l:'Distance',v:M.distance+'<small> mm</small>'},
+    {l:'Peak wheel speed',v:M.peakSpeed+'<small> mm/s</small>'},
+    {l:'Faults',v:`<span style="color:${M.faults.length?'var(--bad)':'var(--ok)'}">${faultText}</span>`},
+    {l:'Humps',v:String(M.humps)+(M.tilt!=null?` <small>tilt ${M.tilt} mg</small>`:'')},
+    {l:'WiFi drops',v:String(M.drops)},
+  ];
+  document.getElementById('kpis').innerHTML=kpis.map(k=>`<div class="kpi ${k.cls||''}"><div class="label">${k.l}</div><div class="val">${k.v}</div></div>`).join('');
+
+  const visits={},dwell={};
+  for(let i=0;i<M.states.length;i++){const s=M.states[i].state;visits[s]=(visits[s]||0)+1;if(M.states[i].t!=null&&i+1<M.states.length&&M.states[i+1].t!=null)dwell[s]=(dwell[s]||0)+Math.max(0,M.states[i+1].t-M.states[i].t);}
+  document.getElementById('states').innerHTML=STATE_DEF.map(([key,semc,label])=>{
+    const on=visits[key]>0,isF=key===fs.state;
+    const sub=on?`${visits[key]}× · ${dwell[key]?(Math.round(dwell[key]/100)/10)+'s':'—'}`:'not entered';
+    return `<div class="chip ${on?'on':''} ${semc} ${isF?'final':''}"><div class="nm">${label}</div><div class="sub">${sub}</div></div>`;
+  }).join('');
+
+  const order=['CENTRE','LEFT','RIGHT','LOST','JUNCTION'],col={CENTRE:'var(--ok)',LEFT:'var(--accent)',RIGHT:'var(--right)',LOST:'var(--bad)',JUNCTION:'var(--warn)'};
+  const tot=Object.values(M.pos).reduce((a,b)=>a+b,0)||1;
+  document.getElementById('posBars').innerHTML=order.filter(k=>M.pos[k]).map(k=>{const pct=Math.round(100*M.pos[k]/tot);return `<div class="brow"><div class="nm">${k[0]+k.slice(1).toLowerCase()}</div><div class="track"><div class="fill" style="width:${pct}%;background:${col[k]}"></div></div><div class="pct">${pct}%</div></div>`;}).join('')||'<div class="pct">No line data.</div>';
+
+  const tl=document.getElementById('timeline');const nearBottom=tl.scrollHeight-tl.scrollTop-tl.clientHeight<40;
+  tl.innerHTML=M.events.slice(-250).map(e=>`<div class="ev"><div class="t">${shortTime(e.ts)}</div><div class="tag ${e.tag}">${e.tag}</div><div class="d">${esc(e.txt)}</div></div>`).join('')||'<div class="ev"><div class="d">No events yet.</div></div>';
+  if(live&&nearBottom)tl.scrollTop=tl.scrollHeight;
+
+  document.getElementById('foot').textContent=`${M.motion.length} motion · ${M.line.length} line · ${M.states.length} state changes · ${M.events.length} events.`;
+}
+
+/* ---------- charts ---------- */
+let CH=null;
+function makeCharts(M){
+  if(CH){['speed','err','dist'].forEach(k=>{try{CH[k].destroy();}catch(e){}});}
+  const grid=css('--border'),tick=css('--muted'),fg=css('--fg');
+  const t0=M.t0!=null?M.t0:0,sec=o=>Math.round((o.t-t0)/100)/10;
+  const base={responsive:true,maintainAspectRatio:false,parsing:false,animation:false,interaction:{mode:'index',intersect:false},
+    scales:{x:{type:'linear',title:{display:true,text:'seconds',color:tick,font:{size:10}},grid:{color:grid},ticks:{color:tick,font:{size:10},maxTicksLimit:8}},
+      y:{grid:{color:grid},ticks:{color:tick,font:{size:10}}}},
+    plugins:{legend:{display:false},tooltip:{titleColor:fg,bodyColor:fg,backgroundColor:css('--surface'),borderColor:grid,borderWidth:1,padding:9,callbacks:{title:it=>it.length?('t = '+it[0].parsed.x+' s'):''}}}};
+  const mot=M.motion.filter(o=>o.t!=null),ln=M.line.filter(o=>o.t!=null);
+  CH={
+    speed:new Chart(document.getElementById('cSpeed'),{type:'line',data:{datasets:[
+      {label:'Left',data:mot.map(o=>({x:sec(o),y:o.l})),borderColor:css('--left'),borderWidth:2,pointRadius:0,tension:.2},
+      {label:'Right',data:mot.map(o=>({x:sec(o),y:o.r})),borderColor:css('--right'),borderWidth:2,pointRadius:0,tension:.2}]},
+      options:{...base,plugins:{...base.plugins,legend:{display:true,position:'top',align:'end',labels:{color:fg,boxWidth:12,boxHeight:3,font:{size:11.5}}}},
+        scales:{...base.scales,y:{...base.scales.y,title:{display:true,text:'mm/s',color:tick,font:{size:10}}}}}}),
+    err:new Chart(document.getElementById('cErr'),{type:'line',data:{datasets:[{label:'Error',data:ln.map(o=>({x:sec(o),y:o.err})),borderColor:css('--err'),borderWidth:2,pointRadius:0,stepped:true}]},
+      options:{...base,scales:{...base.scales,y:{...base.scales.y,suggestedMin:-135,suggestedMax:135,title:{display:true,text:'err',color:tick,font:{size:10}}}}}}),
+    dist:new Chart(document.getElementById('cDist'),{type:'line',data:{datasets:[{label:'Distance',data:mot.map(o=>({x:sec(o),y:o.dist})),borderColor:css('--dist'),backgroundColor:css('--dist')+'33',borderWidth:2,pointRadius:0,fill:true,tension:.2}]},
+      options:{...base,scales:{...base.scales,y:{...base.scales.y,title:{display:true,text:'mm',color:tick,font:{size:10}}}}}}),
+  };
+}
+function updateCharts(M){
+  if(!CH)return;
+  const t0=M.t0!=null?M.t0:0,sec=o=>Math.round((o.t-t0)/100)/10;
+  const mot=M.motion.filter(o=>o.t!=null),ln=M.line.filter(o=>o.t!=null);
+  CH.speed.data.datasets[0].data=mot.map(o=>({x:sec(o),y:o.l}));
+  CH.speed.data.datasets[1].data=mot.map(o=>({x:sec(o),y:o.r}));
+  CH.err.data.datasets[0].data=ln.map(o=>({x:sec(o),y:o.err}));
+  CH.dist.data.datasets[0].data=mot.map(o=>({x:sec(o),y:o.dist}));
+  CH.speed.update('none');CH.err.update('none');CH.dist.update('none');
+}
+
+/* ---------- state ---------- */
+let model=newModel(), mode='idle', client=null, dirty=true;
+function setModel(M,live){model=M;mode=live?'live':'file';makeCharts(model);render(model,live);}
+
+/* ---------- MQTT live ---------- */
+function setStatus(cls,txt){const s=document.getElementById('status');s.className='status '+cls;document.getElementById('statusText').textContent=txt;}
+function setCmdEnabled(on){['cmdStart','cmdStop','cmdRestart'].forEach(id=>document.getElementById(id).disabled=!on);}
+function connect(){
+  if(client){try{client.end(true);}catch(e){}client=null;}
+  const host=document.getElementById('host').value.trim()||'localhost';
+  const port=document.getElementById('port').value.trim()||'9001';
+  const url='ws://'+host+':'+port;
+  setStatus('connecting','connecting…');document.getElementById('connectBtn').textContent='Disconnect';
+  try{client=mqtt.connect(url,{connectTimeout:4000,reconnectPeriod:2000});}catch(e){setStatus('err','bad URL');return;}
+  client.on('connect',()=>{setStatus('on','connected · '+host);setCmdEnabled(true);client.subscribe('robot/#');
+    model=newModel();mode='live';makeCharts(model);render(model,true);});
+  client.on('reconnect',()=>setStatus('connecting','reconnecting…'));
+  client.on('error',()=>setStatus('err','connection error'));
+  client.on('close',()=>{setStatus('err','disconnected');setCmdEnabled(false);});
+  client.on('message',(topic,payload)=>{
+    let bytes;try{bytes=new Uint8Array(payload);}catch(e){return;}
+    let j;try{j=decode(topic,bytes);}catch(e){return;}
+    const ts=new Date().toISOString();
+    handle(model,ts,topic,j);dirty=true;
+  });
+}
+function disconnect(){if(client){try{client.end(true);}catch(e){}client=null;}setStatus('','offline');setCmdEnabled(false);document.getElementById('connectBtn').textContent='Connect';}
+function pub(cmd){if(client&&client.connected){client.publish('robot/command',cmd);
+  model.events.push({ts:new Date().toISOString(),t:null,tag:'cmd',txt:'Sent → '+cmd});dirty=true;}}
+
+document.getElementById('connectBtn').onclick=()=>{if(client){disconnect();}else{connect();}};
+document.getElementById('cmdStart').onclick=()=>pub('start');
+document.getElementById('cmdStop').onclick=()=>pub('stop');
+document.getElementById('cmdRestart').onclick=()=>{pub('stop');setTimeout(()=>pub('start'),600);};
+
+/* live refresh loop */
+setInterval(()=>{if(mode==='live'&&dirty){dirty=false;render(model,true);updateCharts(model);}},350);
+
+/* ---------- offline log loading ---------- */
+function loadText(t,label){setModel(parseLog(t),false);document.getElementById('meta').insertAdjacentHTML('afterbegin',`<div>File <b>${esc(label)}</b></div>`);}
+document.getElementById('loadBtn').onclick=()=>document.getElementById('file').click();
+document.getElementById('file').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>loadText(String(r.result),f.name);r.readAsText(f);};
+const drop=document.getElementById('drop');
+['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('hot');}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();if(ev!=='drop')drop.classList.remove('hot');}));
+drop.addEventListener('drop',e=>{drop.classList.remove('hot');const f=e.dataTransfer.files[0];if(f){const r=new FileReader();r.onload=()=>loadText(String(r.result),f.name);r.readAsText(f);}});
+
+/* theme */
+const themeBtn=document.getElementById('themeBtn');
+try{const s=localStorage.getItem('pc_theme');if(s)document.documentElement.setAttribute('data-theme',s);}catch(e){}
+themeBtn.onclick=()=>{const cur=document.documentElement.getAttribute('data-theme');const next=cur==='dark'?'light':cur==='light'?'dark':(matchMedia('(prefers-color-scheme: dark)').matches?'light':'dark');document.documentElement.setAttribute('data-theme',next);try{localStorage.setItem('pc_theme',next);}catch(e){}makeCharts(model);render(model,mode==='live');};
+
+/* boot: empty state, ready to connect */
+setModel(newModel(),false);
+render(newModel(),false);
+document.getElementById('meta').innerHTML='<div><b style="color:var(--fg)">Ready.</b> Enter the broker host and press <b>Connect</b> to drive live — or drop a .log to review a past run.</div>';
+</script>
+</body>
+</html>
