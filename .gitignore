@@ -47,6 +47,8 @@ docs/private
 
 # Buddy 3 host unit-test binaries (rebuildable).
 tests/buddy3/*.exe
+tests/buddy4_proc/b4_proc_tests
+tests/buddy4_proc/*.exe
 # SDK installer log.
 InstallationLog.txt
 # Local Buddy 1 track-test telemetry captures (evidence; kept on disk, not in git).
