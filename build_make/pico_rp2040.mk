@@ -260,6 +260,18 @@ ifeq ($(VC_OBSTACLE),0)
 VC_OBSTACLE_SUFFIX := _noobst
 endif
 
+# VC_TERRAIN=0 builds APP=vc_car without Buddy 4's terrain gate, so START is
+# never held waiting for the IMU (for line tests when the IMU is not fitted or
+# not ready).  The car then does NOT slow for ramps.  Image is named ..._noterr.
+VC_TERRAIN ?= 1
+ifneq ($(filter $(VC_TERRAIN),0 1),$(VC_TERRAIN))
+$(error Unknown VC_TERRAIN '$(VC_TERRAIN)'; use 0 or 1)
+endif
+VC_TERRAIN_SUFFIX :=
+ifeq ($(VC_TERRAIN),0)
+VC_TERRAIN_SUFFIX := _noterr
+endif
+
 ifeq ($(WIFI_NETIF),1)
 ifneq ($(WIFI_JOIN),1)
 $(error WIFI_NETIF=1 requires WIFI_JOIN=1)
@@ -311,7 +323,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)$(VC_OBSTACLE_SUFFIX)_$(APP)_$(BOARD)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)$(VC_OBSTACLE_SUFFIX)$(VC_TERRAIN_SUFFIX)_$(APP)_$(BOARD)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -362,7 +374,7 @@ ASFLAGS += -DCNF_SMP=1
 endif
 
 # Fake-data driver for the comms API (app_program/comms_demo.c).
-CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE)
+CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE) -DVC_HAVE_BUDDY4=$(VC_TERRAIN)
 
 # Rebuild the build stamp every time, so the date/time printed at boot and
 # published on robot/info always identifies the image actually flashed.
@@ -408,7 +420,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)-terr$(VC_TERRAIN)
 PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

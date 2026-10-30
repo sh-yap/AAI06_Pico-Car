@@ -53,3 +53,4 @@ tests/buddy4_proc/*.exe
 InstallationLog.txt
 # Local Buddy 1 track-test telemetry captures (evidence; kept on disk, not in git).
 evidence/buddy1/
+tests/motion/*.exe

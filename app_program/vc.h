@@ -27,19 +27,28 @@
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
-#define VC_SPEED_NORMAL_MM_S    (100)    /* On the line, centred.  Matches
-                                            the ramp speed so the car does
-                                            not slow at the foot of it.      */
+#define VC_SPEED_NORMAL_MM_S    (70)     /* On the flat line.  Lower than the
+                                            ramp's 100 on purpose: with only
+                                            centre+right sensors the only
+                                            warning of a left bend is the
+                                            centre sensor dimming (a narrow
+                                            window), so a slower car has time
+                                            to steer back before it goes LOST.
+                                            Ramp speed is HUMP, so this does
+                                            not slow the ramp.               */
 #define VC_SPEED_CURVE_MM_S     (50)     /* At full steer: slow on a bend so
                                             the car stays on it.  Matches
                                             Buddy 2's validated slow speed.  */
 #define VC_SPEED_HUMP_MM_S      (100)    /* Same as normal: keep momentum.   */
-#define VC_SPEED_SEARCH_MM_S    (120)    /* While searching.  Full-steer
-                                            pivot: outer wheel runs, inner
-                                            ~0, swings near the spot.  Buddy
-                                            2's 50 is straight-line only;
-                                            retest pivot search before
-                                            lowering (60/80 stalled, 27 Oct).*/
+#define VC_SPEED_SEARCH_MM_S    (120)    /* While searching.  Tried 60 (30 Oct)
+                                            for a tighter pivot, but at 60 the
+                                            search was too slow to reach the
+                                            line on a big loss and timed out
+                                            -> SAFE_STOP (two 4 s timeouts).
+                                            120 covers the ground to re-find
+                                            it; the wide-loop case is the
+                                            2-sensor limit, fixed properly by
+                                            the straddle sensor, not here.   */
 #define VC_SEARCH_STEER         (127)    /* Full steer towards the side the
                                             line was last seen on.           */
 #define VC_TURN_TIMEOUT_MS      (8000U)  /* Buddy 2: safe until Stage 7
