@@ -38,13 +38,17 @@
  * baseline converted with the lever, held at its 200 ms peak, in 0.1 mm.
  * tilt_mg carries the detectable height, the height of the live hump start
  * threshold, in 0.1 mm and not held.  It prints one console line per word
- * with t, roll change r, pitch change p, predicted pitch pp, magnitude
- * residual mr, the consistency flag c, the hump state h, the noise
- * estimate n in milli-g and the detectable height dh in micrometres. */
+ * with t, the hump state h, the learned median n in milli-g, the learning
+ * step count lc (millimetres of driving), the mean absolute wheel speed v in
+ * mm/s and the detectable height dh in micrometres. */
 #ifndef B4_TASK_DIAG_TERRAIN
 #define B4_TASK_DIAG_TERRAIN        (1)
 #endif
 #define B4_TASK_REPORT_MS           (5000U)   /* Console rate report.    */
+/* The drive word is stale when its sequence has not changed for this long.
+ * It is the Vehicle Controller's VC_TERRAIN_STALE_MS (vc_task.c), 100 ms or
+ * five VC cycles, used for the opposite direction. */
+#define B4_TASK_DRIVE_STALE_MS      (100U)
 /* NOTE: Two slots keep any queued word within 40 ms of its sample, so
  * the VC can judge freshness when it receives a word. */
 #define B4_TASK_WORD_SLOTS          (2U)
@@ -94,6 +98,10 @@ static bool             g_b4_task_b_imu_open = false;
 static volatile uint32_t g_b4_task_ticks = 0U;
 static volatile uint32_t g_b4_task_cal_word = 0U;
 static volatile uint32_t g_b4_task_cal_samples = 0U;
+static volatile uint32_t g_b4_task_drive_word = 0U;
+static uint32_t         g_b4_task_drive_seq = 0U;
+static uint32_t         g_b4_task_drive_change_ms = 0U;
+static bool             g_b4_task_b_drive_seen = false;
 
 /** @brief Return the kernel time in milliseconds.
  *
@@ -109,12 +117,24 @@ b4_task_now_ms (void);
 static void
 b4_task_open_imu (uint32_t now_ms);
 
+/** @brief Read the drive word and pass the learning input to b4_proc.
+ *
+ * The word is stale when its sequence has not changed for
+ * B4_TASK_DRIVE_STALE_MS, and a stale word means not driving, so learning
+ * stops but detection goes on.
+ *
+ * @param now_ms The current time in milliseconds.
+ */
+static void
+b4_task_apply_drive (uint32_t now_ms);
+
 /** @brief Read and process one sample, reopening the IMU after a fault.
  *
+ * @param now_ms The current time in milliseconds.
  * @return True when the sample was valid.
  */
 static bool
-b4_task_sample (void);
+b4_task_sample (uint32_t now_ms);
 
 /** @brief Count completed humps and impacts from the latest status.
  *
@@ -277,6 +297,12 @@ b4_task_is_ramp_active (b4_task_terrain_t const * p_terrain)
 }
 
 void
+b4_task_set_drive (uint32_t word)
+{
+    g_b4_task_drive_word = word;
+}
+
+void
 b4_task_request_run_reset (void)
 {
     if (0 < g_b4_task_flag_id)
@@ -414,8 +440,72 @@ b4_task_open_imu (uint32_t now_ms)
     }
 }
 
+/** @brief Decode one signed 11-bit wheel speed of the drive word.
+ *
+ * @param word The drive word.
+ * @param shift The bit position of the speed field.
+ * @return The speed in mm/s, between -1024 and 1023.
+ */
+static int32_t
+b4_task_drive_speed (uint32_t word, uint32_t shift)
+{
+    /* The mask keeps the field to 11 bits, so the value is at most 2047 and
+     * the conversion to int32_t is exact. */
+    int32_t raw = (int32_t)((word >> shift) & B4_TASK_DRIVE_SPEED_MASK);
+
+    /* Two's complement sign extension of an 11-bit field. */
+    if (0U != ((uint32_t)raw & B4_TASK_DRIVE_SPEED_SIGN))
+    {
+        raw -= (int32_t)(B4_TASK_DRIVE_SPEED_MASK + 1U);
+    }
+
+    return (raw);
+}
+
+static void
+b4_task_apply_drive (uint32_t now_ms)
+{
+    uint32_t word = g_b4_task_drive_word;
+    uint32_t seq = (word >> B4_TASK_DRIVE_SEQ_SHIFT) &
+                   B4_TASK_DRIVE_SEQ_MASK;
+    int32_t  left_mm_s = b4_task_drive_speed(word,
+                                             B4_TASK_DRIVE_LEFT_SHIFT);
+    int32_t  right_mm_s = b4_task_drive_speed(word,
+                                              B4_TASK_DRIVE_RIGHT_SHIFT);
+    bool     b_fresh = false;
+    bool     b_learn = false;
+
+    if ((false == g_b4_task_b_drive_seen) ||
+        (seq != g_b4_task_drive_seq))
+    {
+        g_b4_task_b_drive_seen = true;
+        g_b4_task_drive_seq = seq;
+        g_b4_task_drive_change_ms = now_ms;
+    }
+
+    b_fresh = ((now_ms - g_b4_task_drive_change_ms) <
+               B4_TASK_DRIVE_STALE_MS);
+    b_learn = (true == b_fresh) &&
+              (0U != (word & B4_TASK_DRIVE_DRIVING_BIT)) &&
+              (0U != (word & B4_TASK_DRIVE_MOVING_BIT));
+
+    /* The travel uses the mean of the absolute speeds, so a pivot counts.
+     * The speeds are within +-1024, so the sum cannot overflow. */
+    if (left_mm_s < 0)
+    {
+        left_mm_s = -left_mm_s;
+    }
+
+    if (right_mm_s < 0)
+    {
+        right_mm_s = -right_mm_s;
+    }
+
+    b4_proc_set_drive(b_learn, (left_mm_s + right_mm_s) / 2);
+}
+
 static bool
-b4_task_sample (void)
+b4_task_sample (uint32_t now_ms)
 {
     b4_types_sample_t sample = {0};
     b4_types_health_t imu_health = B4_HEALTH_NOT_INITIALIZED;
@@ -428,6 +518,7 @@ b4_task_sample (void)
         /* A failed read leaves the sample invalid, which aborts any hump
          * in progress and withdraws readiness inside b4_proc. */
         b_valid = (B4_RESULT_OK == b4_imu_read(&sample));
+        b4_task_apply_drive(now_ms);
         (void)b4_proc_process(&sample);
         (void)b4_imu_get_health(&imu_health, &imu_fault, &failures);
 
@@ -519,26 +610,18 @@ static void
 b4_task_diag_terrain (b4_types_status_t const * p_status)
 {
     comms_terrain_t terrain;
-    int32_t pitch_change_mg = 0;
     int64_t height_dmm = 0;
     int64_t incline_abs_mg = 0;
     uint32_t detectable_dmm = 0U;
     static int32_t peak_dmm = 0;
     static uint8_t calls = 0U;
 
-    /* The status values are bounded by a few times 4000 milli-g, so the
-     * subtraction cannot overflow. */
-    pitch_change_mg = p_status->pitch_mg - p_status->pitch_baseline_mg;
-    tm_printf((UB *)"[b4t] t=%u r=%d p=%d pp=%d mr=%d c=%u h=%u"
-              " n=%d dh=%u\n",
+    tm_printf((UB *)"[b4t] t=%u h=%u n=%d lc=%u v=%d dh=%u\n",
               (UINT)p_status->sample.timestamp_ms,
-              (INT)p_status->roll_change_mg,
-              (INT)pitch_change_mg,
-              (INT)(pitch_change_mg - p_status->tilt_residual_mg),
-              (INT)p_status->magnitude_residual_mg,
-              (UINT)(true == p_status->b_tilt_consistent),
               (UINT)p_status->hump_state,
               (INT)p_status->noise_mg,
+              (UINT)p_status->learn_count,
+              (INT)p_status->drive_speed_mm_s,
               (UINT)p_status->detectable_height_um);
 
     incline_abs_mg = (int64_t)p_status->incline_delta_mg;
@@ -680,7 +763,7 @@ b4_task_sample_task (INT stacd, void * p_exinf)
         now_ms = b4_task_now_ms();
 
         b4_task_open_imu(now_ms);
-        if (true == b4_task_sample())
+        if (true == b4_task_sample(now_ms))
         {
             valid_samples++;
         }

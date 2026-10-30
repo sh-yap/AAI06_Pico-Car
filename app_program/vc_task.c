@@ -605,6 +605,73 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     return b_ready ? 0U : (uint16_t) VC_FAULT_IMU;
 }
 
+/* True while the car is on a mission that drives it: it follows the line,
+ * handles a junction, turns, reacquires the line or bypasses an obstacle.
+ * Calibration, scanning, stops and idle states are not driving. */
+static bool
+is_driving (vc_state_t state)
+{
+    return (VC_STATE_FOLLOW_LINE == state)
+           || (VC_STATE_HANDLE_JUNCTION == state)
+           || (VC_STATE_TURNING == state)
+           || (VC_STATE_REACQUIRE_LINE == state)
+           || (VC_STATE_BYPASS == state);
+}
+
+
+/* One wheel speed as an 11-bit two's complement field, saturated. */
+static uint32_t
+pack_speed (int32_t speed_mm_s, uint32_t shift)
+{
+    int32_t speed = speed_mm_s;
+
+    if (B4_TASK_DRIVE_SPEED_LIMIT < speed)
+    {
+        speed = B4_TASK_DRIVE_SPEED_LIMIT;
+    }
+    else if (-B4_TASK_DRIVE_SPEED_LIMIT > speed)
+    {
+        speed = -B4_TASK_DRIVE_SPEED_LIMIT;
+    }
+    else
+    {
+        /* Already within the field. */
+    }
+
+    /* The speed is within +-1023; the conversion to unsigned wraps modulo
+     * 2^32 by definition and the mask keeps the low 11 bits, which is the
+     * two's complement field. */
+    return (((uint32_t) speed) & B4_TASK_DRIVE_SPEED_MASK) << shift;
+}
+
+
+/* Hand Buddy 4 the drive word (layout in b4_task.h), once per VC cycle.
+ * Buddy 4 learns its noise only while the word says the car is driving and
+ * moving, and treats a word whose sequence stops changing as stale. */
+static void
+publish_drive (vc_state_t state, bool b_stationary)
+{
+    static uint32_t s_seq = 0U;
+    uint32_t        word  = 0U;
+
+    if (is_driving(state))
+    {
+        word |= B4_TASK_DRIVE_DRIVING_BIT;
+    }
+
+    if (!b_stationary)
+    {
+        word |= B4_TASK_DRIVE_MOVING_BIT;
+    }
+
+    word |= pack_speed(g_left_mm_s, B4_TASK_DRIVE_LEFT_SHIFT);
+    word |= pack_speed(g_right_mm_s, B4_TASK_DRIVE_RIGHT_SHIFT);
+    word |= (s_seq & B4_TASK_DRIVE_SEQ_MASK) << B4_TASK_DRIVE_SEQ_SHIFT;
+    s_seq++;                                /* Wraps; only 4 bits are sent. */
+
+    b4_task_set_drive(word);
+}
+
 #else  /* No Buddy 4: never slow for terrain, never hold START. */
 
 static uint16_t
@@ -616,6 +683,13 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     p_in->cal_b4          = VC_CAL_B4_DONE;     /* Nothing to calibrate.   */
 
     return 0U;
+}
+
+static void
+publish_drive (vc_state_t state, bool b_stationary)
+{
+    (void) state;
+    (void) b_stationary;
 }
 
 #endif /* VC_HAVE_BUDDY4 */
@@ -1231,6 +1305,7 @@ vc_task_entry (INT stacd, void * p_exinf)
 
         before = g_vc.state;
         vc_step(&g_vc, &in, &out);
+        publish_drive(out.state, in.b_stationary);
 
         act_on_motion(&out);
         act_on_obstacle(&out);

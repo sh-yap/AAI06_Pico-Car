@@ -59,25 +59,17 @@
  * threshold before a hump is accepted, so a brief motor jolt is rejected.
  *
  * The hump thresholds follow the noise of the incline offset while the
- * car drives. noise_floor_mg is the lower limit of the noise estimate in
- * milli-g, the measured moving noise of the car on flat floor. The
- * estimate rises with a time constant of noise_rise_samples and falls with
- * one of noise_fall_samples, both in samples. noise_warmup_samples is
- * the number of samples after a run start, initialization, or data gap in
- * which no hump may start. The start and completion thresholds are the
- * noise estimate times hump_start_k_tenths and hump_complete_k_tenths,
- * each in tenths, so 40 means 4.0 times. The completion threshold is also
- * the hump hysteresis. The start factor must exceed the completion factor.
- * turn_cross_threshold is in squared magnetometer counts.
- *
- * The wheel-lift model predicts the pitch that must accompany a roll when
- * one drive wheel rises and the other two contacts stay down. The caster
- * forward distance is in micrometres ahead of the axle midpoint. The caster
- * lateral offset is in micrometres from the axle midpoint, positive to the
- * right. tilt_residual_band_mg is the largest gap between the measured and
- * the predicted pitch change that still counts as consistent.
- * tilt_magnitude_band_mg is the largest gap between the total acceleration
- * and its flat-ground value that still counts as static gravity.
+ * car drives. The noise estimate is the running median of the incline
+ * offset amplitude, learned only from samples that the Vehicle Controller
+ * reports as driving. Each millimetre of wheel travel moves it up or down by
+ * its own value shifted right by noise_step_shift, so doubling takes about
+ * 0.69 times 2 to the power noise_step_shift millimetres. A hump may start
+ * only after 2 to the power noise_step_shift millimetres of driving since
+ * the run start. The start and completion thresholds are the noise estimate times
+ * hump_start_k_tenths and hump_complete_k_tenths, each in tenths, so 40
+ * means 4.0 times. The completion threshold is also the hump hysteresis.
+ * The start factor must exceed the completion factor. turn_cross_threshold
+ * is in squared magnetometer counts.
  */
 typedef struct
 {
@@ -108,18 +100,10 @@ typedef struct
     uint32_t tilt_threshold_mg;
     uint32_t impact_delta_threshold_mg;
     uint32_t impact_refractory_ms;
-    uint32_t noise_floor_mg;
-    uint32_t noise_rise_samples;
-    uint32_t noise_fall_samples;
-    uint32_t noise_warmup_samples;
     uint32_t hump_start_k_tenths;
     uint32_t hump_complete_k_tenths;
     uint32_t calibration_noise_limit_mg;
     uint32_t hump_lever_um;
-    uint32_t caster_forward_um;
-    int32_t caster_lateral_um;
-    uint32_t tilt_residual_band_mg;
-    uint32_t tilt_magnitude_band_mg;
     uint32_t height_settle_band_mg;
     uint32_t height_baseline_gate_mg;
     uint32_t turn_cross_threshold;
@@ -127,6 +111,7 @@ typedef struct
     uint8_t height_settle_samples;
     uint8_t height_mean_samples;
     uint8_t height_baseline_divisor;
+    uint8_t noise_step_shift;
     uint8_t turn_window_samples;
     uint8_t hump_confirm_samples;
     uint8_t hump_complete_samples;

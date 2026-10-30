@@ -142,20 +142,18 @@ typedef enum
  * difference in micrometres, valid only when the hump completed after a
  * full moving-mean window was measured. active_hump_height_um is the
  * highest height so far in the hump in progress, zero when none is.
- * pitch_mg and pitch_baseline_mg carry the filtered, oriented forward axis
- * and its flat-ground baseline. roll_change_mg is the oriented lateral axis
- * change from its own baseline, positive when the right side rises.
- * tilt_residual_mg is the measured pitch change minus the pitch that the
- * wheel-lift model predicts for roll_change_mg. magnitude_residual_mg is the
- * total acceleration minus its flat-ground value. b_tilt_consistent is true
- * when both residuals are inside their configured bands. All four are zero
- * or false while no flat-ground baseline exists.
- * noise_mg is the running noise estimate of the incline offset in milli-g,
- * never below its configured floor. incline_delta_mg is the signed incline
- * offset from the flat-ground baseline that the detector used for this
- * sample, zero while no baseline exists. detectable_height_um is the height
- * in micrometres that the current hump start threshold corresponds to, the
- * smallest hump the detector can tell from rolling noise.
+ * noise_mg is the learned median of the incline offset amplitude in
+ * milli-g, learned only while the Vehicle Controller reports the car
+ * driving. incline_delta_mg is the signed incline offset from the
+ * flat-ground baseline that the detector used for this sample, zero while
+ * no baseline exists. detectable_height_um is the height in micrometres
+ * that the current hump start threshold corresponds to, the smallest hump
+ * the detector can tell from rolling noise. learn_count is the number of
+ * median steps, one per millimetre of driving, since the run started,
+ * saturating, and a hump may start only once it reaches the learning hold.
+ * drive_speed_mm_s is the mean of the absolute wheel speeds from the latest
+ * drive word, so a pivot counts as travel. The detector uses it with the
+ * sample interval to measure that travel.
  * Health is READY only after fresh level samples since the last data gap.
  * Event flags describe the latest processed sample and are not latched.
  * Tilt and turn use configured signs.
@@ -176,14 +174,11 @@ typedef struct
     int32_t vertical_deviation_mg;
     int32_t roll_mg;
     int32_t roll_baseline_mg;
-    int32_t roll_change_mg;
-    int32_t pitch_mg;
-    int32_t pitch_baseline_mg;
-    int32_t tilt_residual_mg;
-    int32_t magnitude_residual_mg;
     int32_t turn_cross;
     int32_t incline_delta_mg;
+    int32_t drive_speed_mm_s;
     uint32_t noise_mg;
+    uint32_t learn_count;
     uint32_t detectable_height_um;
     uint32_t current_hump_peak_mg;
     uint32_t highest_hump_peak_mg;
@@ -191,7 +186,6 @@ typedef struct
     uint32_t highest_hump_height_um;
     uint32_t active_hump_height_um;
     bool b_hump_height_valid;
-    bool b_tilt_consistent;
     bool b_mag_valid;
     bool b_sample_stale;
     bool b_impact_event;

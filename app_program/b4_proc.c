@@ -20,24 +20,21 @@
  * motion acceleration. Over a pointed crest the axle still rises the full
  * ramp height. The estimate assumes equal tyre deformation on both sides.
  *
- * A bracket catch also tilts the car, but about the drive wheels, so it
- * does not match the wheel-lift geometry. A sample is consistent when the
- * pitch change matches the pitch that the roll change predicts and the
- * total acceleration stays at its flat-ground value. A hump may start and
- * be confirmed only on consistent samples, and the height peak updates only
- * when the whole moving-mean window is consistent. Once confirmed, a hump
- * still runs to completion on every sample, so it always ends. A hump with
- * no fully consistent window completes as invalid.
- *
  * A gap in the sample stream or an invalid sample aborts a hump in progress
  * as invalid, and health stays DEGRADED until fresh level samples confirm
  * the car is back on flat ground.
  *
  * The start, completion, and hysteresis thresholds are multiples of a
- * running estimate of the noise in the incline offset, so they follow the
- * rolling noise of the car instead of a fixed height. The estimate learns
- * only from samples on flat ground, and no hump may start until it has had
- * a warm-up of samples after the run starts.
+ * running median of the incline amplitude, so they follow the rolling
+ * noise of the car while it drives instead of a fixed height. The Vehicle
+ * Controller tells this module through b4_proc_set_drive() whether the car
+ * is driving. The median learns only on those samples, and only while the
+ * hump state is NORMAL or CANDIDATE and there is no impact, so a stop or a
+ * confirmed hump never trains it. It takes one step per millimetre of wheel
+ * travel, not per sample, so the distance a ramp edge can influence it does
+ * not depend on speed. The START sweep seeds the median. No hump may start
+ * until the median has had 2^n steps, which is 2^n mm of driving since
+ * START, where n is the configured step shift.
  *
  * The multiples remain provisional until flat driving traces set them.
  *
@@ -56,6 +53,17 @@
 #define B4_PROC_K_TENTHS_PER_ONE      10U
 #define B4_PROC_MIN_THRESHOLD_MG       1U
 #define B4_PROC_CAL_MAX_SAMPLES    20000U
+/* The step count saturates here. Validation keeps the learning hold,
+ * 2^shift steps, at most 4096, so the hold is always reachable. */
+#define B4_PROC_MAX_LEARN_COUNT    65535U
+/* One median step per this much wheel travel, in micrometres. */
+#define B4_PROC_STEP_TRAVEL_UM      1000U
+/* Largest encodable wheel speed, mm/s. It is numerically micrometres per
+ * millisecond. */
+#define B4_PROC_MAX_SPEED_MM_S      1023
+/* Largest sweep mean accepted as a noise seed, milli-g. The seed scaled by
+ * 256 is then at most 128000, far inside int32_t. */
+#define B4_PROC_MAX_SEED_MG          500U
 
 /** @brief Private terrain state, including unpublished filter history.
  */
@@ -67,16 +75,12 @@ typedef struct
     int32_t           previous_y_mg;
     int32_t           previous_z_mg;
     int32_t           incline_window_mg[B4_CFG_MAX_SETTLE_SAMPLES];
-    int16_t           forward_window_mg[B4_CFG_MAX_SETTLE_SAMPLES];
-    int16_t           lateral_window_mg[B4_CFG_MAX_SETTLE_SAMPLES];
-    int16_t           vertical_window_mg[B4_CFG_MAX_SETTLE_SAMPLES];
     int32_t           incline_baseline_mg;
-    int32_t           lateral_mg;
-    int32_t           lateral_baseline_mg;
     int32_t           noise_q8;
-    uint32_t          magnitude_baseline_mg;
+    int32_t           drive_speed_mm_s;
     uint32_t          active_peak_height_um;
-    uint32_t          noise_warmup_count;
+    uint32_t          learn_count;
+    uint32_t          travel_um;
     uint32_t          cal_sum_mg;
     uint32_t          cal_count;
     uint32_t          start_threshold_mg;
@@ -91,8 +95,6 @@ typedef struct
     uint8_t           hump_complete_count;
     uint8_t           level_count;
     uint8_t           baseline_step_count;
-    uint8_t           tilt_consistent_count;
-    uint8_t           launch_settle_count;
     uint8_t           incline_window_count;
     uint8_t           incline_window_next;
     bool              b_initialized;
@@ -103,7 +105,7 @@ typedef struct
     bool              b_active_height_measured;
     bool              b_active_height_tainted;
     bool              b_level_since_gap;
-    bool              b_launch_settled;
+    bool              b_learn;
     bool              b_mag_previous_valid;
     bool              b_mag_seen;
     bool              b_cal_measuring;
@@ -179,63 +181,6 @@ b4_proc_oriented_value (int32_t value_mg, int8_t sign);
 static void
 b4_proc_update_tilt (void);
 
-/** @brief Orient the pitch and lateral axes and add the axes to history.
- *
- * The three filtered axes are written at the slot that the next call to
- * b4_proc_push_incline fills, so all four windows share one index and one
- * count. It must run before b4_proc_push_incline.
- */
-static void
-b4_proc_update_attitude (void);
-
-/** @brief Return the mean of the newest samples of one axis window.
- *
- * @param p_window The axis history, B4_CFG_MAX_SETTLE_SAMPLES entries.
- * @param window_samples The number of newest samples to average, between
- *                       2 and the history size.
- * @return The mean of the sensor axis in milli-g, before orientation.
- */
-static int32_t
-b4_proc_axis_mean_mg (const int16_t * p_window, uint8_t window_samples);
-
-/** @brief Return the integer square root of a value, rounded down.
- *
- * @param value The value to root.
- * @return The largest integer whose square does not exceed the value.
- */
-static uint32_t
-b4_proc_isqrt (uint64_t value);
-
-/** @brief Move a baseline one milli-g toward a value.
- *
- * @param p_baseline The baseline to adapt.
- * @param value_mg The newest value in milli-g.
- */
-static void
-b4_proc_step_toward (int32_t * p_baseline, int32_t value_mg);
-
-/** @brief Capture the pitch, lateral, and magnitude baselines.
- *
- * Each uses the mean of the settled window, like the incline baseline.
- */
-static void
-b4_proc_capture_attitude_baselines (void);
-
-/** @brief Compute the tilt residuals and the consistency flag.
- *
- * The oriented roll change gives the pitch that the wheel-lift model
- * predicts. The residuals and the flag are zero and false while no
- * baseline exists. The result is reported only in this step and does not
- * drive the hump detector yet.
- */
-static void
-b4_proc_update_residuals (void);
-
-/** @brief Clear the residuals, the flag, and the consistent-sample count.
- */
-static void
-b4_proc_clear_residuals (void);
-
 /** @brief Add the newest filtered incline to the settled-window history.
  *
  * @param incline_mg The filtered hump-axis acceleration in milli-g.
@@ -300,16 +245,14 @@ b4_proc_height_um (int32_t delta_mg);
 
 /** @brief Track the tallest moving-mean height of the active hump.
  *
- * The height uses the moving mean, not the newest sample. It updates only
- * when every sample in the moving-mean window was consistent with the
- * wheel-lift geometry, so bracket-catch samples never reach the height.
+ * The height uses the moving mean, not the newest sample.
  */
 static void
 b4_proc_update_height (void);
 
-/** @brief Return the noise estimate in milli-g, never below the floor.
+/** @brief Return the noise estimate in milli-g.
  *
- * @return The rounded noise estimate in milli-g.
+ * @return The rounded median estimate in milli-g, at least one.
  */
 static uint32_t
 b4_proc_noise_mg (void);
@@ -322,12 +265,26 @@ b4_proc_noise_mg (void);
 static void
 b4_proc_refresh_thresholds (void);
 
-/** @brief Update the noise estimate and the warm-up count for one sample.
+/** @brief Apply one median step toward an amplitude.
  *
- * The estimate follows the incline offset only on flat ground, and each
- * input is clipped at the completion threshold. The estimate rises and
- * falls at different rates and never goes below the floor. The warm-up
- * counts every processed sample.
+ * The step is 2^-n of the estimate, at least one Q8 unit, and the estimate
+ * never goes below its scaled minimum. The step count saturates.
+ *
+ * @param amplitude_q8 The absolute incline offset in Q8 milli-g.
+ */
+static void
+b4_proc_median_step (int32_t amplitude_q8);
+
+/** @brief Update the median noise estimate for one sample.
+ *
+ * The estimate moves one step per millimetre of wheel travel toward the
+ * amplitude, up when the amplitude
+ * is above it and down when below, and only when the drive input says the
+ * car is driving, the baseline is valid, the moving mean is full, the
+ * hump state is NORMAL or CANDIDATE and there is no impact. The travel
+ * comes from the drive speed and the time since the previous sample. The
+ * same samples also feed the START sweep mean, whether or not the car
+ * drives.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -348,17 +305,6 @@ b4_proc_abort_hump (void);
  */
 static void
 b4_proc_update_level (uint32_t amplitude_mg);
-
-/** @brief Track whether the car is steady since the run started.
- *
- * Counts consecutive samples that are consistent with the wheel-lift
- * geometry and level, and latches the launch as settled once the count
- * reaches the height mean window. A hump may not start before then.
- *
- * @param amplitude_mg The absolute incline offset in milli-g.
- */
-static void
-b4_proc_update_launch (uint32_t amplitude_mg);
 
 /** @brief Find the largest raw axis change since the previous sample.
  *
@@ -400,10 +346,8 @@ b4_proc_update_motion (uint32_t sample_delta_mg);
 
 /** @brief Start a hump candidate above the threshold from level ground.
  *
- * The current sample must also be consistent with the wheel-lift geometry,
- * the car must have settled since the run started, and the noise estimate
- * must have had its warm-up, so the roll of a launch cannot pass for a
- * ramp.
+ * The median must also have had its learning hold since START, so the
+ * roll of a launch cannot pass for a ramp.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -412,9 +356,8 @@ b4_proc_start_hump (uint32_t amplitude_mg);
 
 /** @brief Confirm or cancel a candidate hump.
  *
- * A sample below the threshold or inconsistent with the wheel-lift geometry
- * cancels the candidate, so confirmation needs consecutive samples that are
- * both above the threshold and consistent.
+ * A sample below the threshold cancels the candidate, so confirmation
+ * needs consecutive samples above the threshold.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -477,10 +420,12 @@ b4_proc_init (const b4_cfg_config_t * p_config)
 
             g_b4_proc_state = initial_state;
             g_b4_proc_state.config = *p_config;
-            /* Validation bounds the floor to 500 milli-g, so the scaled
-             * value fits int32_t. */
+            /* NOTE: Without a START sweep the estimate begins at its
+             * lowest allowed value. Every real START seeds it from the
+             * sweep, and the learning hold keeps humps off until it has
+             * moved. */
             g_b4_proc_state.noise_q8 =
-                (int32_t)p_config->noise_floor_mg * B4_PROC_NOISE_SCALE;
+                (int32_t)B4_PROC_MIN_THRESHOLD_MG * B4_PROC_NOISE_SCALE;
             b4_proc_refresh_thresholds();
             g_b4_proc_state.status.health = B4_HEALTH_READY;
             g_b4_proc_state.status.fault = B4_FAULT_NONE;
@@ -560,6 +505,8 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         }
 
         g_b4_proc_state.status.sample = *p_sample;
+        g_b4_proc_state.status.drive_speed_mm_s =
+            g_b4_proc_state.drive_speed_mm_s;
         g_b4_proc_state.status.fault = B4_FAULT_NONE;
         g_b4_proc_state.status.b_sample_stale = false;
         g_b4_proc_state.status.b_impact_event = false;
@@ -589,13 +536,11 @@ b4_proc_process (const b4_types_sample_t * p_sample)
             &g_b4_proc_state.status,
             g_b4_proc_state.config.hump_axis);
         g_b4_proc_state.status.roll_mg = incline_mg;
-        b4_proc_update_attitude();
         b4_proc_push_incline(incline_mg);
         b_settled = b4_proc_incline_is_settled();
         b4_proc_update_baseline(incline_mg, b_settled);
         g_b4_proc_state.status.roll_baseline_mg =
             g_b4_proc_state.incline_baseline_mg;
-        b4_proc_update_residuals();
         incline_delta_mg = b4_proc_incline_delta_mg();
         amplitude_mg = b4_proc_abs_mg(incline_delta_mg);
         g_b4_proc_state.status.incline_delta_mg = incline_delta_mg;
@@ -619,7 +564,6 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         }
 
         b4_proc_update_level(amplitude_mg);
-        b4_proc_update_launch(amplitude_mg);
         b4_proc_update_motion(sample_delta_mg);
         g_b4_proc_state.previous_timestamp_ms = p_sample->timestamp_ms;
         g_b4_proc_state.previous_x_mg = p_sample->accel_x_mg;
@@ -821,12 +765,10 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.b_incline_baseline_valid = false;
         g_b4_proc_state.level_count = 0U;
         g_b4_proc_state.b_level_since_gap = false;
-        g_b4_proc_state.launch_settle_count = 0U;
-        g_b4_proc_state.b_launch_settled = false;
-        g_b4_proc_state.noise_warmup_count = 0U;
+        g_b4_proc_state.learn_count = 0U;
+        g_b4_proc_state.travel_um = 0U;
         g_b4_proc_state.noise_q8 =
-            (int32_t)g_b4_proc_state.config.noise_floor_mg *
-            B4_PROC_NOISE_SCALE;
+            (int32_t)B4_PROC_MIN_THRESHOLD_MG * B4_PROC_NOISE_SCALE;
         b4_proc_refresh_thresholds();
         g_b4_proc_state.status.noise_mg = 0U;
         g_b4_proc_state.status.incline_delta_mg = 0;
@@ -835,12 +777,10 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.b_mag_previous_valid = false;
         g_b4_proc_state.status.roll_mg = 0;
         g_b4_proc_state.status.roll_baseline_mg = 0;
-        g_b4_proc_state.status.pitch_mg = 0;
-        g_b4_proc_state.status.pitch_baseline_mg = 0;
-        g_b4_proc_state.lateral_mg = 0;
-        g_b4_proc_state.lateral_baseline_mg = 0;
-        g_b4_proc_state.magnitude_baseline_mg = 0U;
-        b4_proc_clear_residuals();
+        g_b4_proc_state.status.learn_count = 0U;
+        g_b4_proc_state.status.drive_speed_mm_s = 0;
+        g_b4_proc_state.b_learn = false;
+        g_b4_proc_state.drive_speed_mm_s = 0;
         g_b4_proc_state.status.turn_cross = 0;
         g_b4_proc_state.status.turn = B4_TURN_UNKNOWN;
     }
@@ -851,10 +791,9 @@ b4_proc_reset_run_stats (void)
 /** @brief Clear the run maximum and the latest result for a new run.
  *
  * The flat-ground baseline and level confirmation are kept, so a car that
- * is ready at the start line stays ready. The launch hold and the noise
- * warm-up restart, so the launch itself is measured as noise and no hump
- * can start until the warm-up and a steady settle have passed. The noise
- * estimate is kept as the best guess for the first moving samples.
+ * is ready at the start line stays ready. The learning count restarts, so
+ * no hump can start until the median has had its learning hold of driving
+ * samples. The estimate itself is kept, seeded by the START sweep.
  *
  * @return The clear result.
  */
@@ -873,9 +812,9 @@ b4_proc_clear_run_maximum (void)
         g_b4_proc_state.status.highest_hump_height_um = 0U;
         g_b4_proc_state.status.hump_peak_height_um = 0U;
         g_b4_proc_state.status.b_hump_height_valid = false;
-        g_b4_proc_state.launch_settle_count = 0U;
-        g_b4_proc_state.b_launch_settled = false;
-        g_b4_proc_state.noise_warmup_count = 0U;
+        g_b4_proc_state.learn_count = 0U;
+        g_b4_proc_state.travel_um = 0U;
+        g_b4_proc_state.status.learn_count = 0U;
     }
 
     return (result);
@@ -901,12 +840,11 @@ b4_proc_calibrate_level (void)
         g_b4_proc_state.b_incline_baseline_valid = false;
         g_b4_proc_state.level_count = 0U;
         g_b4_proc_state.b_level_since_gap = false;
-        g_b4_proc_state.launch_settle_count = 0U;
-        g_b4_proc_state.b_launch_settled = false;
+        g_b4_proc_state.learn_count = 0U;
+        g_b4_proc_state.travel_um = 0U;
         g_b4_proc_state.cal_sum_mg = 0U;
         g_b4_proc_state.cal_count = 0U;
         g_b4_proc_state.b_cal_measuring = false;
-        b4_proc_clear_residuals();
     }
 
     return (result);
@@ -941,7 +879,6 @@ b4_types_result_t
 b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg)
 {
     b4_types_result_t result = B4_RESULT_INVALID_ARGUMENT;
-    uint32_t old_floor_mg = 0U;
     uint32_t floor_mg = 0U;
 
     if (NULL != p_floor_mg)
@@ -964,32 +901,39 @@ b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg)
                            g_b4_proc_state.cal_count;
                 if (0U == floor_mg)
                 {
-                    /* A zero floor is invalid and a flat trace is not
-                     * a reason to fail: take the smallest floor. */
-                    floor_mg = 1U;
+                    /* A zero seed is below the lowest allowed estimate
+                     * and a flat trace is not a reason to fail: take the
+                     * smallest one. */
+                    floor_mg = B4_PROC_MIN_THRESHOLD_MG;
                 }
                 *p_floor_mg = floor_mg;
 
-                old_floor_mg = g_b4_proc_state.config.noise_floor_mg;
-                g_b4_proc_state.config.noise_floor_mg = floor_mg;
-                result = b4_cfg_validate(&g_b4_proc_state.config);
-
-                if (B4_RESULT_OK == result)
+                if (floor_mg > B4_PROC_MAX_SEED_MG)
                 {
-                    /* The estimate starts at the new floor, as at init. */
-                    g_b4_proc_state.noise_q8 =
-                        (int32_t)floor_mg * B4_PROC_NOISE_SCALE;
-                    b4_proc_refresh_thresholds();
+                    result = B4_RESULT_INVALID_CALIBRATION;
                 }
                 else
                 {
-                    g_b4_proc_state.config.noise_floor_mg = old_floor_mg;
+                    /* The sweep mean seeds the estimate and nothing
+                     * else. It is not a floor, and the estimate moves
+                     * away from it as the car drives. */
+                    g_b4_proc_state.noise_q8 =
+                        (int32_t)floor_mg * B4_PROC_NOISE_SCALE;
+                    b4_proc_refresh_thresholds();
+                    result = B4_RESULT_OK;
                 }
             }
         }
     }
 
     return (result);
+}
+
+void
+b4_proc_set_drive (bool b_learn, int32_t speed_mm_s)
+{
+    g_b4_proc_state.b_learn = b_learn;
+    g_b4_proc_state.drive_speed_mm_s = speed_mm_s;
 }
 
 static uint32_t
@@ -1167,231 +1111,6 @@ b4_proc_update_tilt (void)
 }
 
 static void
-b4_proc_update_attitude (void)
-{
-    uint8_t slot = g_b4_proc_state.incline_window_next;
-    int32_t forward_mg = b4_proc_status_axis_mg(
-        &g_b4_proc_state.status,
-        g_b4_proc_state.config.forward_axis);
-    int32_t lateral_mg = b4_proc_status_axis_mg(
-        &g_b4_proc_state.status,
-        g_b4_proc_state.config.lateral_axis);
-    int32_t vertical_mg = b4_proc_status_axis_mg(
-        &g_b4_proc_state.status,
-        g_b4_proc_state.config.vertical_axis);
-
-    /* The three history slots hold the sensor axes before orientation. The
-     * filter output stays within the 4000 milli-g sample limit, so the
-     * narrowing conversions to int16_t are exact. */
-    g_b4_proc_state.forward_window_mg[slot] = (int16_t)forward_mg;
-    g_b4_proc_state.lateral_window_mg[slot] = (int16_t)lateral_mg;
-    g_b4_proc_state.vertical_window_mg[slot] = (int16_t)vertical_mg;
-
-    g_b4_proc_state.status.pitch_mg = b4_proc_oriented_value(
-        forward_mg, g_b4_proc_state.config.forward_sign);
-    g_b4_proc_state.lateral_mg = b4_proc_oriented_value(
-        lateral_mg, g_b4_proc_state.config.lateral_sign);
-}
-
-static int32_t
-b4_proc_axis_mean_mg (const int16_t * p_window, uint8_t window_samples)
-{
-    uint8_t index = g_b4_proc_state.incline_window_next;
-    int32_t sum_mg = 0;
-
-    /* Start from the oldest of the newest window_samples entries, exactly as
-     * the incline mean does. Each entry is within 4000 milli-g and the
-     * window holds at most 100 entries, so the sum stays within 400000. */
-    index = (uint8_t)((index + B4_CFG_MAX_SETTLE_SAMPLES - window_samples) %
-                      B4_CFG_MAX_SETTLE_SAMPLES);
-
-    for (uint8_t sample = 0U; sample < window_samples; sample++)
-    {
-        sum_mg += p_window[index];
-        index = (uint8_t)((index + 1U) % B4_CFG_MAX_SETTLE_SAMPLES);
-    }
-
-    /* Validation keeps window_samples between 2 and 100, so the divisor is
-     * never zero and fits int32_t. */
-    return (sum_mg / (int32_t)window_samples);
-}
-
-static uint32_t
-b4_proc_isqrt (uint64_t value)
-{
-    uint64_t remainder = value;
-    uint64_t root = 0U;
-    uint64_t bit = (uint64_t)1U << 62;
-
-    while (bit > value)
-    {
-        bit >>= 2;
-    }
-
-    while (0U != bit)
-    {
-        if (remainder >= (root + bit))
-        {
-            remainder -= (root + bit);
-            root = (root >> 1) + bit;
-        }
-        else
-        {
-            root >>= 1;
-        }
-
-        bit >>= 2;
-    }
-
-    /* The caller passes a sum of three squares of values within 4000, so
-     * the root is below 7000 and the narrowing conversion is exact. */
-    return ((uint32_t)root);
-}
-
-static void
-b4_proc_step_toward (int32_t * p_baseline, int32_t value_mg)
-{
-    if (value_mg > *p_baseline)
-    {
-        (*p_baseline)++;
-    }
-    else if (value_mg < *p_baseline)
-    {
-        (*p_baseline)--;
-    }
-    else
-    {
-        /* Already on the baseline. */
-    }
-}
-
-static void
-b4_proc_capture_attitude_baselines (void)
-{
-    uint8_t window_samples = g_b4_proc_state.config.height_settle_samples;
-    int64_t forward_mg = b4_proc_axis_mean_mg(
-        g_b4_proc_state.forward_window_mg, window_samples);
-    int64_t lateral_mg = b4_proc_axis_mean_mg(
-        g_b4_proc_state.lateral_window_mg, window_samples);
-    int64_t vertical_mg = b4_proc_axis_mean_mg(
-        g_b4_proc_state.vertical_window_mg, window_samples);
-
-    /* The means are within 4000 milli-g, so the int32_t narrowing is exact
-     * and the sum of squares fits int64_t. */
-    g_b4_proc_state.status.pitch_baseline_mg = b4_proc_oriented_value(
-        (int32_t)forward_mg, g_b4_proc_state.config.forward_sign);
-    g_b4_proc_state.lateral_baseline_mg = b4_proc_oriented_value(
-        (int32_t)lateral_mg, g_b4_proc_state.config.lateral_sign);
-    g_b4_proc_state.magnitude_baseline_mg = b4_proc_isqrt(
-        (uint64_t)((forward_mg * forward_mg) +
-                   (lateral_mg * lateral_mg) +
-                   (vertical_mg * vertical_mg)));
-}
-
-static void
-b4_proc_clear_residuals (void)
-{
-    g_b4_proc_state.status.roll_change_mg = 0;
-    g_b4_proc_state.status.tilt_residual_mg = 0;
-    g_b4_proc_state.status.magnitude_residual_mg = 0;
-    g_b4_proc_state.status.b_tilt_consistent = false;
-    g_b4_proc_state.tilt_consistent_count = 0U;
-}
-
-static void
-b4_proc_update_residuals (void)
-{
-    uint8_t mean_samples = g_b4_proc_state.config.height_mean_samples;
-    int64_t forward_mean_mg = 0;
-    int64_t lateral_mean_mg = 0;
-    int64_t vertical_mean_mg = 0;
-    int64_t roll_mg = 0;
-    int64_t roll_abs_mg = 0;
-    int64_t pitch_change_mg = 0;
-    int64_t predicted_mg = 0;
-    int64_t numerator = 0;
-    int64_t denominator = 1;
-    int64_t magnitude_mg = 0;
-    int64_t sum_squares = 0;
-    bool b_consistent = false;
-
-    /* NOTE: The check uses the means of the newest height_mean_samples
-     * entries, not the instantaneous filtered values. Vibration swings both
-     * ways and mostly cancels over the window, while a snag pushes one way
-     * for longer and survives the average. Until the windows hold that many
-     * entries the sample counts as not consistent. */
-    if ((false == g_b4_proc_state.b_incline_baseline_valid) ||
-        (g_b4_proc_state.incline_window_count < mean_samples))
-    {
-        b4_proc_clear_residuals();
-    }
-    else
-    {
-        forward_mean_mg = b4_proc_axis_mean_mg(
-            g_b4_proc_state.forward_window_mg, mean_samples);
-        lateral_mean_mg = b4_proc_axis_mean_mg(
-            g_b4_proc_state.lateral_window_mg, mean_samples);
-        vertical_mean_mg = b4_proc_axis_mean_mg(
-            g_b4_proc_state.vertical_window_mg, mean_samples);
-
-        /* Every input is within 4000 milli-g and every geometry value is
-         * below 300000 micrometres, so the int64_t products cannot
-         * overflow. The micrometre units cancel in the quotient. */
-        roll_mg = (int64_t)b4_proc_oriented_value(
-                      (int32_t)lateral_mean_mg,
-                      g_b4_proc_state.config.lateral_sign) -
-                  (int64_t)g_b4_proc_state.lateral_baseline_mg;
-        pitch_change_mg = (int64_t)b4_proc_oriented_value(
-                              (int32_t)forward_mean_mg,
-                              g_b4_proc_state.config.forward_sign) -
-                          (int64_t)g_b4_proc_state.status.pitch_baseline_mg;
-        roll_abs_mg = (roll_mg < 0) ? -roll_mg : roll_mg;
-
-        /* NOTE: Predicted pitch is -(|r| * track / 2 + r * caster_lateral)
-         * over the caster forward distance. The factor of two moves into
-         * the divisor so integer division loses no half unit. */
-        numerator = (roll_abs_mg *
-                     (int64_t)g_b4_proc_state.config.hump_lever_um) +
-                    (2 * roll_mg *
-                     (int64_t)g_b4_proc_state.config.caster_lateral_um);
-        denominator = 2 * (int64_t)g_b4_proc_state.config.caster_forward_um;
-        predicted_mg = -(numerator / denominator);
-
-        sum_squares = (forward_mean_mg * forward_mean_mg) +
-                      (lateral_mean_mg * lateral_mean_mg) +
-                      (vertical_mean_mg * vertical_mean_mg);
-        magnitude_mg = (int64_t)b4_proc_isqrt((uint64_t)sum_squares) -
-                       (int64_t)g_b4_proc_state.magnitude_baseline_mg;
-
-        /* The values are bounded by a few times 4000 milli-g, so the
-         * narrowing conversions to int32_t are exact. */
-        g_b4_proc_state.status.roll_change_mg = (int32_t)roll_mg;
-        g_b4_proc_state.status.tilt_residual_mg =
-            (int32_t)(pitch_change_mg - predicted_mg);
-        g_b4_proc_state.status.magnitude_residual_mg = (int32_t)magnitude_mg;
-
-        b_consistent =
-            (b4_proc_abs_mg(g_b4_proc_state.status.tilt_residual_mg) <=
-             g_b4_proc_state.config.tilt_residual_band_mg) &&
-            (b4_proc_abs_mg(g_b4_proc_state.status.magnitude_residual_mg) <=
-             g_b4_proc_state.config.tilt_magnitude_band_mg);
-        g_b4_proc_state.status.b_tilt_consistent = b_consistent;
-
-        if (true == b_consistent)
-        {
-            if (g_b4_proc_state.tilt_consistent_count < B4_PROC_MAX_COUNTER)
-            {
-                g_b4_proc_state.tilt_consistent_count++;
-            }
-        }
-        else
-        {
-            g_b4_proc_state.tilt_consistent_count = 0U;
-        }
-    }
-}
-
-static void
 b4_proc_push_incline (int32_t incline_mg)
 {
     g_b4_proc_state.incline_window_mg[g_b4_proc_state.incline_window_next] =
@@ -1497,7 +1216,6 @@ b4_proc_update_baseline (int32_t incline_mg, bool b_settled)
         {
             g_b4_proc_state.incline_baseline_mg = b4_proc_incline_mean_mg(
                 g_b4_proc_state.config.height_settle_samples);
-            b4_proc_capture_attitude_baselines();
             g_b4_proc_state.b_incline_baseline_valid = true;
         }
     }
@@ -1517,11 +1235,6 @@ b4_proc_update_baseline (int32_t incline_mg, bool b_settled)
                 g_b4_proc_state.config.height_baseline_divisor)
             {
                 g_b4_proc_state.baseline_step_count = 0U;
-                b4_proc_step_toward(&g_b4_proc_state.status.pitch_baseline_mg,
-                                    g_b4_proc_state.status.pitch_mg);
-                b4_proc_step_toward(&g_b4_proc_state.lateral_baseline_mg,
-                                    g_b4_proc_state.lateral_mg);
-
                 if (incline_mg > g_b4_proc_state.incline_baseline_mg)
                 {
                     g_b4_proc_state.incline_baseline_mg++;
@@ -1590,7 +1303,6 @@ b4_proc_update_height (void)
 
     if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
         (g_b4_proc_state.incline_window_count >= mean_samples) &&
-        (g_b4_proc_state.tilt_consistent_count >= mean_samples) &&
         (B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
         (B4_HUMP_COMPLETE != g_b4_proc_state.status.hump_state))
     {
@@ -1633,26 +1345,20 @@ b4_proc_abort_hump (void)
     g_b4_proc_state.incline_window_next = 0U;
     g_b4_proc_state.level_count = 0U;
     g_b4_proc_state.b_level_since_gap = false;
-    g_b4_proc_state.launch_settle_count = 0U;
-    g_b4_proc_state.b_launch_settled = false;
-    g_b4_proc_state.noise_warmup_count = 0U;
-    b4_proc_clear_residuals();
+    g_b4_proc_state.learn_count = 0U;
+    g_b4_proc_state.travel_um = 0U;
+    g_b4_proc_state.status.learn_count = 0U;
 }
 
 static uint32_t
 b4_proc_noise_mg (void)
 {
-    /* The estimate is a weighted mean of non-negative amplitudes, so it is
-     * never negative and the unsigned conversion is exact. Adding half a
-     * scale step rounds to the nearest milli-g. */
+    /* The estimate never goes below the scaled minimum, so it is positive
+     * and the unsigned conversion is exact. Adding half a scale step rounds
+     * to the nearest milli-g. */
     uint32_t noise_mg = (uint32_t)(g_b4_proc_state.noise_q8 +
                                    B4_PROC_NOISE_HALF_SCALE) /
                         (uint32_t)B4_PROC_NOISE_SCALE;
-
-    if (noise_mg < g_b4_proc_state.config.noise_floor_mg)
-    {
-        noise_mg = g_b4_proc_state.config.noise_floor_mg;
-    }
 
     return (noise_mg);
 }
@@ -1687,6 +1393,7 @@ b4_proc_refresh_thresholds (void)
     g_b4_proc_state.start_threshold_mg = start_mg;
     g_b4_proc_state.complete_threshold_mg = complete_mg;
     g_b4_proc_state.status.noise_mg = noise_mg;
+    g_b4_proc_state.status.learn_count = g_b4_proc_state.learn_count;
     /* The start threshold is at most 8000 times 20, or 160000 milli-g, so
      * the conversion cast is exact and the height product stays within
      * int64_t. */
@@ -1695,32 +1402,83 @@ b4_proc_refresh_thresholds (void)
 }
 
 static void
+b4_proc_median_step (int32_t amplitude_q8)
+{
+    int32_t step_q8 = 0;
+    int32_t floor_q8 = 0;
+
+    /* NOTE: A median tracker. Each step moves the estimate by the same
+     * fraction, 2^-n, whether the amplitude is just above it or far above
+     * it, so a ramp edge counts as one ordinary noisy step and cannot drag
+     * the threshold up. The step is at least one Q8 unit, so the estimate
+     * still moves when it is small.
+     *
+     * The amplitude is the difference of two means within the 4000 milli-g
+     * sample range, so it is at most 8000 and the scaled value is at most
+     * 2.05e6. The estimate stays between its scaled minimum and that value
+     * plus one step, so the sums below cannot overflow int32_t. The shift
+     * is validated to 4 to 12, so it is a defined shift of a positive
+     * value. */
+    step_q8 = g_b4_proc_state.noise_q8 >>
+              g_b4_proc_state.config.noise_step_shift;
+
+    if (step_q8 < 1)
+    {
+        step_q8 = 1;
+    }
+
+    if (amplitude_q8 > g_b4_proc_state.noise_q8)
+    {
+        g_b4_proc_state.noise_q8 += step_q8;
+    }
+    else if (amplitude_q8 < g_b4_proc_state.noise_q8)
+    {
+        g_b4_proc_state.noise_q8 -= step_q8;
+    }
+    else
+    {
+        /* On the estimate: the median does not move. */
+    }
+
+    floor_q8 = (int32_t)B4_PROC_MIN_THRESHOLD_MG * B4_PROC_NOISE_SCALE;
+
+    if (g_b4_proc_state.noise_q8 < floor_q8)
+    {
+        g_b4_proc_state.noise_q8 = floor_q8;
+    }
+
+    if (g_b4_proc_state.learn_count < B4_PROC_MAX_LEARN_COUNT)
+    {
+        g_b4_proc_state.learn_count++;
+    }
+}
+
+static void
 b4_proc_update_noise (uint32_t amplitude_mg)
 {
     uint8_t mean_samples = g_b4_proc_state.config.height_mean_samples;
 
-    /* NOTE: The input is clipped at the completion threshold, which is
-     * k_complete times the estimate, instead of being rejected above it.
-     * The clip bounds the growth per sample to (k_complete - 1) divided
-     * by noise_rise_samples, about 0.1 percent, so one second of a ramp
-     * edge raises the threshold by about 10 percent at most. The rise is
-     * slower than the fall, so a rising edge or a snag cannot pull the
-     * threshold up, while a rougher surface is still learned within
-     * seconds. The clip is a multiple above the estimate, so the estimate
-     * cannot lock low. */
+    /* NOTE: Learning continues in the CANDIDATE state. A candidate that is
+     * cancelled was noise, and it lasts at most hump_confirm_samples.
+     * Excluding it pulled the median low, which lowered the threshold and
+     * made more false candidates, a feedback loop. Learning stops once a
+     * hump is confirmed (ASCENDING and later), so a real ramp cannot drag
+     * the threshold up. The sweep mean uses the same condition. */
     if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
         (g_b4_proc_state.incline_window_count >= mean_samples) &&
-        (B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state) &&
+        ((B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state) ||
+         (B4_HUMP_CANDIDATE == g_b4_proc_state.status.hump_state)) &&
         (false == g_b4_proc_state.status.b_impact_event))
     {
-        uint32_t input_mg = amplitude_mg;
-        int32_t tau = 0;
-        int32_t target_q8 = 0;
-        int32_t floor_q8 = 0;
+        int32_t  amplitude_q8 = 0;
+        int32_t  speed_mm_s = g_b4_proc_state.drive_speed_mm_s;
+        uint32_t elapsed_ms = 0U;
+        uint32_t steps = 0U;
 
-        /* The calibration mean takes the same samples as the estimate
-         * and is not clipped: it must learn the floor from the sweep,
-         * not from the old floor. */
+        /* The calibration mean takes the same eligible samples as the
+         * median does, but whether or not the car is driving, because the
+         * sweep pivots. It is not clipped: it must seed the estimate from
+         * the sweep, not from the old estimate. */
         if ((true == g_b4_proc_state.b_cal_measuring) &&
             (g_b4_proc_state.cal_count < B4_PROC_CAL_MAX_SAMPLES))
         {
@@ -1728,48 +1486,50 @@ b4_proc_update_noise (uint32_t amplitude_mg)
             g_b4_proc_state.cal_count++;
         }
 
-        if (input_mg > g_b4_proc_state.complete_threshold_mg)
+        if ((true == g_b4_proc_state.b_learn) &&
+            (true == g_b4_proc_state.b_previous_sample_valid))
         {
-            input_mg = g_b4_proc_state.complete_threshold_mg;
+            elapsed_ms = g_b4_proc_state.status.sample.timestamp_ms -
+                         g_b4_proc_state.previous_timestamp_ms;
+
+            /* NOTE: A zero interval adds nothing. An interval longer than
+             * the stale limit, 100 ms, adds nothing either, because the
+             * stream stalled and the speed no longer describes the gap.
+             * The speed is limited to the encodable range, so a negative
+             * or oversized value cannot add false travel. */
+            if (speed_mm_s < 0)
+            {
+                speed_mm_s = 0;
+            }
+
+            if (speed_mm_s > B4_PROC_MAX_SPEED_MM_S)
+            {
+                speed_mm_s = B4_PROC_MAX_SPEED_MM_S;
+            }
+
+            if ((0U != elapsed_ms) &&
+                (elapsed_ms <= g_b4_proc_state.config.stale_after_ms))
+            {
+                /* Millimetres per second times milliseconds is
+                 * micrometres. The product is at most 1023 times the
+                 * 100 ms stale limit, 102300, and the accumulator is below
+                 * 1000 before it is added, so it stays far below 2^32. */
+                g_b4_proc_state.travel_um +=
+                    (uint32_t)speed_mm_s * elapsed_ms;
+                steps = g_b4_proc_state.travel_um / B4_PROC_STEP_TRAVEL_UM;
+                g_b4_proc_state.travel_um -=
+                    steps * B4_PROC_STEP_TRAVEL_UM;
+            }
+
+            /* At most one sample of travel at the top speed, 102 steps at
+             * 100 ms, so the loop is short. */
+            amplitude_q8 = (int32_t)amplitude_mg * B4_PROC_NOISE_SCALE;
+
+            for (uint32_t step = 0U; step < steps; step++)
+            {
+                b4_proc_median_step(amplitude_q8);
+            }
         }
-
-        /* The amplitude is the difference of two means within the 4000
-         * milli-g sample range, so it is at most 8000 and the scaled
-         * target is at most 2.05e6. The estimate stays between the floor
-         * and the largest target, so the difference stays within
-         * +/-2.05e6 and the sum cannot overflow int32_t. The time
-         * constants are validated to be 1 to 10000, so the divisor is
-         * never zero. */
-        target_q8 = (int32_t)input_mg * B4_PROC_NOISE_SCALE;
-
-        if (target_q8 > g_b4_proc_state.noise_q8)
-        {
-            tau = (int32_t)g_b4_proc_state.config.noise_rise_samples;
-        }
-        else
-        {
-            tau = (int32_t)g_b4_proc_state.config.noise_fall_samples;
-        }
-
-        g_b4_proc_state.noise_q8 +=
-            (target_q8 - g_b4_proc_state.noise_q8) / tau;
-
-        /* The floor is validated to at most the settle band limit, so the
-         * scaled floor is small and the cast is exact. */
-        floor_q8 = (int32_t)g_b4_proc_state.config.noise_floor_mg *
-                   B4_PROC_NOISE_SCALE;
-
-        if (g_b4_proc_state.noise_q8 < floor_q8)
-        {
-            g_b4_proc_state.noise_q8 = floor_q8;
-        }
-    }
-
-    /* The warm-up counts samples since the run started, not accepted
-     * ones, so a rough launch cannot hold detection off forever. */
-    if (g_b4_proc_state.noise_warmup_count < B4_PROC_MAX_COUNTER)
-    {
-        g_b4_proc_state.noise_warmup_count++;
     }
 
     b4_proc_refresh_thresholds();
@@ -1811,36 +1571,6 @@ b4_proc_update_level (uint32_t amplitude_mg)
     else
     {
         g_b4_proc_state.status.health = B4_HEALTH_DEGRADED;
-    }
-}
-
-static void
-b4_proc_update_launch (uint32_t amplitude_mg)
-{
-    b4_types_hump_state_t state = g_b4_proc_state.status.hump_state;
-    bool b_steady =
-        (true == g_b4_proc_state.status.b_tilt_consistent) &&
-        ((B4_HUMP_NORMAL == state) || (B4_HUMP_COMPLETE == state)) &&
-        (amplitude_mg <= g_b4_proc_state.complete_threshold_mg);
-
-    if (true == b_steady)
-    {
-        if (g_b4_proc_state.launch_settle_count < B4_PROC_MAX_COUNTER)
-        {
-            g_b4_proc_state.launch_settle_count++;
-        }
-    }
-    else
-    {
-        g_b4_proc_state.launch_settle_count = 0U;
-    }
-
-    /* Once settled the flag stays set until the next run start or data
-     * gap, so a later crossing is never held back by its own tilt. */
-    if (g_b4_proc_state.launch_settle_count >=
-        g_b4_proc_state.config.height_mean_samples)
-    {
-        g_b4_proc_state.b_launch_settled = true;
     }
 }
 
@@ -1965,10 +1695,8 @@ b4_proc_advance_hump (uint32_t amplitude_mg, bool b_settled)
 
 /** @brief Start a hump candidate above the threshold from level ground.
  *
- * The current sample must also be consistent with the wheel-lift geometry,
- * the car must have settled since the run started, and the noise estimate
- * must have had its warm-up, so the roll of a launch cannot pass for a
- * ramp.
+ * The median must also have had its learning hold since START, so the
+ * roll of a launch cannot pass for a ramp.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -1978,11 +1706,12 @@ b4_proc_start_hump (uint32_t amplitude_mg)
     /* NOTE: After a data gap the car may already be partway over a ramp,
      * so a hump may start only from confirmed level ground. Otherwise the
      * rest of the crossing would publish a partial height as valid. */
+    /* The learning hold is one time constant of the median, 2^n learning
+     * samples. The shift is validated to at most 12, so the shift of one
+     * stays within uint32_t. */
     if ((true == g_b4_proc_state.b_level_since_gap) &&
-        (true == g_b4_proc_state.b_launch_settled) &&
-        (g_b4_proc_state.noise_warmup_count >=
-         g_b4_proc_state.config.noise_warmup_samples) &&
-        (true == g_b4_proc_state.status.b_tilt_consistent) &&
+        (g_b4_proc_state.learn_count >=
+         ((uint32_t)1U << g_b4_proc_state.config.noise_step_shift)) &&
         (amplitude_mg >= g_b4_proc_state.start_threshold_mg))
     {
         g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
@@ -1996,18 +1725,15 @@ b4_proc_start_hump (uint32_t amplitude_mg)
 
 /** @brief Confirm or cancel a candidate hump.
  *
- * A sample below the threshold or inconsistent with the wheel-lift geometry
- * cancels the candidate, so confirmation needs consecutive samples that are
- * both above the threshold and consistent.
+ * A sample below the threshold cancels the candidate, so confirmation
+ * needs consecutive samples above the threshold.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
 static void
 b4_proc_update_hump_candidate (uint32_t amplitude_mg)
 {
-    if ((amplitude_mg >=
-         g_b4_proc_state.start_threshold_mg) &&
-        (true == g_b4_proc_state.status.b_tilt_consistent))
+    if (amplitude_mg >= g_b4_proc_state.start_threshold_mg)
     {
         if (amplitude_mg >
             g_b4_proc_state.status.current_hump_peak_mg)

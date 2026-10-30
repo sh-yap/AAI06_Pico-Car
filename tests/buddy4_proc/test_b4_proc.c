@@ -17,6 +17,10 @@
 #define TRACK_HALF_UM  57500.0
 #define CASTER_LAT_UM  4600.0
 #define CASTER_FWD_UM  120000.0
+#define DRIVE_SPEED_MM_S 100
+/* Driving lead-in before a crossing. The learning hold is 256 driving
+ * samples, and learning starts about 35 samples into the trace. */
+#define LEAD_IN_SAMPLES 300
 
 typedef struct
 {
@@ -32,8 +36,6 @@ typedef struct
     int      completed;
     int      valid;
     double   height_mm;   /* first valid hump */
-    int      worst_residual;
-    int      samples_consistent;
 } result_t;
 
 static uint32_t g_seed = 12345U;
@@ -126,6 +128,8 @@ run_trace (const trace_t * t, result_t * r)
     b4_proc_reset_run_stats();
     for (int i = 0; i < t->n; i++)
     {
+        /* The car drives for the whole trace: the learning input is on. */
+        b4_proc_set_drive(true, DRIVE_SPEED_MM_S);
         s.timestamp_ms = (uint32_t)(1000 + (i * SAMPLE_MS));
         s.accel_x_mg = t->x[i];
         s.accel_y_mg = t->y[i];
@@ -149,14 +153,6 @@ run_trace (const trace_t * t, result_t * r)
                 r->valid++;
             }
         }
-        if (abs(st.tilt_residual_mg) > r->worst_residual)
-        {
-            r->worst_residual = abs(st.tilt_residual_mg);
-        }
-        if (st.b_tilt_consistent)
-        {
-            r->samples_consistent++;
-        }
     }
 }
 
@@ -169,10 +165,9 @@ check_known (const char * name, bool ok, bool known_limit,
     {
         g_failed++;
     }
-    printf("%s %-42s started=%d completed=%d valid=%d height=%.2f mm "
-           "worst_resid=%d consistent=%d\n",
-           ok ? "PASS" : (known_limit ? "KNOWN" : "FAIL"), name, r->started, r->completed, r->valid,
-           r->height_mm, r->worst_residual, r->samples_consistent);
+    printf("%s %-42s started=%d completed=%d valid=%d height=%.2f mm\n",
+           ok ? "PASS" : (known_limit ? "KNOWN" : "FAIL"), name, r->started,
+           r->completed, r->valid, r->height_mm);
 }
 
 static void
@@ -207,7 +202,7 @@ case_cross (const char * name, int side, int amp, int mode, double ref_mm,
     g_t.n = 0;
     g_lcg = g_seed;
     trace_flat(&g_t, 80);
-    trace_flat(&g_t, 100);
+    trace_flat(&g_t, LEAD_IN_SAMPLES);
     trace_cross(&g_t, 11.0, side, 40, 20, 40);
     trace_flat(&g_t, 100);
     if (amp > 0)
@@ -242,52 +237,9 @@ case_launch (const char * name, int lead, int pitch_sign, int rock_sign,
     check_known(name, r.started == 0 && r.completed == 0, known_limit, &r);
 }
 
-/* Snag held 400 ms: 140 mg pitch and 60 mg roll, off the wheel-lift model. */
-static void
-case_snag (const char * name, int pitch_sign, int roll_sign)
-{
-    result_t r;
-    g_t.n = 0;
-    trace_flat(&g_t, 80);
-    trace_flat(&g_t, 100);
-    for (int i = 0; i < 40; i++)
-    {
-        double e = (i < 5) ? ((double)(i + 1) / 5.0) :
-                   ((i >= 35) ? ((double)(40 - i) / 5.0) : 1.0);
-        g_t.y[g_t.n] = pitch_sign * (int)lround(140.0 * e);
-        g_t.x[g_t.n] = roll_sign * (int)lround(60.0 * e);
-        g_t.z[g_t.n] = 1000;
-        g_t.n++;
-    }
-    trace_flat(&g_t, 100);
-    run_trace(&g_t, &r);
-    check(name, r.started == 0 && r.completed == 0, &r);
-}
-
-static void
-case_snag_then_cross (const char * name)
-{
-    result_t r;
-    g_t.n = 0;
-    trace_flat(&g_t, 80);
-    trace_flat(&g_t, 100);
-    for (int i = 0; i < 40; i++)
-    {
-        g_t.y[g_t.n] = 140;
-        g_t.x[g_t.n] = 60;
-        g_t.z[g_t.n] = 1000;
-        g_t.n++;
-    }
-    trace_flat(&g_t, 100);
-    trace_cross(&g_t, 11.0, 1, 40, 20, 40);
-    trace_flat(&g_t, 100);
-    run_trace(&g_t, &r);
-    check(name, r.completed == 1 && r.valid == 1, &r);
-}
-
 /* Flat ground with slow lateral wobble: a 2 Hz sine of 40 mg plus random 60 mg
- * on roll, with pitch following the wheel-lift model so the tilt gate passes.
- * This is not a hump and must not start one. */
+ * on roll, with pitch following the wheel-lift model. This is not a hump and
+ * must not start one. */
 static void
 case_wobble (const char * name)
 {
@@ -310,8 +262,8 @@ case_wobble (const char * name)
     trace_flat(&g_t, 200);
     run_trace(&g_t, &r);
     /* Known limit: the 24-sample mean passes about 66 percent of a 2 Hz
-     * sine, so +-40 mg still crosses the 25 mg start threshold. At 3 Hz and
-     * above the same case passes. */
+     * sine, so +-40 mg still crosses the start threshold. At 3 Hz and above
+     * the same case passes. */
     check_known(name, r.started == 0 && r.completed == 0, true, &r);
 }
 
@@ -330,11 +282,6 @@ main (int argc, char ** argv)
     clean_r = case_cross("right crossing clean", 1, 0, 0, 0.0, 0.0);
     clean_l = case_cross("left crossing clean", -1, 0, 0, 0.0, 0.0);
     case_wobble("slow roll wobble 2Hz +-40 +-60 rnd");
-    case_snag("snag pitch+ roll+ 400ms", 1, 1);
-    case_snag("snag pitch- roll+ 400ms", -1, 1);
-    case_snag("snag pitch+ roll- 400ms", 1, -1);
-    case_snag("snag pitch- roll- 400ms", -1, -1);
-    case_snag_then_cross("snag then right crossing");
 
     case_flat("vib flat random +-60", 60, 0);
     case_flat("vib flat alternating +-60", 60, 1);
@@ -353,8 +300,6 @@ main (int argc, char ** argv)
                 (void)snprintf(name, sizeof(name),
                                "launch lead=%d pitch%c rock%c", lead,
                                (p > 0) ? '+' : '-', (k > 0) ? '+' : '-');
-                /* Pitch+ is the sign whose step plus rock still lies on the
-                 * wheel-lift model, so the 30 mg band cannot reject it. */
                 case_launch(name, lead, p, k, (p > 0) && (lead >= 32));
             }
         }

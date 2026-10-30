@@ -22,6 +22,18 @@
  * with the bit clear when the height could not be measured. Freshness is
  * not in the word; the receiver times each word it gets.
  *
+ * The Vehicle Controller sends a second word the other way, once per 20 ms
+ * cycle, so Buddy 4 learns its noise only while the car drives. The B4_TASK_
+ * DRIVE macros below define the layout for both sides:
+ *
+ *   bit  0      driving, the VC is following, turning, bypassing or
+ *               reacquiring the line, or handling a junction
+ *   bit  1      moving, the VC's own stationary test is false
+ *   bits 2-12   left wheel speed, signed 11 bits, mm/s, saturated +-1023
+ *   bits 13-23  right wheel speed, same format
+ *   bits 24-27  sequence, counts up each VC cycle and wraps
+ *   bits 28-31  reserved, zero
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 #ifndef B4_TASK_H
@@ -31,6 +43,18 @@
 #include <stdint.h>
 
 #include "b4_types.h"
+
+/* Drive word layout, shared by the Vehicle Controller (packs) and the Buddy 4
+ * task (unpacks). Speeds are two's complement in 11 bits. */
+#define B4_TASK_DRIVE_DRIVING_BIT   (0x00000001U)
+#define B4_TASK_DRIVE_MOVING_BIT    (0x00000002U)
+#define B4_TASK_DRIVE_LEFT_SHIFT    (2U)
+#define B4_TASK_DRIVE_RIGHT_SHIFT   (13U)
+#define B4_TASK_DRIVE_SPEED_MASK    (0x7FFU)
+#define B4_TASK_DRIVE_SPEED_SIGN    (0x400U)
+#define B4_TASK_DRIVE_SPEED_LIMIT   (1023)      /* mm/s, saturation.  */
+#define B4_TASK_DRIVE_SEQ_SHIFT     (24U)
+#define B4_TASK_DRIVE_SEQ_MASK      (0xFU)
 
 /** @brief One decoded terrain word.
  */
@@ -79,6 +103,18 @@ b4_task_unpack (uint32_t word, b4_task_terrain_t * p_terrain);
 bool
 b4_task_is_ramp_active (b4_task_terrain_t const * p_terrain);
 
+/** @brief Hand Buddy 4 the latest drive word.
+ *
+ * Called by the Vehicle Controller task once per cycle. The word is stored
+ * in one 32-bit variable with a single writer, the VC task, and a single
+ * reader, the Buddy 4 task. An aligned 32-bit store is atomic on the
+ * RP2040, so neither task needs a lock or can block the other.
+ *
+ * @param word The packed drive word, as laid out by the B4_TASK_DRIVE macros.
+ */
+void
+b4_task_set_drive (uint32_t word);
+
 /** @brief Ask the task to clear the run maximum before the next sample.
  */
 void
@@ -91,7 +127,7 @@ typedef enum
     B4_TASK_CAL_LEVEL = 0,   /**< Car is still: take the level reference
                                   again.                                  */
     B4_TASK_CAL_MEASURE,     /**< Car is pivoting: measure the noise.     */
-    B4_TASK_CAL_END          /**< Sweep over: make the mean the floor.    */
+    B4_TASK_CAL_END          /**< Sweep over: seed the noise estimate.    */
 } b4_task_cal_request_t;
 
 /** @brief Where the START calibration stands. */
@@ -100,8 +136,8 @@ typedef enum
     B4_TASK_CAL_IDLE = 0,
     B4_TASK_CAL_MEASURING,   /**< Not enough samples yet.                 */
     B4_TASK_CAL_ENOUGH,      /**< Enough samples; the sweep may end.      */
-    B4_TASK_CAL_DONE,        /**< The floor is set from the sweep.        */
-    B4_TASK_CAL_FAILED       /**< Too few samples, or no valid floor.     */
+    B4_TASK_CAL_DONE,        /**< The estimate is seeded from the sweep.     */
+    B4_TASK_CAL_FAILED       /**< Too few samples, or no valid seed.       */
 } b4_task_cal_state_t;
 
 /** @brief Ask the task to take one calibration step before its next sample.
