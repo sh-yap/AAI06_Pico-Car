@@ -15,11 +15,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include "obstacle_config.h"
 #include "obstacle_types.h"
 #include "obstacle_calc.h"
 #include "obstacle_monitor.h"
+#include "obstacle_scan.h"
+#include "obstacle_plan.h"
 
 static uint32_t failures = 0U;
 static uint32_t checks = 0U;
@@ -330,17 +333,18 @@ test_monitor_stop(void)
     obstacle_status_t  rep;
     uint32_t           idx;
 
-    /* Approach: two readings under 250 mm are needed. */
+    /* Approach: two readings under the stop distance are needed. */
     obstacle_monitor_reset(&mon);
-    feed(&mon, OBSTACLE_RANGE_OK, 600U, &rep);
-    feed(&mon, OBSTACLE_RANGE_OK, 400U, &rep);
-    feed(&mon, OBSTACLE_RANGE_OK, 300U, &rep);
-    check_u32("approach 300 not ahead", mon.b_ahead, false);
-    feed(&mon, OBSTACLE_RANGE_OK, 240U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM + 200U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM + 100U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM + 50U, &rep);
+    check_u32("approach not ahead", mon.b_ahead, false);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 10U, &rep);
     check_u32("approach one close", mon.b_ahead, false);
-    check_u32("report distance", rep.distance_mm, 240U);
+    check_u32("report distance", rep.distance_mm,
+              OBSTACLE_STOP_DISTANCE_MM - 10U);
     check_u32("report state", rep.state, OBSTACLE_STATE_MONITOR);
-    feed(&mon, OBSTACLE_RANGE_OK, 230U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 20U, &rep);
     check_u32("approach two close", mon.b_ahead, true);
 
     /* Neither far readings nor TIMEOUT clear it; only the ack does. */
@@ -362,12 +366,12 @@ test_monitor_stop(void)
     /* One stray far echo between close readings neither stops nor
      * counts as lost. */
     obstacle_monitor_reset(&mon);
-    feed(&mon, OBSTACLE_RANGE_OK, 300U, &rep);
-    feed(&mon, OBSTACLE_RANGE_OK, 240U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM + 50U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 10U, &rep);
     feed(&mon, OBSTACLE_RANGE_OK, 761U, &rep);
-    feed(&mon, OBSTACLE_RANGE_OK, 235U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 15U, &rep);
     check_u32("stray not ahead", mon.b_ahead, false);
-    feed(&mon, OBSTACLE_RANGE_OK, 230U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 20U, &rep);
     check_u32("stray then two close", mon.b_ahead, true);
 
     /* Open space far away is not an obstacle. */
@@ -486,6 +490,555 @@ test_monitor_fault(void)
     check_u32("not ready fault", mon.b_fault, true);
 }
 
+/*!
+ * @brief Build a coarse scan (60, 75, 90, 105, 120 deg) from distances.
+ *
+ * @param[out] p_res  Scan to fill.
+ * @param[in]  p_mm   Five distances, right to left; 0 = unknown.
+ * @param[in]  silent Silent pings at every unknown angle.
+ */
+static void
+make_scan(obstacle_scan_result_t * p_res, uint32_t const * p_mm,
+          uint32_t silent)
+{
+    uint32_t idx;
+
+    p_res->count = 5U;
+
+    for (idx = 0U; idx < 5U; idx++)
+    {
+        p_res->points[idx].angle_deg    = 60U + (idx * 15U);
+        p_res->points[idx].distance_mm  = p_mm[idx];
+        p_res->points[idx].valid_count  = (0U == p_mm[idx]) ? 0U : 3U;
+        p_res->points[idx].silent_count = (0U == p_mm[idx]) ? silent : 0U;
+        p_res->points[idx].point_class  = OBSTACLE_POINT_UNKNOWN;
+    }
+
+    obstacle_scan_analyse(p_res);
+}
+
+static void
+test_scan_reduce(void)
+{
+    obstacle_range_t      pings[3] =
+    {
+        { 0U, 300U, 0U, OBSTACLE_RANGE_OK },
+        { 0U, 310U, 0U, OBSTACLE_RANGE_OK },
+        { 0U, 0U, 0U, OBSTACLE_RANGE_TIMEOUT }
+    };
+    obstacle_scan_point_t pt;
+
+    obstacle_scan_reduce(90U, pings, 3U, &pt);
+    check_u32("reduce 2 of 3 valid", pt.valid_count, 2U);
+    check_u32("reduce median", pt.distance_mm, 305U);
+    check_u32("reduce angle", pt.angle_deg, 90U);
+
+    pings[1].status = OBSTACLE_RANGE_NO_ECHO;
+    pings[1].distance_mm = 0U;
+    obstacle_scan_reduce(75U, pings, 3U, &pt);
+    check_u32("reduce 1 valid = unknown", pt.distance_mm, 0U);
+    check_u32("reduce silent", pt.silent_count, 1U);
+}
+
+static void
+test_scan_decisions(void)
+{
+    static obstacle_scan_result_t res;
+    uint32_t const centred[5]  = { 900U, 470U, 450U, 470U, 900U };
+    uint32_t const right[5]    = { 310U, 300U, 900U, 900U, 900U };
+    uint32_t const clear[5]    = { 900U, 1500U, 2000U, 1500U, 900U };
+    uint32_t const blind[5]    = { 900U, 0U, 0U, 0U, 900U };
+    uint32_t const angled[5]   = { 0U, 470U, 450U, 470U, 900U };
+    uint32_t const none[5]     = { 0U, 0U, 0U, 0U, 0U };
+    uint32_t const wall[5]     = { 460U, 455U, 450U, 455U, 460U };
+    uint32_t const hyst[5]     = { 900U, 640U, 450U, 470U, 900U };
+    uint32_t const leftish[5]  = { 900U, 900U, 460U, 450U, 900U };
+
+    /* 20 cm box straight ahead at 45 cm, background at 90 cm. */
+    make_scan(&res, centred, 0U);
+    check_u32("centred action", res.profile.action,
+              OBSTACLE_ACTION_TURN_LEFT);
+    check_u32("centred closest", res.profile.distance_mm, 450U);
+    check_u32("centred at", res.profile.angle_deg, 90U);
+    check_u32("centred right edge", res.right_edge_deg, 75U);
+    check_u32("centred left edge", res.left_edge_deg, 105U);
+    check_u32("centred width bound", res.profile.width_mm, 450U);
+    check_u32("centred clear left", res.profile.clear_left_mm, 900U);
+    check_u32("centred clear right", res.profile.clear_right_mm, 900U);
+    check_u32("centred 60 background", res.points[0].point_class,
+              OBSTACLE_POINT_BACKGROUND);
+    check_u32("centred 90 obstacle", res.points[2].point_class,
+              OBSTACLE_POINT_OBSTACLE);
+
+    /* Obstacle to the right: go left; width unknown (span at the edge). */
+    make_scan(&res, right, 0U);
+    check_u32("right action", res.profile.action, OBSTACLE_ACTION_TURN_LEFT);
+    check_u32("right width open", res.profile.width_mm, 1023U);
+    check_u32("right no right clear", res.profile.clear_right_mm, 0U);
+
+    /* Obstacle a little left of centre, both sides clear: go right. */
+    make_scan(&res, leftish, 0U);
+    check_u32("leftish action", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+
+    /* The obstacle has gone. */
+    make_scan(&res, clear, 0U);
+    check_u32("clear action", res.profile.action, OBSTACLE_ACTION_CONTINUE);
+
+    /* No echo straight ahead: never CONTINUE.  Nothing proves either
+     * side, so right first, for the path check to verify. */
+    make_scan(&res, blind, 0U);
+    check_u32("blind action", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+
+    /* TIMEOUT on the right (angled face): only the left is proven. */
+    make_scan(&res, angled, 0U);
+    check_u32("angled action", res.profile.action,
+              OBSTACLE_ACTION_TURN_LEFT);
+    check_u32("angled right edge", res.right_edge_deg, 60U);
+
+    /* Nothing measured at all (all TIMEOUT). */
+    make_scan(&res, none, 0U);
+    check_u32("none action", res.profile.action,
+              OBSTACLE_ACTION_REVERSE_RETRY);
+
+    /* Heard across the whole view: unproven both sides, right first. */
+    make_scan(&res, wall, 0U);
+    check_u32("wall action", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+    check_u32("wall width open", res.profile.width_mm, 1023U);
+
+    /* Hysteresis: 640 mm is background by the 150 mm rule but still
+     * extends the span (within 250 mm). */
+    make_scan(&res, hyst, 0U);
+    check_u32("hysteresis right edge", res.right_edge_deg, 75U);
+    check_u32("hysteresis action", res.profile.action,
+              OBSTACLE_ACTION_TURN_LEFT);
+
+    /* Sensor unplugged: no echo at 3 or more angles. */
+    make_scan(&res, none, 3U);
+    check_u32("fault action", res.profile.action, OBSTACLE_ACTION_STOP);
+}
+
+/*!
+ * @brief Build a 5-degree scan (60..120, 13 angles) from distances.
+ *
+ * @param[out] p_res Scan to fill and analyse.
+ * @param[in]  p_mm  Thirteen distances, right to left; 0 = unknown.
+ */
+static void
+make_fine_scan(obstacle_scan_result_t * p_res, uint32_t const * p_mm)
+{
+    uint32_t idx;
+
+    p_res->count = 13U;
+
+    for (idx = 0U; idx < 13U; idx++)
+    {
+        p_res->points[idx].angle_deg    = 60U + (idx * 5U);
+        p_res->points[idx].distance_mm  = p_mm[idx];
+        p_res->points[idx].valid_count  = (0U == p_mm[idx]) ? 0U : 3U;
+        p_res->points[idx].silent_count = 0U;
+        p_res->points[idx].point_class  = OBSTACLE_POINT_UNKNOWN;
+    }
+
+    obstacle_scan_analyse(p_res);
+}
+
+/* Real 5-degree scans, 9.5 cm box at about 441 mm (2026-10-31). */
+static void
+test_scan_real(void)
+{
+    static obstacle_scan_result_t res;
+    uint32_t const centred[13] =
+        { 3007U, 924U, 450U, 446U, 445U, 441U, 441U, 441U, 440U, 441U,
+          441U, 441U, 446U };
+    uint32_t const box_left[13] =
+        { 3003U, 2990U, 2990U, 467U, 454U, 458U, 458U, 445U, 450U, 454U,
+          454U, 467U, 459U };
+    uint32_t const box_right[13] =
+        { 481U, 456U, 446U, 442U, 442U, 433U, 433U, 442U, 442U, 442U,
+          443U, 443U, 451U };
+    uint32_t const nothing[13] =
+        { 0U, 0U, 1887U, 1880U, 1857U, 1869U, 1861U, 1861U, 1857U, 1861U,
+          1865U, 1879U, 1888U };
+
+    /* Right side proven (background at 60-65), left unproven. */
+    make_fine_scan(&res, centred);
+    check_u32("real centred", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+    check_u32("real centred right edge", res.right_edge_deg, 70U);
+
+    make_fine_scan(&res, box_left);
+    check_u32("real box left", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+    check_u32("real box left clear right", res.profile.clear_right_mm,
+              3003U);
+
+    /* Heard across the whole view: neither side is proven, so right
+     * first, to be verified by the path check. */
+    make_fine_scan(&res, box_right);
+    check_u32("real box right", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+    check_u32("real box right no proof", res.profile.clear_left_mm, 0U);
+
+    make_fine_scan(&res, nothing);
+    check_u32("real nothing", res.profile.action,
+              OBSTACLE_ACTION_CONTINUE);
+    check_u32("real nothing closest", res.profile.distance_mm, 1857U);
+}
+
+/*!
+ * @brief Fill n pings with one status and distance.
+ */
+static void
+fill_pings(obstacle_range_t * p_pings, uint32_t n,
+           obstacle_range_status_t status, uint32_t distance_mm)
+{
+    uint32_t idx;
+
+    for (idx = 0U; idx < n; idx++)
+    {
+        p_pings[idx].echo_us      = 0U;
+        p_pings[idx].distance_mm  = distance_mm;
+        p_pings[idx].timestamp_us = 0U;
+        p_pings[idx].status       = status;
+    }
+}
+
+/*!
+ * @brief Start a path check.
+ */
+static void
+path_start(obstacle_path_t * p_path, uint32_t need_mm, uint32_t known_mm)
+{
+    p_path->need_mm  = need_mm;
+    p_path->known_mm = known_mm;
+    p_path->count    = 0U;
+    p_path->verdict  = OBSTACLE_PATH_FAULT;
+}
+
+/*!
+ * @brief Add one path-check angle with three identical pings.
+ */
+static void
+path_add(obstacle_path_t * p_path, uint32_t angle_deg,
+         obstacle_range_status_t status, uint32_t distance_mm)
+{
+    obstacle_range_t pings[3];
+
+    fill_pings(pings, 3U, status, distance_mm);
+    obstacle_scan_path_add(p_path, angle_deg, pings, 3U);
+}
+
+/*!
+ * @brief Verdict of a right-side check with OK readings (0 = TIMEOUT).
+ */
+static obstacle_path_verdict_t
+path_run(uint32_t need_mm, uint32_t known_mm,
+         uint32_t outer_mm, uint32_t middle_mm, uint32_t ahead_mm)
+{
+    obstacle_path_t path;
+    uint32_t const  mm[3] = { outer_mm, middle_mm, ahead_mm };
+    uint32_t        idx;
+
+    path_start(&path, need_mm, known_mm);
+
+    for (idx = 0U; idx < 3U; idx++)
+    {
+        path_add(&path, obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_RIGHT,
+                                                 idx),
+                 (0U == mm[idx]) ? OBSTACLE_RANGE_TIMEOUT : OBSTACLE_RANGE_OK,
+                 mm[idx]);
+    }
+
+    obstacle_scan_path_verdict(&path);
+
+    return (path.verdict);
+}
+
+static void
+test_scan_path(void)
+{
+    obstacle_range_t pings[3];
+    obstacle_path_t  path;
+
+    /* Angles: from the bypass side back to straight ahead. */
+    check_u32("path angle right 0",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_RIGHT, 0U), 70U);
+    check_u32("path angle right 1",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_RIGHT, 1U), 80U);
+    check_u32("path angle right 2",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_RIGHT, 2U), 90U);
+    check_u32("path angle left 0",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_LEFT, 0U), 115U);
+    check_u32("path angle left 1",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_LEFT, 1U), 103U);
+    check_u32("path angle left 2",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_LEFT, 2U), 90U);
+    check_u32("path angle clamp",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_TURN_LEFT, 7U), 90U);
+    check_u32("path angle no turn",
+              obstacle_scan_path_angle(OBSTACLE_ACTION_CONTINUE, 0U), 90U);
+
+    /* Bench 2026-11-01, 21 cm card at 455 mm, car turned 21 deg right:
+     * 70 sees past it, 80 and 90 still hear it. */
+    path_start(&path, 1047U, 455U);
+    path_add(&path, 70U, OBSTACLE_RANGE_OK, 2270U);
+    path_add(&path, 80U, OBSTACLE_RANGE_OK, 465U);
+    path_add(&path, 90U, OBSTACLE_RANGE_OK, 456U);
+    obstacle_scan_path_verdict(&path);
+    check_u32("path bench right", path.verdict, OBSTACLE_PATH_CLEAR);
+    check_u32("path bench right count", path.count, 3U);
+    check_u32("path bench right 70", path.points[0].verdict,
+              OBSTACLE_PATH_CLEAR);
+    check_u32("path bench right 80", path.points[1].verdict,
+              OBSTACLE_PATH_KNOWN);
+    check_u32("path bench right 80 mm", path.points[1].distance_mm, 465U);
+    check_u32("path bench right 90 angle", path.points[2].angle_deg, 90U);
+
+    /* Same, but turned too little: the outer angle still hears it. */
+    check_u32("path outer known",
+              path_run(1047U, 455U, 483U, 473U, 460U), OBSTACLE_PATH_BLOCKED);
+
+    /* Bench left turn: a real object at 989 mm, short of the 1047 needed. */
+    check_u32("path room object",
+              path_run(1047U, 467U, 989U, 502U, 471U), OBSTACLE_PATH_BLOCKED);
+
+    /* Something new, nearer than the box or between it and need_mm. */
+    check_u32("path new near",
+              path_run(1047U, 455U, 2270U, 465U, 300U), OBSTACLE_PATH_BLOCKED);
+    check_u32("path new between",
+              path_run(1047U, 455U, 2270U, 700U, 456U), OBSTACLE_PATH_BLOCKED);
+
+    /* No known obstacle: every near reading blocks. */
+    check_u32("path no known",
+              path_run(1047U, 0U, 2270U, 465U, 456U), OBSTACLE_PATH_BLOCKED);
+
+    /* Known window: 455 - 40 .. 455 + 80. */
+    check_u32("path window low",
+              path_run(1047U, 455U, 2270U, 415U, 2270U), OBSTACLE_PATH_CLEAR);
+    check_u32("path window below",
+              path_run(1047U, 455U, 2270U, 414U, 2270U),
+              OBSTACLE_PATH_BLOCKED);
+    check_u32("path window high",
+              path_run(1047U, 455U, 2270U, 535U, 2270U), OBSTACLE_PATH_CLEAR);
+    check_u32("path window above",
+              path_run(1047U, 455U, 2270U, 536U, 2270U),
+              OBSTACLE_PATH_BLOCKED);
+
+    /* No echo is not proof (angled faces are silent). */
+    check_u32("path open",
+              path_run(1047U, 455U, 0U, 465U, 456U), OBSTACLE_PATH_OPEN);
+
+    /* Sensor silent at one angle. */
+    path_start(&path, 1047U, 455U);
+    path_add(&path, 70U, OBSTACLE_RANGE_OK, 2270U);
+    path_add(&path, 80U, OBSTACLE_RANGE_NO_ECHO, 0U);
+    path_add(&path, 90U, OBSTACLE_RANGE_OK, 456U);
+    obstacle_scan_path_verdict(&path);
+    check_u32("path fault", path.verdict, OBSTACLE_PATH_FAULT);
+
+    /* One reading among timeouts: near blocks, known is known, far is
+     * not enough to call clear. */
+    path_start(&path, 1047U, 455U);
+    fill_pings(pings, 3U, OBSTACLE_RANGE_TIMEOUT, 0U);
+    pings[1].status = OBSTACLE_RANGE_OK;
+    pings[1].distance_mm = 300U;
+    obstacle_scan_path_add(&path, 70U, pings, 3U);
+    pings[1].distance_mm = 470U;
+    obstacle_scan_path_add(&path, 80U, pings, 3U);
+    pings[1].distance_mm = 2000U;
+    obstacle_scan_path_add(&path, 90U, pings, 3U);
+    check_u32("path one near", path.points[0].verdict,
+              OBSTACLE_PATH_BLOCKED);
+    check_u32("path one known", path.points[1].verdict, OBSTACLE_PATH_KNOWN);
+    check_u32("path one far", path.points[2].verdict, OBSTACLE_PATH_OPEN);
+
+    /* Too close is always blocked; a fourth angle is ignored. */
+    fill_pings(pings, 3U, OBSTACLE_RANGE_OK, 2270U);
+    pings[2].status = OBSTACLE_RANGE_TOO_CLOSE;
+    path_start(&path, 1047U, 455U);
+    path_add(&path, 70U, OBSTACLE_RANGE_OK, 2270U);
+    path_add(&path, 80U, OBSTACLE_RANGE_OK, 2270U);
+    obstacle_scan_path_add(&path, 90U, pings, 3U);
+    path_add(&path, 95U, OBSTACLE_RANGE_OK, 2270U);
+    obstacle_scan_path_verdict(&path);
+    check_u32("path too close", path.verdict, OBSTACLE_PATH_BLOCKED);
+    check_u32("path max points", path.count, 3U);
+
+    /* Nothing measured at all. */
+    path_start(&path, 1047U, 455U);
+    obstacle_scan_path_verdict(&path);
+    check_u32("path empty", path.verdict, OBSTACLE_PATH_FAULT);
+}
+
+/*!
+ * @brief Smallest gap between the car's outline and a box, at one pose.
+ *
+ * @param[in] ax,ay   Rear axle position (mm).
+ * @param[in] heading Car heading (radians, 0 = along the line).
+ * @param[in] x0,x1   Box extent along the line.
+ * @param[in] y0,y1   Box extent sideways.
+ *
+ * @return Gap in mm (0 if they touch or overlap).
+ */
+static double
+car_box_gap(double ax, double ay, double heading,
+            double x0, double x1, double y0, double y1)
+{
+    double const back  = -(double)OBSTACLE_REAR_OVERHANG_MM;
+    double const front = (double)OBSTACLE_AXLE_TO_FRONT_MM;
+    double const half  = (double)OBSTACLE_CAR_HALF_WIDTH_MM;
+    double       best = 1.0e9;
+    double       cx;
+    double       cy;
+    double       px;
+    double       py;
+    double       dx;
+    double       dy;
+    double       gap;
+    double       t;
+    int          edge;
+
+    /* Walk the outline in 2 mm steps. */
+    for (edge = 0; edge < 4; edge++)
+    {
+        double const len = ((0 == edge) || (2 == edge)) ?
+                           (front - back) : (2.0 * half);
+
+        for (t = 0.0; t <= len; t += 2.0)
+        {
+            switch (edge)
+            {
+                case 0:  cx = back + t;  cy = -half;      break;
+                case 1:  cx = front;     cy = -half + t;  break;
+                case 2:  cx = front - t; cy = half;       break;
+                default: cx = back;      cy = half - t;   break;
+            }
+
+            px = ax + (cx * cos(heading)) - (cy * sin(heading));
+            py = ay + (cx * sin(heading)) + (cy * cos(heading));
+            dx = (px < x0) ? (x0 - px) : ((px > x1) ? (px - x1) : 0.0);
+            dy = (py < y0) ? (y0 - py) : ((py > y1) ? (py - y1) : 0.0);
+            gap = sqrt((dx * dx) + (dy * dy));
+
+            if (gap < best)
+            {
+                best = gap;
+            }
+        }
+    }
+
+    return (best);
+}
+
+/*!
+ * @brief Drive the whole "^" path and return the smallest gap to a box.
+ *
+ * Left is +y.  A right bypass is the mirror image, so the box offset is
+ * given towards the bypass side.
+ *
+ * @param[in] p_plan      Plan to follow.
+ * @param[in] near_mm     Box near face, from the rear axle at the stop.
+ * @param[in] offset_mm   Box centre shifted towards the bypass side.
+ *
+ * @return Smallest gap (mm) seen anywhere along the path.
+ */
+static double
+simulate_bypass(obstacle_bypass_plan_t const * p_plan,
+                double near_mm, double offset_mm)
+{
+    double const w = (double)OBSTACLE_MAX_WIDTH_MM;
+    double const th = (double)p_plan->turn_deg * 3.14159265358979 / 180.0;
+    double const leg = (double)p_plan->leg_mm;
+    double const x0 = near_mm;
+    double const x1 = near_mm + w;
+    double const y0 = offset_mm - (w / 2.0);
+    double const y1 = offset_mm + (w / 2.0);
+    double       best = 1.0e9;
+    double       gap;
+    double       a;
+    double       s;
+    double       ax;
+    double       ay;
+
+    for (a = 0.0; a <= th; a += 0.005)                  /* First pivot. */
+    {
+        gap = car_box_gap(0.0, 0.0, a, x0, x1, y0, y1);
+        best = (gap < best) ? gap : best;
+    }
+
+    for (s = 0.0; s <= leg; s += 2.0)                   /* Leg 1.       */
+    {
+        gap = car_box_gap(s * cos(th), s * sin(th), th, x0, x1, y0, y1);
+        best = (gap < best) ? gap : best;
+    }
+
+    ax = leg * cos(th);
+    ay = leg * sin(th);
+
+    for (a = th; a >= -th; a -= 0.005)                  /* Apex pivot.  */
+    {
+        gap = car_box_gap(ax, ay, a, x0, x1, y0, y1);
+        best = (gap < best) ? gap : best;
+    }
+
+    for (s = 0.0; s <= leg; s += 2.0)                   /* Leg 2.       */
+    {
+        gap = car_box_gap(ax + (s * cos(th)), ay - (s * sin(th)), -th,
+                          x0, x1, y0, y1);
+        best = (gap < best) ? gap : best;
+    }
+
+    return (best);
+}
+
+static void
+test_plan_bypass(void)
+{
+    static uint32_t const distances[] = { 250U, 350U, 441U, 600U };
+    obstacle_bypass_plan_t plan;
+    uint32_t               idx;
+    double                 near_mm;
+    double                 gap;
+
+    /* Worked example: box at 441 mm. */
+    check_u32("plan ok", obstacle_plan_bypass(441U,
+              OBSTACLE_ACTION_TURN_LEFT, &plan), true);
+    check_u32("plan side", plan.side, OBSTACLE_ACTION_TURN_LEFT);
+    check_u32("plan turn", plan.turn_deg, 23U);
+    check_u32("plan leg", plan.leg_mm, 908U);
+    check_u32("plan apex", plan.apex_mm, 354U);
+    check_u32("plan check", plan.check_mm, 1008U);
+
+    check_u32("plan not a turn", obstacle_plan_bypass(441U,
+              OBSTACLE_ACTION_REVERSE_RETRY, &plan), false);
+    check_u32("plan no distance", obstacle_plan_bypass(0U,
+              OBSTACLE_ACTION_TURN_LEFT, &plan), false);
+    check_u32("plan too close", obstacle_plan_bypass(60U,
+              OBSTACLE_ACTION_TURN_LEFT, &plan), false);
+
+    /* Simulate the car's outline along the whole path. */
+    for (idx = 0U; idx < 4U; idx++)
+    {
+        check_u32("plan sim ok", obstacle_plan_bypass(distances[idx],
+                  OBSTACLE_ACTION_TURN_RIGHT, &plan), true);
+        near_mm = (double)(distances[idx] + OBSTACLE_AXLE_TO_SENSOR_MM);
+
+        /* As planned: the margin is kept everywhere. */
+        gap = simulate_bypass(&plan, near_mm, 0.0);
+        check_u32("plan sim margin",
+                  (gap >= ((double)OBSTACLE_PLAN_MARGIN_MM - 1.0)) ? 1U : 0U,
+                  1U);
+
+        /* Sensor 15 mm long and the box 20 mm towards the bypass side:
+         * still no contact. */
+        gap = simulate_bypass(&plan, near_mm - 15.0, 20.0);
+        check_u32("plan sim worst case", (gap > 0.0) ? 1U : 0U, 1U);
+    }
+}
+
 int
 main(void)
 {
@@ -501,6 +1054,11 @@ main(void)
     test_monitor_stop();
     test_monitor_lost_and_blind();
     test_monitor_fault();
+    test_scan_reduce();
+    test_scan_decisions();
+    test_scan_real();
+    test_scan_path();
+    test_plan_bypass();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

@@ -5,9 +5,10 @@
  * Starts comms (Buddy 1), Motion (Buddy 2) and the VC task.  The WiFi
  * radio task is started by the kernel when built with WIFI=cyw43.
  *
- * Also starts Buddy 3 (line + barcode) and Buddy 5 (obstacle ahead); the
- * VC reads them as switched on in vc_task.c.  Laptop "start" -> the car
- * follows the line; "stop" brakes at once.
+ * Also starts Buddy 3 (line + barcode), Buddy 4 (terrain) and Buddy 5
+ * (obstacle ahead); the VC reads them as switched on in vc_task.c.  Laptop
+ * "start" -> the car follows the line once Buddy 4 is ready; "stop" brakes
+ * at once.
  *
  * Deviations (BARR-C): usermain() returns INT, signature fixed by
  * micro T-Kernel; this file has no header as it exports only usermain().
@@ -28,6 +29,7 @@
 #include "buddy3_task.h"
 #include "obstacle_types.h"
 #include "obstacle_task.h"
+#include "b4_task.h"
 
 #if TM_WIFI_CYW43
 /* Plain C types on purpose - see the note in cyw43_utk.h. */
@@ -41,6 +43,11 @@
 
 static UW g_buddy3_stack[BUDDY3_STACK_BYTES / sizeof(UW)];
 
+#if TM_WIFI_CYW43
+/* USB interrupts taken since boot (usb_sdk_compat.c). */
+IMPORT volatile UW tm_usb_irq_count;
+#endif
+
 #define DIAG_EVERY         (10U)     /* x LINK_POLL_MS = every 5 s.        */
 
 
@@ -53,7 +60,12 @@ report_radio (void)
 #if TM_WIFI_CYW43
     static uint32_t   s_tick       = 0U;
     static uint32_t   s_last_polls = 0U;
-    T_CYW43_UTK_STATUS st;
+    static uint32_t   s_last_usb   = 0U;
+    /* Static: the status is ~2.4 KB and usermain runs on the 1 KB init
+     * task stack.  On the stack it overflowed at the first report and
+     * caused the 27 Oct hard faults. */
+    static T_CYW43_UTK_STATUS st;
+    uint32_t          usb_irqs;
 
     s_tick++;
 
@@ -61,14 +73,17 @@ report_radio (void)
     {
         s_tick = 0U;
         cyw43_utk_get_status(&st);
-        tm_printf((UB *) "[diag] polls/5s=%u link=%u join=%d rssi=%d"
-                         " mqtt=%u err=%d losses=%u rejoins=%u\n",
+        usb_irqs = tm_usb_irq_count;
+        tm_printf((UB *) "[diag] polls/5s=%u usbirq/5s=%u link=%u join=%d"
+                         " rssi=%d mqtt=%u err=%d losses=%u rejoins=%u\n",
                   (UINT) (st.poll_count - s_last_polls),
+                  (UINT) (usb_irqs - s_last_usb),
                   (UINT) st.netif_link_up, (INT) st.link_status,
                   (INT) st.link_rssi, (UINT) st.mqtt_state,
                   (INT) st.mqtt_last_error, (UINT) st.link_losses,
                   (UINT) st.rejoin_attempts);
         s_last_polls = st.poll_count;
+        s_last_usb   = usb_irqs;
     }
 #endif
 }
@@ -84,7 +99,18 @@ start_buddy3 (void)
 
     if (0 < buddy3_output_mbf_create())
     {
+#if TK_SUPPORT_SMP
+        /* Pinned to processor 1: Buddy 3 reads the ADC, whose interrupt is
+         * owned by processor 1, and the port only supports a peripheral
+         * driver used from the processor that owns its interrupt
+         * (docs/PORT_RP2040.md).  Unpinned, the scheduler ran it on
+         * processor 2 and it hard-faulted (pc=0, track test 27 Oct),
+         * stopping the VC and Buddy 5 on that core as well. */
+        ctsk.tskatr  = TA_HLNG | TA_RNG3 | TA_USERBUF | TA_ASSPRC;
+        ctsk.assprc  = TP_PRC1;
+#else
         ctsk.tskatr  = TA_HLNG | TA_RNG3 | TA_USERBUF;
+#endif
         ctsk.task    = buddy3_task;
         ctsk.itskpri = BUDDY3_PRIORITY;
         ctsk.stksz   = (SZ) sizeof(g_buddy3_stack);
@@ -103,6 +129,7 @@ usermain (void)
     bool            b_comms_ok;
     bool            b_line_ok;
     bool            b_obstacle_ok;
+    bool            b_terrain_ok;
     bool            b_ok;
     bool            b_was_connected = false;
     bool            b_connected;
@@ -129,11 +156,17 @@ usermain (void)
     b_line_ok     = start_buddy3();
     b_obstacle_ok = obstacle_task_init() && obstacle_task_start();
 
+    /* A missing IMU does not fail this: the task keeps retrying, and the
+     * VC refuses START until Buddy 4 reports ready. */
+    b_terrain_ok  = b4_task_start();
+
     b_ok = b_comms_ok && (MOTION_RESULT_OK == motion_result) && b_line_ok
-           && b_obstacle_ok;
-    tm_printf((UB *) "[init] comms=%d motion=%d line=%d obstacle=%d -> %s\n",
+           && b_obstacle_ok && b_terrain_ok;
+    tm_printf((UB *) "[init] comms=%d motion=%d line=%d obstacle=%d"
+                     " terrain=%d -> %s\n",
               (INT) b_comms_ok, (INT) motion_result, (INT) b_line_ok,
-              (INT) b_obstacle_ok, b_ok ? "OK" : "FAILED");
+              (INT) b_obstacle_ok, (INT) b_terrain_ok,
+              b_ok ? "OK" : "FAILED");
 
     if (!vc_task_start(b_ok))
     {

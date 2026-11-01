@@ -44,6 +44,15 @@ int32_t motion_counts_to_mm(int32_t counts, int32_t mm_per_count_q16)
     return (int32_t)value;
 }
 
+int32_t motion_relative_mm(int32_t counts, int32_t origin,
+                           int32_t mm_per_count_q16)
+{
+    int32_t relative_counts = motion_counts_delta((uint32_t)origin,
+                                                   (uint32_t)counts);
+
+    return motion_counts_to_mm(relative_counts, mm_per_count_q16);
+}
+
 int32_t motion_average(int32_t left, int32_t right)
 {
     return (int32_t)(((int64_t)left + (int64_t)right) / 2LL);
@@ -57,6 +66,148 @@ int32_t motion_turn_wheel_travel_mm(int32_t track_width_mm, int32_t angle_mdeg)
     if (value > INT32_MAX) return INT32_MAX;
     if (value < INT32_MIN) return INT32_MIN;
     return (int32_t)value;
+}
+
+bool motion_target_reached(int32_t target_mm, int32_t travelled_mm,
+                           bool b_turn)
+{
+    if (target_mm == 0) {
+        return false;
+    }
+    if (b_turn) {
+        if (target_mm < 0) {
+            target_mm = target_mm == INT32_MIN ? INT32_MAX : -target_mm;
+        }
+        return travelled_mm >= target_mm;
+    }
+    if (target_mm > 0) {
+        return travelled_mm >= target_mm;
+    }
+    return travelled_mm <= target_mm;
+}
+
+bool motion_velocity_targets(int32_t linear_mm_s, int32_t angular_mdeg_s,
+                             int32_t track_width_mm, int32_t maximum_mm_s,
+                             int32_t *left_mm_s, int32_t *right_mm_s)
+{
+    int32_t angular_wheel_speed;
+    int64_t left;
+    int64_t right;
+
+    if (left_mm_s == NULL || right_mm_s == NULL || track_width_mm <= 0
+        || maximum_mm_s <= 0) {
+        return false;
+    }
+
+    angular_wheel_speed = motion_turn_wheel_travel_mm(track_width_mm,
+                                                       angular_mdeg_s);
+    /* Positive angular rate is a vehicle-right turn: the left wheel travels
+       faster than the right wheel. */
+    left = (int64_t)linear_mm_s + (int64_t)angular_wheel_speed;
+    right = (int64_t)linear_mm_s - (int64_t)angular_wheel_speed;
+    if (left > maximum_mm_s || left < -maximum_mm_s
+        || right > maximum_mm_s || right < -maximum_mm_s) {
+        return false;
+    }
+
+    *left_mm_s = (int32_t)left;
+    *right_mm_s = (int32_t)right;
+    return true;
+}
+
+bool motion_turn_targets(int32_t angle_mdeg, int32_t wheel_speed_mm_s,
+                         int32_t *left_mm_s, int32_t *right_mm_s)
+{
+    if (left_mm_s == NULL || right_mm_s == NULL || angle_mdeg == 0
+        || wheel_speed_mm_s <= 0) {
+        return false;
+    }
+
+    if (angle_mdeg > 0) {
+        *left_mm_s = wheel_speed_mm_s;
+        *right_mm_s = -wheel_speed_mm_s;
+    } else {
+        *left_mm_s = -wheel_speed_mm_s;
+        *right_mm_s = wheel_speed_mm_s;
+    }
+    return true;
+}
+
+bool motion_velocity_requires_reset(bool b_active,
+                                    motion_command_type_t active_type,
+                                    int32_t previous_linear_mm_s,
+                                    int32_t next_linear_mm_s)
+{
+    if (!b_active || active_type != MOTION_COMMAND_SET_VELOCITY) {
+        return true;
+    }
+    if ((previous_linear_mm_s == 0) != (next_linear_mm_s == 0)) {
+        return true;
+    }
+    return previous_linear_mm_s != 0 && next_linear_mm_s != 0
+           && ((previous_linear_mm_s < 0) != (next_linear_mm_s < 0));
+}
+
+bool motion_command_is_valid(const motion_command_t *command,
+                             int32_t maximum_mm_s,
+                             int32_t track_width_mm,
+                             int32_t maximum_turn_angle_mdeg)
+{
+    int32_t left_target;
+    int32_t right_target;
+    int64_t angle_magnitude;
+
+    if (command == NULL || command->sequence_id == 0U || maximum_mm_s <= 0
+        || track_width_mm <= 0 || maximum_turn_angle_mdeg <= 0
+        || (uint32_t)command->type > (uint32_t)MOTION_COMMAND_TURN_ANGLE) {
+        return false;
+    }
+    if (command->type == MOTION_COMMAND_SET_VELOCITY) {
+        return motion_velocity_targets(command->value.velocity.linear_mm_s,
+                                       command->value.velocity.angular_mdeg_s,
+                                       track_width_mm, maximum_mm_s,
+                                       &left_target, &right_target);
+    }
+    if (command->type == MOTION_COMMAND_MOVE_DISTANCE) {
+        if (command->value.distance.distance_mm == 0
+            || command->value.distance.speed_mm_s == 0
+            || ((command->value.distance.distance_mm < 0)
+                != (command->value.distance.speed_mm_s < 0))) {
+            return false;
+        }
+        return command->value.distance.speed_mm_s <= maximum_mm_s
+               && command->value.distance.speed_mm_s >= -maximum_mm_s;
+    }
+
+    angle_magnitude = command->value.turn.angle_mdeg;
+    if (angle_magnitude < 0) {
+        angle_magnitude = -angle_magnitude;
+    }
+    return angle_magnitude > 0
+           && angle_magnitude <= maximum_turn_angle_mdeg
+           && command->value.turn.wheel_speed_mm_s > 0
+           && command->value.turn.wheel_speed_mm_s <= maximum_mm_s;
+}
+
+bool motion_encoder_delta_plausible(int32_t count_delta,
+                                    uint32_t elapsed_ms,
+                                    int32_t mm_per_count_q16,
+                                    int32_t maximum_mm_s)
+{
+    uint64_t maximum_counts;
+    uint64_t magnitude;
+
+    if (elapsed_ms == 0U || mm_per_count_q16 <= 0 || maximum_mm_s <= 0) {
+        return false;
+    }
+    magnitude = count_delta < 0 ? (uint64_t)(-(int64_t)count_delta)
+                                : (uint64_t)count_delta;
+    maximum_counts = ((uint64_t)maximum_mm_s * (uint64_t)elapsed_ms
+                      * 65536ULL)
+                     / ((uint64_t)mm_per_count_q16 * 1000ULL);
+    /* Permit a two-times transient margin and a small quantisation margin. */
+    maximum_counts = (maximum_counts * 2ULL) + 16ULL;
+    return magnitude <= maximum_counts;
 }
 
 int32_t motion_feedforward_permille(int32_t target_mm_s,

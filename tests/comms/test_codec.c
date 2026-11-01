@@ -329,25 +329,72 @@ test_golden (void)
     codec_put_int(&w, CODEC_KEY("enc_l"), 40, 19U);
     codec_put_int(&w, CODEC_KEY("enc_r"), -40, 19U);
     codec_put_int(&w, CODEC_KEY("dist_mm"), 20, 16U);
+    codec_put_int(&w, CODEC_KEY("tgt_l_mm_s"), 250, 10U);
+    codec_put_int(&w, CODEC_KEY("tgt_r_mm_s"), -120, 10U);
+    codec_put_int(&w, CODEC_KEY("slew_l_mm_s"), 200, 10U);
+    codec_put_int(&w, CODEC_KEY("slew_r_mm_s"), -100, 10U);
+    codec_put_int(&w, CODEC_KEY("pwm_l"), 190, 11U);
+    codec_put_int(&w, CODEC_KEY("pwm_r"), -145, 11U);
     codec_end(&w);
     to_hex(hex);
     printf("  motion    %s\n", hex);
-    CHECK(14U == g_m.msg.payload_len);
+    CHECK(22U == g_m.msg.payload_len);
     /* Locked: a change here is a format change (docs/BINARY_FORMAT.md). */
-    CHECK(0 == strcmp("2aa30c002493330a00b0ff4f0100", hex));
+    CHECK(0 == strcmp("2aa30c002493330a00b0ff4f01a00fe2c870ee8bb703", hex));
 
-    /* robot/heartbeat: seq 199, READY, fault 0x104, ev_drop 300 -> 255 */
+    /* robot/telemetry/line: position 1, error -5, centre on the line,
+     * raw centre 3100 and right 1800. */
+    fresh();
+    codec_begin(&w, &g_m.msg, "robot/telemetry/line", 0U, false, 207050U);
+    codec_put_name(&w, CODEC_KEY("pos"), CODEC_NAMES(g_names), 3U, 1U, 3U);
+    codec_put_int(&w, CODEC_KEY("err"), -5, 8U);
+    codec_put_uint(&w, CODEC_KEY("sensors"), 1U, 2U);
+    codec_put_uint(&w, CODEC_KEY("centre_adc"), 3100U, 12U);
+    codec_put_uint(&w, CODEC_KEY("right_adc"), 1800U, 12U);
+    codec_end(&w);
+    to_hex(hex);
+    printf("  line      %s\n", hex);
+    CHECK(9U == g_m.msg.payload_len);
+    CHECK(0 == strcmp("2aa30c00643f0e4638", hex));
+
+    /* robot/heartbeat: seq 199, READY, fault 0x204, ev_drop 300 -> 255 */
     fresh();
     codec_begin(&w, &g_m.msg, "robot/heartbeat", 0U, false, 5710U);
     codec_put_uint(&w, CODEC_KEY("seq"), 199U, 16U);
     codec_put_name(&w, CODEC_KEY("state"), CODEC_NAMES(g_names), 3U, 1U, 4U);
-    codec_put_uint(&w, CODEC_KEY("fault"), 0x104U, 9U);
+    codec_put_uint(&w, CODEC_KEY("fault"), 0x204U, 10U);
     codec_put_uint(&w, CODEC_KEY("ev_drop"), 300U, 8U);
     codec_end(&w);
     to_hex(hex);
     printf("  heartbeat %s\n", hex);
     CHECK(9U == g_m.msg.payload_len);
-    CHECK(0 == strcmp("3a5900001c0304c17f", hex));
+    CHECK(0 == strcmp("3a5900001c030481ff", hex));
+
+    /* robot/event/calibration: index 4 of 5 (sensor gap), a 6 sample gap. */
+    fresh();
+    codec_begin(&w, &g_m.msg, "robot/event/calibration", 1U, false, 8000U);
+    codec_put_uint(&w, CODEC_KEY("result"), 4U, 3U);
+    codec_put_uint(&w, CODEC_KEY("centre_low"), 400U, 12U);
+    codec_put_uint(&w, CODEC_KEY("centre_high"), 3100U, 12U);
+    codec_put_uint(&w, CODEC_KEY("centre_thr"), 1750U, 12U);
+    codec_put_uint(&w, CODEC_KEY("centre_full"), 2760U, 12U);
+    codec_put_uint(&w, CODEC_KEY("right_low"), 500U, 12U);
+    codec_put_uint(&w, CODEC_KEY("right_high"), 3000U, 12U);
+    codec_put_uint(&w, CODEC_KEY("right_thr"), 1750U, 12U);
+    codec_put_uint(&w, CODEC_KEY("barcode_low"), 300U, 12U);
+    codec_put_uint(&w, CODEC_KEY("barcode_high"), 3200U, 12U);
+    codec_put_uint(&w, CODEC_KEY("barcode_thr"), 1750U, 12U);
+    codec_put_uint(&w, CODEC_KEY("barcode_learned"), 1U, 1U);
+    codec_put_uint(&w, CODEC_KEY("first_right"), 1U, 1U);
+    codec_put_int(&w, CODEC_KEY("overlap"), -6, 9U);
+    codec_put_uint(&w, CODEC_KEY("b4_floor_mg"), 0U, 9U);
+    codec_put_uint(&w, CODEC_KEY("b4_samples"), 0U, 15U);
+    codec_put_uint(&w, CODEC_KEY("sweep_deg"), 30U, 8U);
+    codec_end(&w);
+    to_hex(hex);
+    printf("  calibration %s\n", hex);
+    CHECK(25U == g_m.msg.payload_len);
+    CHECK(0 == strcmp("027d0000103238d8da90953e70d7da580290ad6dfd0000001e", hex));
 }
 
 #endif /* COMMS_JSON */

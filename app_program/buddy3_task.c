@@ -22,12 +22,21 @@
 #define BUDDY3_TASK_PERIOD_MS    10U
 
 /*
- * Threshold for the dedicated barcode IR sensor (GP28 / ADC2).
- * Measured 2026-10-27, room light:
- *   white paper <= 277, track tape >= 2725,
- *   inkjet barcode: wide bar ~600, thin bar ~240 (not visible in IR).
+ * Fallback threshold for the dedicated barcode IR sensor (GP28 / ADC2),
+ * used when the START sweep did not see the sensor go black (it reads
+ * beside the line, so it may not).  Measured 2026-10-27, room light, on the course barcode print, after
+ * rotating the sensor so emitter and receiver sit side by side along
+ * the bars (across the direction of travel), ~3-5 mm above the paper
+ * (car stationary, sensor centred on each element):
+ *   thin 3 mm white gap between bars ~1060, thin 3 mm bar ~3730.
+ * 2026-10-29 driving test (*F*): white ~150-260, but a thin bar next to
+ * a wide white space read only ~2080, so 2400 missed it and the capture
+ * ended early.  PROVISIONAL: ~midway between thin gap (~1060) and that
+ * thin bar (~2080).  Re-measure both (car still, sensor centred on the
+ * thin bar beside a wide space, and on the thin gap between two wide
+ * bars) and set the threshold midway.
  */
-#define BARCODE_IR_THRESHOLD     1300U
+#define BARCODE_IR_THRESHOLD     1600U
 
 /*
  * Output message buffer - default choice (message buffer, matching
@@ -48,6 +57,40 @@
 static const char *const line_state_name[] = {
     "LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION"
 };
+
+/*
+ * Print the finished capture: raw character, edge count, then each
+ * element as B (bar) or W (space) with its width in encoder counts
+ * (~12.3 counts/mm, so narrow ~37, wide ~110).
+ */
+static void debug_print_edges(void)
+{
+    uint8_t count = barcode_get_edge_count();
+    uint8_t i;
+    barcode_edge_t prev;
+    barcode_edge_t edge;
+    int32_t width;
+    char raw = barcode_get_char();
+
+    tm_printf((UB *)"[buddy3] edges=%d char=%c widths:",
+              (INT)count, (raw != '\0') ? raw : '?');
+
+    for (i = 1U; i < count; i++)
+    {
+        (void)barcode_get_edge((uint8_t)(i - 1U), &prev);
+        (void)barcode_get_edge(i, &edge);
+        width = edge.encoder_position - prev.encoder_position;
+
+        if (width < 0)
+        {
+            width = -width;
+        }
+
+        tm_printf((UB *)" %c%d", prev.is_black ? 'B' : 'W', (INT)width);
+    }
+
+    tm_printf((UB *)"\n");
+}
 #endif
 
 ID buddy3_output_mbfid = -1;
@@ -69,6 +112,109 @@ ID buddy3_output_mbf_create(void)
 {
     buddy3_output_mbfid = tk_cre_mbf(&buddy3_output_cmbf);
     return buddy3_output_mbfid;
+}
+
+/*
+ * Latest calibration request: the request code in bits 0-2, a counter
+ * above it so a repeated request still shows as new. Written by the VC
+ * task only and read by this task only, one aligned 32-bit word each way.
+ */
+static volatile uint32_t buddy3_cal_word = 0U;
+
+void buddy3_calibration_request(buddy3_cal_request_t request)
+{
+    uint32_t count = (buddy3_cal_word >> 3) + 1U;
+
+    buddy3_cal_word = (count << 3) | (uint32_t)request;
+}
+
+/*
+ * Latest raw centre (bits 0-11) and right (bits 12-23) readings, for the
+ * telemetry. Written by this task only, read by the VC task only, one
+ * aligned 32-bit word.
+ */
+static volatile uint32_t buddy3_reading_word = 0U;
+
+void buddy3_get_readings(uint16_t *p_centre, uint16_t *p_right)
+{
+    uint32_t word = buddy3_reading_word;
+
+    *p_centre = (uint16_t)(word & 0xFFFU);
+    *p_right = (uint16_t)((word >> 12) & 0xFFFU);
+}
+
+uint16_t buddy3_barcode_threshold(void)
+{
+    return line_cal_barcode_threshold(BARCODE_IR_THRESHOLD);
+}
+
+/* Console log of a finished sweep: what each sensor saw and the result. */
+static void print_calibration(void)
+{
+    line_cal_result_t result;
+    uint16_t barcode_threshold;
+
+    line_cal_get_result(&result);
+    barcode_threshold = buddy3_barcode_threshold();
+
+    tm_printf((UB *)"[cal] b3 state=%d centre lo=%u hi=%u thr=%u full=%u"
+                    " right lo=%u hi=%u thr=%u"
+                    " barcode lo=%u hi=%u thr=%u (%s)\n",
+              (INT)line_cal_state(),
+              (UINT)result.centre.low, (UINT)result.centre.high,
+              (UINT)result.centre.threshold, (UINT)result.centre_full_black,
+              (UINT)result.right.low, (UINT)result.right.high,
+              (UINT)result.right.threshold,
+              (UINT)result.barcode.low, (UINT)result.barcode.high,
+              (UINT)barcode_threshold,
+              (UB *)((0U != result.barcode.threshold) ? "learned"
+                                                       : "default"));
+}
+
+/* Act on a new request, then record this cycle's readings in the sweep. */
+static void service_calibration(ir_readings_t readings)
+{
+    static uint32_t seen_word = 0U;
+    static line_cal_state_t logged = LINE_CAL_IDLE;
+    uint32_t word = buddy3_cal_word;
+
+    if (word != seen_word)
+    {
+        seen_word = word;
+
+        switch ((buddy3_cal_request_t)(word & 0x7U))
+        {
+            case BUDDY3_CAL_BEGIN:
+                line_cal_begin();
+                break;
+
+            case BUDDY3_CAL_SWEEP:
+                line_cal_sweep();
+                break;
+
+            case BUDDY3_CAL_END:
+                (void)line_cal_end();
+                break;
+
+            case BUDDY3_CAL_ABORT:
+            default:
+                line_cal_abort();
+                break;
+        }
+    }
+
+    line_cal_update(readings);
+
+    /* Log each finished sweep once, whether it passed or failed. */
+    if (line_cal_state() != logged)
+    {
+        logged = line_cal_state();
+
+        if (logged >= LINE_CAL_OK)
+        {
+            print_calibration();
+        }
+    }
 }
 
 
@@ -107,12 +253,15 @@ void buddy3_task(INT stacd, void *exinf)
     while (1)
     {
         readings = ir_sensor_read();
+        buddy3_reading_word = ((uint32_t)(readings.centre & 0xFFFU))
+                              | ((uint32_t)(readings.right & 0xFFFU) << 12);
+        service_calibration(readings);
         line_state = line_get_position(readings);
         line_error = line_get_error(readings);
         line_sensors = line_get_sensor_bits(readings);
 
-        barcode_is_black =
-            ir_sensor_is_black(readings.barcode, BARCODE_IR_THRESHOLD);
+        barcode_is_black = ir_sensor_is_black(
+            readings.barcode, buddy3_barcode_threshold());
 
         tk_get_tim(&sys_time);
         timestamp_ms = sys_time.lo;
@@ -126,11 +275,16 @@ void buddy3_task(INT stacd, void *exinf)
             (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
 
         barcode_update(barcode_is_black, timestamp_ms, encoder_position);
-        barcode_check_timeout(timestamp_ms);
+        barcode_check_end(encoder_position);
 
 #if BUDDY3_DEBUG
         /* Sample before barcode_get_command(), which clears it. */
         barcode_was_ready = barcode_available();
+
+        if (barcode_was_ready)
+        {
+            debug_print_edges();
+        }
 #endif
 
         /*
@@ -164,6 +318,7 @@ void buddy3_task(INT stacd, void *exinf)
         status.line_sensors = line_sensors;
         status.barcode      = barcode_code;
         status.nav_command  = nav_command;
+        status.cal_state    = line_cal_state();
 
         packed = buddy3_status_pack(&status);
 

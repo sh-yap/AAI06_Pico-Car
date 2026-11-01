@@ -94,8 +94,11 @@
  * Obstacle task, MONITOR state
  * ------------------------------------------------------------------------ */
 
-/* FR-B5-03: OBSTACLE_AHEAD after two consecutive readings under 250 mm. */
-#define OBSTACLE_STOP_DISTANCE_MM       (250U)
+/* FR-B5-03: OBSTACLE_AHEAD after two consecutive readings under this.
+ * Was 250 mm; raised 2026-11-01 so the car stops (about 350 mm) far
+ * enough away for a "^" bypass of 25-30 deg: from 250 mm it stops nearer
+ * than any allowed turn can clear (obstacle_plan.c) and must reverse. */
+#define OBSTACLE_STOP_DISTANCE_MM       (400U)
 #define OBSTACLE_STOP_READINGS          (2U)
 
 /* Blind-zone latch.  Bench test 2026-10-25: a flat board at 1-2 cm reads
@@ -125,12 +128,94 @@
 #define OBSTACLE_FORWARD_DEG            (90U)
 
 /* ------------------------------------------------------------------------ *
+ * Obstacle task, SCANNING state (coarse scan)
+ * ------------------------------------------------------------------------ */
+
+/* Scan the whole safe servo range in these steps: 60, 75, 90, 105, 120. */
+#define OBSTACLE_SCAN_STEP_DEG          (15U)
+#define OBSTACLE_SCAN_COUNT             (((OBSTACLE_SERVO_ANGLE_MAX_DEG - \
+                                           OBSTACLE_SERVO_ANGLE_MIN_DEG) / \
+                                          OBSTACLE_SCAN_STEP_DEG) + 1U)
+
+/* Repeated, median-filtered pings at each angle, after the servo settles.
+ * An angle needs at least SCAN_MIN_VALID OK pings to count as measured;
+ * otherwise it is "unknown" (never "clear"). */
+#define OBSTACLE_SCAN_PINGS             (3U)
+#define OBSTACLE_SCAN_MIN_VALID         (2U)
+
+/* Background subtraction: a reading more than SPAN_TOL_MM beyond the
+ * closest point is background, not part of the obstacle. */
+#define OBSTACLE_SCAN_SPAN_TOL_MM       (150U)
+
+/* Consecutive-angle detection with hysteresis: once the span has started,
+ * a neighbouring angle up to SPAN_HOLD_MM beyond the closest point (or an
+ * unknown one) still extends it.  Unknown angles extend it because an
+ * angled face gives no echo (bench test D6). */
+#define OBSTACLE_SCAN_SPAN_HOLD_MM      (250U)
+
+/* CONTINUE only if nothing measured is inside the car's corridor closer
+ * than CLEAR_MM.  Corridor = half the car plus a safety margin. */
+#define OBSTACLE_CAR_HALF_WIDTH_MM      (70U)    /* Car: 140 x 190 mm. */
+#define OBSTACLE_SAFETY_MARGIN_MM       (50U)
+#define OBSTACLE_SCAN_CLEAR_MM          (600U)
+
+/* Brief: obstacles are 10-20 cm wide.  Planning uses at least this. */
+#define OBSTACLE_MAX_WIDTH_MM           (200U)
+
+/* STOP (sensor fault) if this many angles had no echo at all. */
+#define OBSTACLE_SCAN_FAULT_ANGLES      (3U)
+
+/* ------------------------------------------------------------------------ *
+ * Bypass ("^") planning and the path check
+ * ------------------------------------------------------------------------ */
+
+/* Car: 140 x 190 mm, pivots about the rear axle (2026-10-31). */
+#define OBSTACLE_AXLE_TO_FRONT_MM       (120U)
+#define OBSTACLE_REAR_OVERHANG_MM       (70U)
+
+/* Rear axle to the ultrasonic sensor's front face (measured 2026-11-01:
+ * about 65 mm, so the sensor sits 55 mm behind the car's front).  It must
+ * not be more than the real value, or the plan cuts the corner. */
+#define OBSTACLE_AXLE_TO_SENSOR_MM      (65U)
+
+/* Clearance kept from the obstacle (assumed OBSTACLE_MAX_WIDTH_MM square,
+ * centred on the line) at every point of the path. */
+#define OBSTACLE_PLAN_MARGIN_MM         (30U)
+
+/* Steepest first pivot the planner may ask for. */
+#define OBSTACLE_PLAN_MAX_DEG           (40U)
+
+/* The path check before leg 1 needs this much more than the leg. */
+#define OBSTACLE_PLAN_CHECK_EXTRA_MM    (100U)
+
+/* Path check angles.  After the first pivot the obstacle is still heard
+ * straight ahead (bench test 2026-11-01: 21 cm card at 450 mm, car turned
+ * 21 deg by hand).  It was not heard at servo 70 or below after a right
+ * pivot, nor at 115 or above after a left one.  The check looks from that
+ * outer angle back to straight ahead, OBSTACLE_PATH_MAX_POINTS angles. */
+#define OBSTACLE_PATH_RIGHT_OUTER_DEG   (70U)
+#define OBSTACLE_PATH_LEFT_OUTER_DEG    (115U)
+
+/* A reading this close to the scanned obstacle's distance is that
+ * obstacle (bench: 447..502 mm after the pivot for 455..466 mm in the
+ * scan; off-axis echoes read longer). */
+#define OBSTACLE_PATH_KNOWN_BELOW_MM    (40U)
+#define OBSTACLE_PATH_KNOWN_ABOVE_MM    (80U)
+
+/* ------------------------------------------------------------------------ *
  * Build-time checks
  * ------------------------------------------------------------------------ */
 
 #if ((OBSTACLE_SERVO_PULSE_90_US <= OBSTACLE_SERVO_PULSE_MIN_US) || \
      (OBSTACLE_SERVO_PULSE_90_US >= OBSTACLE_SERVO_PULSE_MAX_US))
 #error "Servo centre pulse must lie inside the pulse limits"
+#endif
+
+#if ((OBSTACLE_PATH_RIGHT_OUTER_DEG < OBSTACLE_SERVO_ANGLE_MIN_DEG) || \
+     (OBSTACLE_PATH_RIGHT_OUTER_DEG >= OBSTACLE_FORWARD_DEG) ||       \
+     (OBSTACLE_PATH_LEFT_OUTER_DEG > OBSTACLE_SERVO_ANGLE_MAX_DEG) ||  \
+     (OBSTACLE_PATH_LEFT_OUTER_DEG <= OBSTACLE_FORWARD_DEG))
+#error "Path check outer angles must be inside the servo range, off-centre"
 #endif
 
 #if ((OBSTACLE_ECHO_PIN % 2U) == 0U)

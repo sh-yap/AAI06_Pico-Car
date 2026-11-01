@@ -40,6 +40,8 @@ static motion_result_t apply_one(uint8_t motor, motion_motor_mode_t mode, uint16
     uint16_t counts = (uint16_t)(((uint32_t)duty * MOTION_PWM_COUNTS) / 1000U);
     uint8_t a;
     uint8_t b;
+    ER result_a;
+    ER result_b;
     if (motor > 1U || !motor_ready) return MOTION_RESULT_UNINITIALISED;
     if (mode != MOTION_MOTOR_BRAKE && mode != MOTION_MOTOR_COAST &&
         mode != MOTION_MOTOR_FORWARD && mode != MOTION_MOTOR_REVERSE) {
@@ -56,24 +58,33 @@ static motion_result_t apply_one(uint8_t motor, motion_motor_mode_t mode, uint16
     b = motor_pin(motor, 1U);
     switch (mode) {
     case MOTION_MOTOR_FORWARD:
-        (void)pwm_set_cc(b, 0U);
-        (void)pwm_set_cc(a, counts);
+        result_b = pwm_set_cc(b, 0U);
+        result_a = pwm_set_cc(a, counts);
         break;
     case MOTION_MOTOR_REVERSE:
-        (void)pwm_set_cc(a, 0U);
-        (void)pwm_set_cc(b, counts);
+        result_a = pwm_set_cc(a, 0U);
+        result_b = pwm_set_cc(b, counts);
         break;
     case MOTION_MOTOR_COAST:
-        (void)pwm_set_cc(a, MOTION_PWM_TOP);
-        (void)pwm_set_cc(b, MOTION_PWM_TOP);
+        result_a = pwm_set_cc(a, MOTION_PWM_TOP);
+        result_b = pwm_set_cc(b, MOTION_PWM_TOP);
         counts = 1000U;
         break;
     case MOTION_MOTOR_BRAKE:
     default:
-        (void)pwm_set_cc(a, 0U);
-        (void)pwm_set_cc(b, 0U);
+        result_a = pwm_set_cc(a, 0U);
+        result_b = pwm_set_cc(b, 0U);
         counts = 0U;
         break;
+    }
+    if (result_a < E_OK || result_b < E_OK) {
+        /* Make a best-effort safe write to both phases before reporting the
+         * hardware failure. Do not publish the requested mode as applied. */
+        (void)pwm_set_cc(a, 0U);
+        (void)pwm_set_cc(b, 0U);
+        motor_mode[motor] = MOTION_MOTOR_BRAKE;
+        motor_duty[motor] = 0U;
+        return MOTION_RESULT_HARDWARE;
     }
     motor_mode[motor] = mode;
     motor_duty[motor] = mode == MOTION_MOTOR_COAST ? 1000U :
@@ -91,13 +102,20 @@ motion_result_t motion_motor_init(const motion_config_t *config)
 #else
     uint8_t motor;
     motor_config = *config;
-    motor_ready = true;
+    motor_ready = false;
+    motor_mode[0] = MOTION_MOTOR_BRAKE;
+    motor_mode[1] = MOTION_MOTOR_BRAKE;
+    motor_duty[0] = 0U;
+    motor_duty[1] = 0U;
     for (motor = 0U; motor < 2U; ++motor) {
-        (void)set_phase(motor_pin(motor, 0U), 0U);
-        (void)set_phase(motor_pin(motor, 1U), 0U);
-        (void)pwm_set_enabled(motor_pin(motor, 0U), TRUE);
-        (void)pwm_set_enabled(motor_pin(motor, 1U), TRUE);
+        if (set_phase(motor_pin(motor, 0U), 0U) < E_OK ||
+            set_phase(motor_pin(motor, 1U), 0U) < E_OK ||
+            pwm_set_enabled(motor_pin(motor, 0U), TRUE) < E_OK ||
+            pwm_set_enabled(motor_pin(motor, 1U), TRUE) < E_OK) {
+            return MOTION_RESULT_HARDWARE;
+        }
     }
+    motor_ready = true;
     return motion_motor_brake_all();
 #endif
 }

@@ -10,6 +10,9 @@
  *       OBSTACLE_EVT_AHEAD  set when an obstacle is ahead; stays set until
  *                           the controller calls obstacle_task_ack_ahead()
  *       OBSTACLE_EVT_FAULT  set while the sensor is in SENSOR_FAULT
+ *       OBSTACLE_EVT_SCAN_DONE  set when a requested scan has a result;
+ *                           cleared when the next scan starts
+ *       OBSTACLE_EVT_PATH_DONE  the same for a path check
  *     Only the obstacle task writes these bits.  Wait for them without
  *     TWF_CLR or TWF_BITCLR.
  *
@@ -24,6 +27,8 @@
 
 #define OBSTACLE_EVT_AHEAD  (0x00000001U)
 #define OBSTACLE_EVT_FAULT  (0x00000002U)
+#define OBSTACLE_EVT_SCAN_DONE (0x00000004U)
+#define OBSTACLE_EVT_PATH_DONE (0x00000008U)
 
 /* Start the sensor and servo drivers and create the event flag.  Call once
  * from usermain() before obstacle_task_start(). */
@@ -46,6 +51,33 @@ uint32_t obstacle_task_get_word(void);
  * The task clears the bit within one reading, and raises it again if the
  * obstacle is still there. */
 void obstacle_task_ack_ahead(void);
+
+/* Ask for a scan (the car must be stopped).  Takes about 2 s; then
+ * OBSTACLE_EVT_SCAN_DONE is set and the result can be read. */
+void obstacle_task_request_scan(void);
+
+/* Latest complete scan: every angle, edges, profile and recommendation.
+ * false if there is none or one is in progress. */
+bool obstacle_task_get_scan(obstacle_scan_result_t * p_scan);
+
+/* Just the profile and recommendation (profile.action) of the latest
+ * complete scan.  false if there is none or one is in progress. */
+bool obstacle_task_get_profile(obstacle_profile_t * p_profile);
+
+/* After the first bypass pivot: is the leg free for need_mm?  Pass the
+ * plan's side and check_mm, and the scan's profile.distance_mm as
+ * known_mm so the obstacle that was scanned is not taken for a new one.
+ * Looks from the bypass side back to straight ahead; takes about 1.2 s,
+ * then OBSTACLE_EVT_PATH_DONE is set and the verdict can be read. */
+void obstacle_task_request_path_check(obstacle_action_t side,
+                                      uint32_t          need_mm,
+                                      uint32_t          known_mm);
+
+/* Latest complete path check.  false if there is none or one is running.
+ * Drive the leg only on OBSTACLE_PATH_CLEAR (OPEN is the controller's
+ * call: nothing echoed, but an angled face is silent too).  BLOCKED also
+ * means the outermost angle could not see past the scanned obstacle. */
+bool obstacle_task_get_path(obstacle_path_t * p_path);
 
 #endif /* OBSTACLE_TASK_H */
 

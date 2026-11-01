@@ -37,6 +37,15 @@
 #define B4_CFG_MAX_TURN_THRESHOLD     100000000U
 #define B4_CFG_MIN_TURN_WINDOW                2U
 #define B4_CFG_MAX_TURN_WINDOW              100U
+/* NOTE: The step shift sets both the adaptation rate and the learning
+ * hold of 2^shift millimetres of driving. Below 4 one step is more than 6
+ * percent of the estimate, so a single millimetre of ramp edge would move
+ * the threshold too far. Above 12 the hold is 4096 mm, which would leave a
+ * short run without a detector, and the hold must also stay below the
+ * 16-bit step count that b4_proc.c saturates at. */
+#define B4_CFG_MIN_NOISE_STEP_SHIFT           4U
+#define B4_CFG_MAX_NOISE_STEP_SHIFT          12U
+#define B4_CFG_MAX_K_TENTHS                 200U
 
 /** @brief Return an absolute milli-g value without signed overflow.
  *
@@ -120,11 +129,16 @@ b4_cfg_default (void)
     config.forward_axis = B4_CFG_AXIS_Y;
     config.lateral_axis = B4_CFG_AXIS_X;
     config.vertical_axis = B4_CFG_AXIS_Z;
-    /* NOTE: Only the front caster meets the ramp (user decision,
-     * 2026-10-17), so the hump pitches the car about the rear axle. */
-    config.hump_axis = B4_CFG_AXIS_Y;
-    config.forward_sign = 1;
-    config.lateral_sign = 1;
+    /* NOTE: The ramp passes under the right drive wheel while the left
+     * wheel and caster stay on the floor, so the axle line tilts sideways
+     * by height / track and the lateral axis carries the height. Speed
+     * changes do not disturb it, unlike the forward axis. */
+    config.hump_axis = B4_CFG_AXIS_X;
+    /* NOTE: Bench hand tests on 2026-10-29 read negative for nose up and
+     * negative for right side up, so both axes read backwards. This is
+     * consistent with the IMU facing backwards on the chassis. */
+    config.forward_sign = -1;
+    config.lateral_sign = -1;
     config.vertical_sign = 1;
     config.turn_sign = 1;
     config.gravity_reference_mg = 1000U;
@@ -134,22 +148,46 @@ b4_cfg_default (void)
     config.tilt_threshold_mg = 250U;
     config.impact_delta_threshold_mg = 700U;
     config.impact_refractory_ms = 200U;
-    config.hump_start_threshold_mg = 50U;
-    config.hump_hysteresis_mg = 25U;
-    config.hump_complete_threshold_mg = 25U;
+    /* NOTE: The noise estimate is a running median of the incline
+     * amplitude. It takes one step per millimetre of wheel travel, so the
+     * bound depends on distance and not on speed or time. Each step moves
+     * it by 2^-n of its value whatever the amplitude. At n = 8 doubling
+     * takes 0.69 * 256 = 177 mm of driving, and a 30 mm rising edge, all
+     * above the estimate, raises the threshold by at most
+     * (1 + 2^-8)^30 = 1.124, 12.4 percent, at any speed. At n = 7 the edge
+     * bound is 1.263, 26 percent, too much, and n = 9 needs 353 mm to
+     * double, slow after a START. The learning hold is 2^8 = 256 mm. */
+    config.noise_step_shift = 8U;
+    /* NOTE: The estimate is the median of the absolute amplitude, which for
+     * random noise is about 0.67 standard deviations, so 6.0 times it is
+     * about 4 standard deviations.
+     * WARNING: Provisional. Step 3 of the driving noise plan sets both
+     * factors from flat driving with no ramp, never from the ramp's height. */
+    config.hump_start_k_tenths = 60U;
+    config.hump_complete_k_tenths = 20U;
     config.calibration_noise_limit_mg = 35U;
-    /* Rear axle to caster contact, measured by ruler as about 80 mm. */
-    config.hump_lever_um = 80000U;
-    config.height_settle_band_mg = 20U;
-    config.height_baseline_gate_mg = 25U;
+    /* Left to right tyre contact distance, measured by the user as 115 mm
+     * on 2026-10-29. */
+    config.hump_lever_um = 115000U;
+    /* WARNING: A 30-sample window on the gentle ramp slope spreads about
+     * 14 mg at 50 mm/s, so a wider band let the baseline climb the ramp
+     * before the hump was confirmed and halved the height in a host
+     * simulation. Keep the band and gate below that slope spread. */
+    config.height_settle_band_mg = 10U;
+    config.height_baseline_gate_mg = 12U;
     config.turn_cross_threshold = 20000U;
     config.filter_divisor = 4U;
     config.height_settle_samples = 30U;
-    config.height_baseline_divisor = 8U;
+    /* NOTE: The ramp crest is a point, so the wheel is never still at full
+     * height. 24 samples is 240 ms at 100 Hz, which averages out the
+     * roughly 100 mm/s vibration at the cost of a small drop in the peak. */
+    config.height_mean_samples = 24U;
+    /* NOTE: One 1 mg baseline step per 64 settled samples is about 1.6 mg/s
+     * at 100 Hz, too slow to follow a climb but enough for floor drift. */
+    config.height_baseline_divisor = 64U;
     config.turn_window_samples = 20U;
-    /* WARNING: Ten samples is about 0.3 s at the measured 31 Hz loop. Motor
-     * start and stop jolts on flat ground stayed under six samples, so
-     * retune this count if the acquisition rate changes. */
+    /* WARNING: Ten samples is 0.1 s at the planned 100 Hz rate. Retune this
+     * count from the measured rate and the flat-ground roll trace. */
     config.hump_confirm_samples = 10U;
     config.hump_complete_samples = 5U;
     config.max_consecutive_read_failures = 3U;
@@ -228,15 +266,12 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (p_config->impact_delta_threshold_mg >
              B4_CFG_MAX_THRESHOLD_MG) ||
             (0U == p_config->impact_refractory_ms) ||
-            (p_config->hump_start_threshold_mg <=
-             p_config->hump_complete_threshold_mg) ||
-            (p_config->hump_start_threshold_mg >
-             B4_CFG_MAX_THRESHOLD_MG) ||
-            (0U == p_config->hump_hysteresis_mg) ||
-            (p_config->hump_hysteresis_mg >
-             B4_CFG_MAX_THRESHOLD_MG) ||
-            (p_config->hump_complete_threshold_mg >
-             B4_CFG_MAX_THRESHOLD_MG) ||
+            (p_config->noise_step_shift < B4_CFG_MIN_NOISE_STEP_SHIFT) ||
+            (p_config->noise_step_shift > B4_CFG_MAX_NOISE_STEP_SHIFT) ||
+            (0U == p_config->hump_complete_k_tenths) ||
+            (p_config->hump_start_k_tenths <=
+             p_config->hump_complete_k_tenths) ||
+            (p_config->hump_start_k_tenths > B4_CFG_MAX_K_TENTHS) ||
             (0U == p_config->calibration_noise_limit_mg) ||
             (p_config->calibration_noise_limit_mg >
              (uint32_t)B4_CFG_MAX_SAMPLE_MG) ||
@@ -255,6 +290,8 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (p_config->filter_divisor > B4_CFG_MAX_FILTER_DIVISOR) ||
             (p_config->height_settle_samples < B4_CFG_MIN_SETTLE_SAMPLES) ||
             (p_config->height_settle_samples > B4_CFG_MAX_SETTLE_SAMPLES) ||
+            (p_config->height_mean_samples < B4_CFG_MIN_SETTLE_SAMPLES) ||
+            (p_config->height_mean_samples > B4_CFG_MAX_SETTLE_SAMPLES) ||
             (0U == p_config->height_baseline_divisor) ||
             (p_config->height_baseline_divisor >
              B4_CFG_MAX_BASELINE_DIVISOR) ||

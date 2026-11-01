@@ -622,6 +622,11 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
          * replace it with the secondary "interface not up" (-4) result. */
         result = -CYW43_EIO;
     } else {
+        /* No power saving: the default PM2 mode lets the chip sleep up to
+         * 200 ms between beacons, so every broker round trip waited behind
+         * it (~0.9 s per QoS 1 message on a phone hotspot) and long gaps
+         * tripped the MQTT keep-alive.  The car is not battery-limited. */
+        (void)cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
         (void)cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA,
                                  radio_status.mac);
         result = cyw43_wifi_scan(&cyw43_state, &options, &radio_status,

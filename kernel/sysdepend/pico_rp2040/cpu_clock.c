@@ -22,6 +22,9 @@
 #include <tk/tkernel.h>
 #include "sysdepend.h"
 
+#define CPU_CLOCK_WATCHDOG_TICK_REG    (0x4005802CUL)
+#define CPU_CLOCK_WATCHDOG_TICK_ENABLE (1UL << 9)
+
 /* 
  * PLL initialization
  */
@@ -103,6 +106,12 @@ EXPORT void startup_clock(ATR clkatr)
 	while(!(in_w(CLK_REF+CLK_x_SELECTED)&(1<<2)));
 
 	out_w(CLK_REF+CLK_x_DIV, div);
+
+    /* RP2040 datasheet section 4.7.2: TIMER and SysTick share this tick.
+       CLK_REF now runs at XOSC_MHz, so use that many cycles per 1 us tick.
+       Establish the timebase on every boot, not only after USB flashing. */
+    out_w(CPU_CLOCK_WATCHDOG_TICK_REG,
+          CPU_CLOCK_WATCHDOG_TICK_ENABLE | XOSC_MHz);
 
 	/* CLK SYS settings */
 	div = (TMCLK_MHz << 8) / TMCLK_MHz;

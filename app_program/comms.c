@@ -43,6 +43,7 @@
 #define COMMS_CMD_QUEUE_LEN      4U     /* commands waiting for pickup   */
 #define COMMS_ACK_QUEUE_LEN      4U     /* acknowledgements to send      */
 #define COMMS_TELEMETRY_MS       200U   /* max 5 Hz per telemetry topic  */
+#define COMMS_TELEMETRY_RUN_MS   100U   /* motion and line during a run  */
 #define COMMS_REFRESH_MS         2000U  /* resend unchanged values       */
 #define COMMS_HEARTBEAT_MS       1000U
 #define COMMS_MBF_OVERHEAD       8U     /* per-message kernel header     */
@@ -56,6 +57,7 @@
  * ------------------------------------------------------------------ */
 
 #define BITS_SPEED               10U    /* signed */
+#define BITS_DRIVE               11U    /* signed, PWM permille +-1000    */
 #define BITS_ENCODER             19U    /* signed */
 #define BITS_DISTANCE            16U    /* signed */
 #define BITS_LINE_POS            3U
@@ -66,7 +68,7 @@
 #define BITS_HUMP                10U
 #define BITS_SEQ                 16U
 #define BITS_STATE               4U
-#define BITS_FAULT               9U     /* nine faults (DATA_DEFS §6)     */
+#define BITS_FAULT               10U    /* ten faults (DATA_DEFS §6)      */
 #define BITS_DROPS               8U
 #define BITS_BARCODE             3U
 #define BITS_NAV                 3U
@@ -80,9 +82,17 @@
 #define BITS_COUNT               8U
 #define BITS_CMD                 2U
 #define BITS_OK                  1U
+#define BITS_CAL_RESULT          3U
+#define BITS_CAL_OVERLAP         9U     /* signed, -256 = not measured    */
+#define BITS_ADC                 12U    /* RP2040 ADC reading             */
+#define BITS_CAL_LEARNED         1U
+#define BITS_CAL_FIRST_RIGHT     1U
+#define BITS_CAL_FLOOR           9U     /* Buddy 4 validates 1 .. 500 mg  */
+#define BITS_CAL_SAMPLES         15U    /* Buddy 4 stops at 20000         */
+#define BITS_CAL_ANGLE           8U     /* whole degrees, limit is 90     */
 
 #define SEQ_MASK                 0xFFFFU   /* heartbeat number wraps     */
-#define FAULT_MASK               0x1FFU    /* fault bits that are sent   */
+#define FAULT_MASK               0x3FFU    /* fault bits that are sent   */
 #define RUN_BEGIN                1U        /* robot/event/run: 1 = BEGIN */
 #define RUN_CODE_COUNT           2U        /* END, BEGIN                 */
 
@@ -104,7 +114,8 @@ typedef enum
     EVENT_OBSTACLE,
     EVENT_MOTION,
     EVENT_RUN_BEGIN,
-    EVENT_RUN_END
+    EVENT_RUN_END,
+    EVENT_CALIBRATION
 } event_type_t;
 
 typedef struct
@@ -115,6 +126,7 @@ typedef struct
     uint8_t          kind;          /* nav command / motion class        */
     int32_t          value;         /* hump peak height, 0.1 mm          */
     comms_obstacle_t obstacle;
+    comms_calibration_t calibration;
 } comms_event_t;
 
 /* Seqlock-protected latest value.  One writer task, one reader (radio). */
@@ -176,6 +188,11 @@ static char const * const g_cmd_names[CMD_CODE_COUNT] =
 static char const * const g_run_names[RUN_CODE_COUNT] =
 {
     "END", "BEGIN"
+};
+
+static char const * const g_cal_names[COMMS_CAL_COUNT] =
+{
+    "OK", "CONTRAST", "LINE_NOT_FOUND", "BUDDY4", "SENSOR_GAP"
 };
 #endif /* COMMS_JSON */
 
@@ -504,6 +521,22 @@ comms_event_motion (comms_motion_class_t motion)
     return queue_event(&event);
 }
 
+bool
+comms_event_calibration (comms_calibration_t const * p_calibration)
+{
+    comms_event_t event = {0};
+    bool          b_queued = false;
+
+    if (NULL != p_calibration)
+    {
+        event.type        = (uint8_t) EVENT_CALIBRATION;
+        event.calibration = *p_calibration;
+        b_queued          = queue_event(&event);
+    }
+
+    return b_queued;
+}
+
 /* ------------------------------------------------------------------ *
  *  Radio side: everything below runs only in the radio task
  * ------------------------------------------------------------------ */
@@ -648,20 +681,31 @@ hash_fields (int32_t const * p_fields, uint32_t count)
 }
 
 
+/* Motion and line go twice as often while a run is active, so a run's
+   steering can be followed; terrain and everything outside a run keep the
+   slower rate. */
+static uint32_t
+run_period_ms (void)
+{
+    return g_b_run_active ? COMMS_TELEMETRY_RUN_MS : COMMS_TELEMETRY_MS;
+}
+
+
 /* A snapshot is due when it has ever been written, the per-topic rate
    limit has passed, and either a resend was asked for, the refresh
    interval passed (late subscribers catch up), or its content changed.
    An unchanged seq means nothing new was written: no hashing needed. */
 static bool
 snapshot_due (snapshot_tx_t * p_tx, uint32_t seq, int32_t const * p_fields,
-              uint32_t count, uint32_t now, uint32_t * p_hash)
+              uint32_t count, uint32_t now, uint32_t period_ms,
+              uint32_t * p_hash)
 {
     uint32_t const age   = now - p_tx->last_sent_ms;
     bool           b_due = false;
 
     *p_hash = p_tx->last_hash;
 
-    if ((0U != seq) && (age >= COMMS_TELEMETRY_MS))
+    if ((0U != seq) && (age >= period_ms))
     {
         if (p_tx->b_force || (age >= COMMS_REFRESH_MS))
         {
@@ -696,6 +740,49 @@ snapshot_sent (snapshot_tx_t * p_tx, uint32_t seq, uint32_t hash,
 }
 
 /* --- message producers: each message described once --- */
+
+static void
+build_calibration (codec_writer_t * p_w, comms_link_msg_t * p_msg,
+                   comms_event_t const * p_event)
+{
+    comms_calibration_t const * const p_cal = &p_event->calibration;
+
+    codec_begin(p_w, p_msg, "robot/event/calibration", QOS_1, false,
+                p_event->time_ms);
+    codec_put_name(p_w, CODEC_KEY("result"), CODEC_NAMES(g_cal_names),
+                   COMMS_CAL_COUNT, (uint32_t) p_cal->result,
+                   BITS_CAL_RESULT);
+    codec_put_uint(p_w, CODEC_KEY("centre_low"), p_cal->centre_low, BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("centre_high"), p_cal->centre_high,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("centre_thr"), p_cal->centre_threshold,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("centre_full"), p_cal->centre_full_black,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("right_low"), p_cal->right_low, BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("right_high"), p_cal->right_high, BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("right_thr"), p_cal->right_threshold,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("barcode_low"), p_cal->barcode_low,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("barcode_high"), p_cal->barcode_high,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("barcode_thr"), p_cal->barcode_threshold,
+                   BITS_ADC);
+    codec_put_uint(p_w, CODEC_KEY("barcode_learned"),
+                   p_cal->b_barcode_learned ? 1U : 0U, BITS_CAL_LEARNED);
+    codec_put_uint(p_w, CODEC_KEY("first_right"),
+                   p_cal->b_first_right ? 1U : 0U, BITS_CAL_FIRST_RIGHT);
+    codec_put_int(p_w, CODEC_KEY("overlap"), p_cal->overlap_samples,
+                  BITS_CAL_OVERLAP);
+    codec_put_uint(p_w, CODEC_KEY("b4_floor_mg"), p_cal->b4_floor_mg,
+                   BITS_CAL_FLOOR);
+    codec_put_uint(p_w, CODEC_KEY("b4_samples"), p_cal->b4_samples,
+                   BITS_CAL_SAMPLES);
+    codec_put_uint(p_w, CODEC_KEY("sweep_deg"),
+                   non_negative(p_cal->sweep_deg), BITS_CAL_ANGLE);
+}
+
 
 static void
 build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
@@ -764,6 +851,10 @@ build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
                            p_event->kind, BITS_MOTION_CLASS);
             break;
 
+        case EVENT_CALIBRATION:
+            build_calibration(&w, p_msg, p_event);
+            break;
+
         case EVENT_RUN_BEGIN:
             g_b_run_active   = true;
             g_run_start_ms   = p_event->time_ms;
@@ -810,7 +901,7 @@ next_motion (comms_link_msg_t * p_msg, uint32_t now)
 {
     comms_motion_t motion;
     codec_writer_t w;
-    int32_t        fields[5];
+    int32_t        fields[11];
     uint32_t       seq;
     uint32_t       hash;
     bool           b_built = false;
@@ -824,8 +915,15 @@ next_motion (comms_link_msg_t * p_msg, uint32_t now)
         fields[2] = motion.encoder_left;
         fields[3] = motion.encoder_right;
         fields[4] = motion.distance_mm;
+        fields[5] = motion.target_left_mm_s;
+        fields[6] = motion.target_right_mm_s;
+        fields[7] = motion.slewed_left_mm_s;
+        fields[8] = motion.slewed_right_mm_s;
+        fields[9] = motion.drive_left_permille;
+        fields[10] = motion.drive_right_permille;
 
-        if (snapshot_due(&g_motion_tx, seq, fields, 5U, now, &hash))
+        if (snapshot_due(&g_motion_tx, seq, fields, 11U, now, run_period_ms(),
+                         &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/motion", QOS_0, false,
                         now);
@@ -834,6 +932,12 @@ next_motion (comms_link_msg_t * p_msg, uint32_t now)
             codec_put_int(&w, CODEC_KEY("enc_l"), fields[2], BITS_ENCODER);
             codec_put_int(&w, CODEC_KEY("enc_r"), fields[3], BITS_ENCODER);
             codec_put_int(&w, CODEC_KEY("dist_mm"), fields[4], BITS_DISTANCE);
+            codec_put_int(&w, CODEC_KEY("tgt_l_mm_s"), fields[5], BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("tgt_r_mm_s"), fields[6], BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("slew_l_mm_s"), fields[7], BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("slew_r_mm_s"), fields[8], BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("pwm_l"), fields[9], BITS_DRIVE);
+            codec_put_int(&w, CODEC_KEY("pwm_r"), fields[10], BITS_DRIVE);
             codec_end(&w);
             snapshot_sent(&g_motion_tx, seq, hash, now);
             b_built = true;
@@ -849,7 +953,7 @@ next_line (comms_link_msg_t * p_msg, uint32_t now)
 {
     comms_line_t   line;
     codec_writer_t w;
-    int32_t        fields[3];
+    int32_t        fields[5];
     uint32_t       seq;
     uint32_t       hash;
     bool           b_built = false;
@@ -860,8 +964,11 @@ next_line (comms_link_msg_t * p_msg, uint32_t now)
         fields[0] = (int32_t) line.position;
         fields[1] = line.error;
         fields[2] = (int32_t) line.sensors;
+        fields[3] = (int32_t) line.centre_adc;
+        fields[4] = (int32_t) line.right_adc;
 
-        if (snapshot_due(&g_line_tx, seq, fields, 3U, now, &hash))
+        if (snapshot_due(&g_line_tx, seq, fields, 5U, now, run_period_ms(),
+                         &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/line", QOS_0, false,
                         now);
@@ -871,6 +978,10 @@ next_line (comms_link_msg_t * p_msg, uint32_t now)
             codec_put_int(&w, CODEC_KEY("err"), line.error, BITS_LINE_ERROR);
             codec_put_uint(&w, CODEC_KEY("sensors"), line.sensors,
                            BITS_SENSORS);
+            codec_put_uint(&w, CODEC_KEY("centre_adc"), line.centre_adc,
+                           BITS_ADC);
+            codec_put_uint(&w, CODEC_KEY("right_adc"), line.right_adc,
+                           BITS_ADC);
             codec_end(&w);
             snapshot_sent(&g_line_tx, seq, hash, now);
             b_built = true;
@@ -899,7 +1010,8 @@ next_terrain (comms_link_msg_t * p_msg, uint32_t now)
         fields[2] = terrain.hump_dmm;
         fields[3] = g_max_hump_dmm;
 
-        if (snapshot_due(&g_terrain_tx, seq, fields, 4U, now, &hash))
+        if (snapshot_due(&g_terrain_tx, seq, fields, 4U, now, COMMS_TELEMETRY_MS,
+                         &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/terrain", QOS_0, false,
                         now);

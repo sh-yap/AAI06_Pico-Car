@@ -42,14 +42,13 @@
 #define ULTRA_PWM_DIV_1US         ((uint32_t)SYSCLK << ULTRA_PWM_DIV_INT_SHIFT)
 
 #define ULTRA_US_PER_MS           (1000U)
-#define ULTRA_PING_PERIOD_US      (OBSTACLE_PING_PERIOD_MS * ULTRA_US_PER_MS)
 #define ULTRA_PROBE_WINDOW_US     (50000U)  /* Longer than any echo.    */
 #define ULTRA_PIN_TEST_HOLD_MS    (10)      /* TMO: Trig high phase.    */
 #define ULTRA_PIN_TEST_TIMER_MS   (100)     /* TMO: timer rate check.   */
 
 static bool     b_ready = false;
 static bool     b_pinged_before = false;
-static uint32_t last_ping_us = 0U;
+static uint32_t last_ping_ms = 0U;
 static uint32_t slice_base = 0U;
 
 
@@ -67,25 +66,43 @@ ultra_time_us(void)
 }
 
 /*!
+ * @brief Kernel time in milliseconds (wraps after about 49 days).
+ *
+ * Ping spacing uses this, not the RP2040 TIMER: until the start-up code
+ * sets the watchdog TICK, the TIMER runs at about 2 % speed, which made
+ * every ping wait a whole extra period (scan took 3.0 s, 2026-10-31).
+ *
+ * @return Low 32 bits of the kernel's operating time.
+ */
+static uint32_t
+ultra_now_ms(void)
+{
+    SYSTIM now;
+
+    now.hi = 0;
+    now.lo = 0U;
+    (void)tk_get_otm(&now);
+
+    /* Cast to uint32_t: only differences of the low word are used. */
+    return ((uint32_t)now.lo);
+}
+
+/*!
  * @brief Sleep until OBSTACLE_PING_PERIOD_MS has passed since the last ping.
  */
 static void
 ultra_wait_ping_period(void)
 {
-    uint32_t elapsed_us;
-    uint32_t delay_ms;
+    uint32_t elapsed_ms;
 
     if (b_pinged_before)
     {
-        elapsed_us = ultra_time_us() - last_ping_us;
+        elapsed_ms = ultra_now_ms() - last_ping_ms;
 
-        if (elapsed_us < ULTRA_PING_PERIOD_US)
+        if (elapsed_ms < OBSTACLE_PING_PERIOD_MS)
         {
-            delay_ms = ((ULTRA_PING_PERIOD_US - elapsed_us)
-                        + (ULTRA_US_PER_MS - 1U)) / ULTRA_US_PER_MS;
-
-            /* Cast to TMO: delay_ms is at most OBSTACLE_PING_PERIOD_MS. */
-            (void)tk_dly_tsk((TMO)delay_ms);
+            /* Cast to TMO: at most OBSTACLE_PING_PERIOD_MS. */
+            (void)tk_dly_tsk((TMO)(OBSTACLE_PING_PERIOD_MS - elapsed_ms));
         }
     }
 }
@@ -188,6 +205,8 @@ obstacle_ultrasonic_measure(obstacle_range_t * p_range)
         {
             ultra_wait_ping_period();
 
+            last_ping_ms = ultra_now_ms();
+
             if (0U != gpio_get_val(OBSTACLE_ECHO_PIN))
             {
                 /* The previous echo has not ended (nothing reflected yet).
@@ -207,7 +226,6 @@ obstacle_ultrasonic_measure(obstacle_range_t * p_range)
                 out_w(slice_base + PWM_CHx_CSR, ULTRA_PWM_CSR_DIV_LEVEL);
             }
 
-            last_ping_us = ping_us;
             b_pinged_before = true;
 
             p_range->status = obstacle_calc_classify_echo(echo_us,
@@ -288,7 +306,7 @@ obstacle_ultrasonic_probe(obstacle_probe_t * p_probe)
                                   & ULTRA_PWM_CTR_MASK;
             out_w(slice_base + PWM_CHx_CSR, ULTRA_PWM_CSR_DIV_LEVEL);
 
-            last_ping_us = start_us;
+            last_ping_ms = ultra_now_ms();
             b_pinged_before = true;
         }
     }
@@ -352,7 +370,7 @@ obstacle_ultrasonic_pin_test(obstacle_pin_test_t * p_test)
 
             clr_w(GPIO(OBSTACLE_TRIG_PIN), GPIO_IE);
 
-            last_ping_us = ultra_time_us();
+            last_ping_ms = ultra_now_ms();
             b_pinged_before = true;
         }
     }
