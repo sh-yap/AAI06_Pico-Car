@@ -9,9 +9,11 @@
  *     Buddy 3's task.  With 0 the line is always "centred" and a run ends
  *     itself after VC_TEST_RUN_MS (bench safety);
  *   - Buddy 5 (obstacle), VC_HAVE_BUDDY5: "obstacle ahead" and sensor
- *     fault from Buddy 5's task.  Scan and bypass are not written yet, so
- *     an obstacle stops the car and the scan timeout ends in
- *     EMERGENCY_STOP (fail safe);
+ *     fault from Buddy 5's task; the scan, its recommendation and the "^"
+ *     bypass plan (obstacle_plan.h).  The bypass itself is run here, step
+ *     by step, while the VC is in BYPASS: turn, Buddy 5 path check, leg,
+ *     turn back steeply, drive towards the line until Buddy 3 sees it;
+ *     then "obstacle passed" and line following takes over;
  *   - Buddy 4 (terrain), VC_HAVE_BUDDY4: packed terrain words from Buddy
  *     4's task.  The car slows on a ramp and whenever Buddy 4 is not
  *     ready or silent, and START waits for it.  With 0 the car never
@@ -58,6 +60,7 @@
 #if VC_HAVE_BUDDY5
 #include "obstacle_types.h"
 #include "obstacle_task.h"
+#include "obstacle_plan.h"
 #endif
 
 /* ------------------------------------------------------------------------ *
@@ -125,6 +128,25 @@
 #define VC_TERRAIN_DRAIN_MAX     (8U)      /* Buddy 4 words read per step. */
 #define VC_TRACE_STEPS           (5U)      /* Run trace every 100 ms.      */
 
+/* Bypass ("^").  Turns are encoder turns at VC_TURN_SPEED_MM_S.  On the
+ * old 145 mm Motion track width a 22 deg command turned about 20 deg
+ * (2026-11-01); with the 119 mm track this branch uses, re-measure before
+ * changing VC_BYPASS_TURN_PCT from 100. */
+#define VC_BYPASS_SPEED_MM_S     (150)     /* Leg speed.                   */
+#define VC_BYPASS_TURN_PCT       (100)     /* Commanded / planned angle.   */
+#define VC_BYPASS_GUARD_MM       (150U)    /* Nearer on a leg = stop.      */
+#define VC_BYPASS_TURN_MS        (3000U)   /* Motion timeout per turn.     */
+/* Return to the line at a steep angle and stop on it, instead of a
+ * mirror-image leg: floor tests 2026-11-01 (b key, no line) ended 15 cm
+ * left and 19 cm right of the line, the apex turn varying about +-10 deg
+ * from slip, and once the car never came back across the line.  At the
+ * apex the car turns turn_deg + RETURN_DEG, so it heads for the line at
+ * about RETURN_DEG (20-40 deg with that slip), then drives until Buddy 3
+ * sees the line: watched from apex_mm on, at most RETURN_MAX_PCT % of
+ * apex_mm.  Line following then lines the car up. */
+#define VC_BYPASS_RETURN_DEG     (30U)
+#define VC_BYPASS_RETURN_MAX_PCT (300U)
+
 /* ------------------------------------------------------------------------ *
  * Private data (used only by the VC task)
  * ------------------------------------------------------------------------ */
@@ -156,6 +178,8 @@ static int32_t  g_left_mm_s;           /* Measured wheel speeds, for the  */
 static int32_t  g_right_mm_s;          /* run trace.                      */
 static int32_t  g_diff_counts;         /* Left minus right encoder counts. */
 static int32_t  g_sweep_origin_counts; /* g_diff_counts when the sweep began.*/
+static int32_t  g_manoeuvre_mm;        /* Motion's distance in its current
+                                          command (bypass leg progress).  */
 
 /* VC state -> the state codes comms publishes today (tracker item C5). */
 static comms_state_t const g_comms_state[VC_STATE_COUNT] =
@@ -289,6 +313,7 @@ read_motion (vc_inputs_t * p_in)
 
         g_left_mm_s             = status.left_speed_mm_s;
         g_right_mm_s            = status.right_speed_mm_s;
+        g_manoeuvre_mm          = status.travelled_mm;
         g_diff_counts           = status.left_encoder_counts
                                   - status.right_encoder_counts;
         p_in->cal_angle_mdeg    = (g_diff_counts - g_sweep_origin_counts)
@@ -697,6 +722,115 @@ publish_drive (vc_state_t state, bool b_stationary)
 
 #if VC_HAVE_BUDDY5
 
+/* A Buddy 5 request (scan or path check) in progress.  Its DONE bit is
+ * cleared when Buddy 5 starts the work and set when the result is ready,
+ * so a DONE left over from the previous request is never taken as new. */
+typedef enum
+{
+    OBST_REQ_IDLE = 0,
+    OBST_REQ_SENT,                      /* Asked; old DONE may still show. */
+    OBST_REQ_RUNNING                    /* DONE seen clear: work started.  */
+} obst_req_t;
+
+static obst_req_t             g_scan_req;
+static obstacle_profile_t     g_profile;    /* Latest scan.              */
+static obstacle_bypass_plan_t g_plan;       /* For TURN recommendations. */
+
+
+/* Advance a request on its DONE bit; true once, when the result is ready. */
+static bool
+request_done (obst_req_t * p_req, UINT flags, UINT done_bit)
+{
+    bool b_done = false;
+
+    if ((OBST_REQ_SENT == *p_req) && (0U == (flags & done_bit)))
+    {
+        *p_req = OBST_REQ_RUNNING;
+    }
+    else if ((OBST_REQ_RUNNING == *p_req) && (0U != (flags & done_bit)))
+    {
+        *p_req = OBST_REQ_IDLE;
+        b_done = true;
+    }
+    else
+    {
+        /* Waiting. */
+    }
+
+    return b_done;
+}
+
+
+static vc_avoid_t
+avoid_from_buddy5 (obstacle_action_t action)
+{
+    vc_avoid_t avoid = VC_AVOID_STOP;
+
+    switch (action)
+    {
+        case OBSTACLE_ACTION_CONTINUE:
+            avoid = VC_AVOID_CONTINUE;
+            break;
+
+        case OBSTACLE_ACTION_TURN_LEFT:
+            avoid = VC_AVOID_TURN_LEFT;
+            break;
+
+        case OBSTACLE_ACTION_TURN_RIGHT:
+            avoid = VC_AVOID_TURN_RIGHT;
+            break;
+
+        case OBSTACLE_ACTION_REVERSE_RETRY:
+            avoid = VC_AVOID_REVERSE_RETRY;
+            break;
+
+        case OBSTACLE_ACTION_STOP:
+        default:
+            avoid = VC_AVOID_STOP;
+            break;
+    }
+
+    return avoid;
+}
+
+
+/* Scan finished: read the profile, plan the bypass, give the VC its
+ * recommendation, and tell the laptop what was seen. */
+static void
+scan_finished (vc_inputs_t * p_in)
+{
+    comms_obstacle_t report = {0};
+    vc_avoid_t       avoid  = VC_AVOID_STOP;    /* No result: fail safe. */
+
+    if (obstacle_task_get_profile(&g_profile))
+    {
+        avoid = avoid_from_buddy5(g_profile.action);
+
+        if (((VC_AVOID_TURN_LEFT == avoid) || (VC_AVOID_TURN_RIGHT == avoid))
+            && (!obstacle_plan_bypass(g_profile.distance_mm, g_profile.action,
+                                      &g_plan)))
+        {
+            /* Too close for any allowed turn: back off and scan again. */
+            avoid = VC_AVOID_REVERSE_RETRY;
+        }
+
+        report.distance_mm    = (int32_t) g_profile.distance_mm;
+        report.angle_deg      = (int32_t) g_profile.angle_deg;
+        report.width_mm       = (int32_t) g_profile.width_mm;
+        report.clear_left_mm  = (int32_t) g_profile.clear_left_mm;
+        report.clear_right_mm = (int32_t) g_profile.clear_right_mm;
+        report.action         = (comms_avoid_t) avoid;      /* Same order. */
+        (void) comms_event_obstacle(&report);
+
+        tm_printf((UB *) "[vc] scan: closest %u mm, recommendation %d\n",
+                  (UINT) g_profile.distance_mm, (INT) avoid);
+    }
+
+    p_in->b_scan_done    = true;
+    p_in->recommendation = avoid;
+}
+
+
 /* True while the car is on a mission (may be moving). */
 static bool
 is_running (vc_state_t state)
@@ -741,6 +875,11 @@ read_obstacle (vc_inputs_t * p_in, vc_state_t state)
         {
             p_in->serious_faults |= (uint16_t) VC_FAULT_ULTRASONIC;
         }
+
+        if (request_done(&g_scan_req, rflg.flgptn, OBSTACLE_EVT_SCAN_DONE))
+        {
+            scan_finished(p_in);
+        }
     }
     else
     {
@@ -750,27 +889,25 @@ read_obstacle (vc_inputs_t * p_in, vc_state_t state)
 }
 
 
-/* The VC has acted on "obstacle ahead" (stopped, scanning): tell Buddy 5,
- * which clears the bit and raises it again if the obstacle is still there.
- * Also report what was seen, so the laptop shows why the car stopped. */
+/* The VC has acted on "obstacle ahead" (stopped, will scan): tell Buddy 5,
+ * which clears the bit and raises it again if the obstacle is still there,
+ * and ask for the scan.  The result is picked up in read_obstacle(). */
 static void
 act_on_obstacle (vc_outputs_t const * p_out)
 {
-    obstacle_status_t status;
-    comms_obstacle_t  report = {0};
-
     if (VC_OBST_SCAN_REQUEST == p_out->obstacle)
     {
         obstacle_task_ack_ahead();
-
-        if (obstacle_task_get_status(&status))
-        {
-            report.distance_mm = (int32_t) status.distance_mm;
-        }
-
-        report.angle_deg = 90;                  /* Straight ahead.       */
-        report.action    = COMMS_AVOID_STOP;    /* No scan written yet.  */
-        (void) comms_event_obstacle(&report);
+        obstacle_task_request_scan();
+        g_scan_req = OBST_REQ_SENT;
+    }
+    else if (VC_OBST_ABORT == p_out->obstacle)
+    {
+        g_scan_req = OBST_REQ_IDLE;             /* Ignore a late result. */
+    }
+    else
+    {
+        /* BYPASS_START: the bypass is run by bypass_run(). */
     }
 }
 
@@ -988,6 +1125,261 @@ service_pending (void)
 }
 
 
+#if VC_HAVE_BUDDY5
+
+/* ------------------------------------------------------------------------ *
+ * Bypass ("^"), run while the VC is in BYPASS
+ * ------------------------------------------------------------------------ */
+
+typedef enum
+{
+    BYPASS_IDLE = 0,
+    BYPASS_TURN_OUT,        /* Turn turn_deg towards the bypass side.     */
+    BYPASS_CHECK,           /* Buddy 5 path check along leg 1.            */
+    BYPASS_LEG_OUT,         /* Leg 1, out to the apex.                    */
+    BYPASS_TURN_APEX,       /* Turn back turn_deg + VC_BYPASS_RETURN_DEG.  */
+    BYPASS_LEG_BACK         /* Towards the line until Buddy 3 sees it.    */
+} bypass_step_t;
+
+static bypass_step_t g_bypass_step;
+static obst_req_t    g_path_req;
+
+
+static obstacle_action_t
+other_side (obstacle_action_t side)
+{
+    return (OBSTACLE_ACTION_TURN_LEFT == side) ? OBSTACLE_ACTION_TURN_RIGHT
+                                               : OBSTACLE_ACTION_TURN_LEFT;
+}
+
+
+/* Encoder turn of deg (x VC_BYPASS_TURN_PCT %) towards side. */
+static void
+queue_bypass_turn (obstacle_action_t side, uint32_t deg)
+{
+    motion_command_t cmd = {0};
+    int32_t          mdeg;
+
+    /* deg is at most 2 x OBSTACLE_PLAN_MAX_DEG, so this fits easily. */
+    mdeg = (int32_t) ((deg * 1000U * (uint32_t) VC_BYPASS_TURN_PCT) / 100U);
+
+    cmd.type                        = MOTION_COMMAND_TURN_ANGLE;
+    cmd.timeout_ms                  = VC_BYPASS_TURN_MS;
+    cmd.value.turn.wheel_speed_mm_s = VC_TURN_SPEED_MM_S;
+    /* Motion: positive angle = right turn. */
+    cmd.value.turn.angle_mdeg = (OBSTACLE_ACTION_TURN_LEFT == side) ? -mdeg
+                                                                    : mdeg;
+    queue_manoeuvre(&cmd);
+}
+
+
+/* One straight leg of length_mm. */
+static void
+queue_bypass_leg (uint32_t length_mm)
+{
+    motion_command_t cmd = {0};
+
+    cmd.type                       = MOTION_COMMAND_MOVE_DISTANCE;
+    /* Twice the driving time, plus 1 s for starting and stopping. */
+    cmd.timeout_ms                 = ((length_mm * 2000U)
+                                      / (uint32_t) VC_BYPASS_SPEED_MM_S)
+                                     + 1000U;
+    cmd.value.distance.distance_mm = (int32_t) length_mm;
+    cmd.value.distance.speed_mm_s  = VC_BYPASS_SPEED_MM_S;
+    queue_manoeuvre(&cmd);
+}
+
+
+/* VC_MOTION_BYPASS: start the sequence with the first turn. */
+static void
+bypass_start (void)
+{
+    g_bypass_step = BYPASS_TURN_OUT;
+    g_path_req    = OBST_REQ_IDLE;
+    queue_bypass_turn(g_plan.side, g_plan.turn_deg);
+    tm_printf((UB *) "[vc] bypass %s: turn %u deg, legs %u mm\n",
+              (UB *) ((OBSTACLE_ACTION_TURN_LEFT == g_plan.side) ? "LEFT"
+                                                                 : "RIGHT"),
+              (UINT) g_plan.turn_deg, (UINT) g_plan.leg_mm);
+}
+
+
+/* True once the car is on its way back, at least apex_mm from the apex,
+ * and Buddy 3 sees a line.  Nearer the apex, a line would be something
+ * beside the obstacle: at RETURN_DEG the line is about 2 x apex_mm away. */
+static bool
+is_line_back (vc_inputs_t const * p_in)
+{
+    bool const b_watching =
+        (BYPASS_LEG_BACK == g_bypass_step) && (0U != g_manoeuvre_seq)
+        && (g_manoeuvre_mm >= (int32_t) g_plan.apex_mm);
+
+    return b_watching && (VC_LINE_LOST != p_in->line);
+}
+
+
+/* True if the sensor sees something within the guard distance. */
+static bool
+is_leg_blocked (void)
+{
+    obstacle_status_t status;
+
+    return obstacle_task_get_status(&status)
+           && (OBSTACLE_RANGE_OK == status.range_status)
+           && (VC_BYPASS_GUARD_MM > status.distance_mm);
+}
+
+
+/* Each step, before vc_step(): move the bypass on when Motion finishes a
+ * step or Buddy 5's path check is ready.  Ends with "obstacle passed" -
+ * early if Buddy 3 sees the line on the way back (is_line_back());
+ * a refused path, or something close on a leg, is reported as a motion
+ * failure, which the VC turns into EMERGENCY_STOP. */
+static void
+bypass_run (vc_inputs_t * p_in)
+{
+    T_RFLG          rflg;
+    obstacle_path_t path;
+    UINT            flags = 0U;
+    bool            b_fail = false;
+
+    if (VC_STATE_BYPASS != g_vc.state)
+    {
+        g_bypass_step = BYPASS_IDLE;            /* Left BYPASS: stand down. */
+    }
+    else if (BYPASS_IDLE != g_bypass_step)
+    {
+        if (E_OK == tk_ref_flg(obstacle_task_get_flag(), &rflg))
+        {
+            flags = rflg.flgptn;
+        }
+
+        if (((BYPASS_LEG_OUT == g_bypass_step)
+             || (BYPASS_LEG_BACK == g_bypass_step)) && is_leg_blocked())
+        {
+            tm_printf((UB *) "[vc] bypass: something within %u mm\n",
+                      (UINT) VC_BYPASS_GUARD_MM);
+            b_fail = true;
+        }
+        else if (is_line_back(p_in))
+        {
+            /* Line following takes over from here: the VC goes to
+             * REACQUIRE_LINE, sees the line and follows it. */
+            stop_motion();
+            obstacle_task_ack_ahead();
+            g_bypass_step           = BYPASS_IDLE;
+            p_in->b_obstacle_passed = true;
+            tm_printf((UB *) "[vc] bypass: line found, following it\n");
+        }
+        else
+        {
+            switch (g_bypass_step)
+            {
+                case BYPASS_TURN_OUT:
+                    if (p_in->b_motion_done)
+                    {
+                        obstacle_task_request_path_check(g_plan.side,
+                                                         g_plan.check_mm,
+                                                         g_profile.distance_mm);
+                        g_path_req    = OBST_REQ_SENT;
+                        g_bypass_step = BYPASS_CHECK;
+                    }
+                    break;
+
+                case BYPASS_CHECK:
+                    if (request_done(&g_path_req, flags,
+                                     OBSTACLE_EVT_PATH_DONE))
+                    {
+                        /* OPEN (no echo) is accepted: MONITOR and the
+                         * guard watch the leg. */
+                        if (obstacle_task_get_path(&path)
+                            && ((OBSTACLE_PATH_CLEAR == path.verdict)
+                                || (OBSTACLE_PATH_OPEN == path.verdict)))
+                        {
+                            queue_bypass_leg(g_plan.leg_mm);
+                            g_bypass_step = BYPASS_LEG_OUT;
+                        }
+                        else
+                        {
+                            tm_printf((UB *) "[vc] bypass: path refused\n");
+                            b_fail = true;
+                        }
+                    }
+                    break;
+
+                case BYPASS_LEG_OUT:
+                    if (p_in->b_motion_done)
+                    {
+                        queue_bypass_turn(other_side(g_plan.side),
+                                          g_plan.turn_deg
+                                          + VC_BYPASS_RETURN_DEG);
+                        g_bypass_step = BYPASS_TURN_APEX;
+                    }
+                    break;
+
+                case BYPASS_TURN_APEX:
+                    if (p_in->b_motion_done)
+                    {
+                        queue_bypass_leg((g_plan.apex_mm
+                                          * VC_BYPASS_RETURN_MAX_PCT) / 100U);
+                        g_bypass_step = BYPASS_LEG_BACK;
+                    }
+                    break;
+
+                case BYPASS_LEG_BACK:
+                    if (p_in->b_motion_done)
+                    {
+                        /* No line by the end of the leg: the VC's search
+                         * creeps on along the same heading, which still
+                         * points at the line.  "Ahead" latched while
+                         * passing the obstacle is stale now; Buddy 5
+                         * raises it again if needed. */
+                        obstacle_task_ack_ahead();
+                        g_bypass_step           = BYPASS_IDLE;
+                        p_in->b_obstacle_passed = true;
+                        tm_printf((UB *) "[vc] bypass done, no line yet\n");
+                    }
+                    break;
+
+                case BYPASS_IDLE:
+                default:
+                    break;
+            }
+        }
+
+        if (b_fail)
+        {
+            stop_motion();
+            g_bypass_step         = BYPASS_IDLE;
+            p_in->b_motion_failed = true;       /* VC -> EMERGENCY_STOP. */
+        }
+    }
+    else
+    {
+        /* In BYPASS but not started (or already ended): nothing to do. */
+    }
+}
+
+#else  /* Placeholder: no Buddy 5, no bypass. */
+
+static void
+bypass_start (void)
+{
+    /* Stop; the VC's bypass timeout then ends in EMERGENCY_STOP. */
+    stop_motion();
+    tm_printf((UB *) "[vc] bypass not available: stopped\n");
+}
+
+
+static void
+bypass_run (vc_inputs_t * p_in)
+{
+    (void) p_in;
+}
+
+#endif /* VC_HAVE_BUDDY5 */
+
+
 static void
 act_on_motion (vc_outputs_t const * p_out)
 {
@@ -1010,10 +1402,7 @@ act_on_motion (vc_outputs_t const * p_out)
             break;
 
         case VC_MOTION_BYPASS:
-            /* Buddy 5 bypass not integrated: stop; the VC's bypass
-             * timeout then ends in EMERGENCY_STOP (fail safe). */
-            stop_motion();
-            tm_printf((UB *) "[vc] bypass not available yet: stopped\n");
+            bypass_start();
             break;
 
         case VC_MOTION_STOP:
@@ -1295,6 +1684,7 @@ vc_task_entry (INT stacd, void * p_exinf)
         read_motion(&in);
         read_line(&in, now);
         read_obstacle(&in, g_vc.state);
+        bypass_run(&in);
         terrain_fault = read_terrain(&in, now);
 
         if ((VC_STATE_READY == g_vc.state) && (VC_CMD_START == in.cmd)

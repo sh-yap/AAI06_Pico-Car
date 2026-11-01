@@ -64,7 +64,9 @@
 #define VC_TURN_TIMEOUT_MS      (8000U)  /* Buddy 2: safe until Stage 7
                                             timing; 3000 too short at 80.    */
 #define VC_SCAN_TIMEOUT_MS      (3000U)  /* 1.5 s scan budget (A7) x 2.      */
-#define VC_BYPASS_TIMEOUT_MS    (6000U)  /* 3 s bypass target x 2.           */
+#define VC_BYPASS_TIMEOUT_MS    (25000U) /* "^" bypass: 3 turns, path check,
+                                            2 legs of ~0.9 m at 150 mm/s
+                                            = ~15 s; x 1.6 margin.           */
 #define VC_REACQUIRE_TIMEOUT_MS (4000U)  /* TBC: from bypass geometry.       */
 #define VC_MAX_RESCANS          (2U)     /* Reverse + rescan attempts.       */
 

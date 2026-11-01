@@ -71,6 +71,83 @@ typedef struct
     obstacle_action_t action;
 } obstacle_profile_t;
 
+/* Largest number of scan angles (60..120 deg in 5 deg steps). */
+#define OBSTACLE_SCAN_MAX_POINTS    (13U)
+
+/* What one scan angle shows, after background subtraction. */
+typedef enum
+{
+    OBSTACLE_POINT_UNKNOWN = 0,    /* Too few OK pings: never "clear".    */
+    OBSTACLE_POINT_OBSTACLE,       /* Part of the obstacle span.          */
+    OBSTACLE_POINT_BACKGROUND      /* Measured, well beyond the obstacle. */
+} obstacle_point_class_t;
+
+/* One scan angle: the median of its OK pings. */
+typedef struct
+{
+    uint32_t               angle_deg;
+    uint32_t               distance_mm;   /* Median; 0 if not measured.   */
+    uint32_t               valid_count;   /* OK pings.                    */
+    uint32_t               silent_count;  /* NO_ECHO / NOT_READY pings.   */
+    obstacle_point_class_t point_class;
+} obstacle_scan_point_t;
+
+/* A whole scan and what was concluded from it. */
+typedef struct
+{
+    obstacle_scan_point_t points[OBSTACLE_SCAN_MAX_POINTS];
+    uint32_t              count;
+    obstacle_profile_t    profile;        /* Packed for the controller.   */
+    uint32_t              right_edge_deg; /* Obstacle span, 0 if none.    */
+    uint32_t              left_edge_deg;
+    uint32_t              duration_ms;    /* Request to result.           */
+} obstacle_scan_result_t;
+
+/* Path check: what lies along a planned bypass leg after the first pivot.
+ * KNOWN is only given to single angles, never as the overall verdict. */
+typedef enum
+{
+    OBSTACLE_PATH_CLEAR = 0,     /* Measured free for at least need_mm.  */
+    OBSTACLE_PATH_OPEN,          /* No echo at all: nothing seen in range
+                                  * (but an angled face is also silent). */
+    OBSTACLE_PATH_BLOCKED,       /* Something nearer than need_mm that is
+                                  * not the known obstacle.              */
+    OBSTACLE_PATH_FAULT,         /* Sensor did not answer.               */
+    OBSTACLE_PATH_KNOWN          /* The obstacle that was scanned.       */
+} obstacle_path_verdict_t;
+
+/* Angles in one path check. */
+#define OBSTACLE_PATH_MAX_POINTS    (3U)
+
+/* One path-check angle. */
+typedef struct
+{
+    uint32_t                angle_deg;
+    uint32_t                distance_mm;  /* Median; 0 if not measured.  */
+    obstacle_path_verdict_t verdict;
+} obstacle_path_point_t;
+
+typedef struct
+{
+    obstacle_path_verdict_t verdict;
+    uint32_t                need_mm;      /* Free distance asked for.    */
+    uint32_t                known_mm;     /* Scanned obstacle's distance;
+                                           * 0 = none known.             */
+    obstacle_path_point_t   points[OBSTACLE_PATH_MAX_POINTS];
+    uint32_t                count;        /* Outermost angle first.      */
+} obstacle_path_t;
+
+/* The "^" bypass: pivot turn_deg towards side, drive leg_mm, pivot back
+ * 2 x turn_deg, drive leg_mm, pivot turn_deg to face along the line. */
+typedef struct
+{
+    obstacle_action_t side;       /* TURN_LEFT or TURN_RIGHT.           */
+    uint32_t          turn_deg;
+    uint32_t          leg_mm;     /* Rear-axle travel on each leg.      */
+    uint32_t          apex_mm;    /* Sideways offset at the apex.       */
+    uint32_t          check_mm;   /* Path check need before leg 1.      */
+} obstacle_bypass_plan_t;
+
 /* One ultrasonic measurement. */
 typedef struct
 {
