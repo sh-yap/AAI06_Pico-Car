@@ -373,6 +373,143 @@ test_calibration_moving_only(void)
 }
 
 
+/*
+ * Both sensors white: the side comes from the readings as fractions of the
+ * ranges the START sweep learned, not just the last-seen side. The sweep
+ * uses the 2026-11-02 bracket-height levels: centre 171 to 1270, right
+ * 240 to 2981, black zones overlapping by 10 samples.
+ */
+#define GAP_CENTRE_LOW     171U
+#define GAP_CENTRE_HIGH    1270U
+#define GAP_RIGHT_LOW      240U
+#define GAP_RIGHT_HIGH     2981U
+
+static void
+learn_bracket_height(void)
+{
+    ir_readings_t r;
+    uint32_t i;
+
+    line_follow_init();
+    line_cal_begin();
+    line_cal_sweep();
+
+    for (i = 0U; (i < 200U) && (line_cal_state() == LINE_CAL_RUNNING); i++)
+    {
+        r.right = in_stretch(i, 30U, 60U) ? GAP_RIGHT_HIGH : GAP_RIGHT_LOW;
+        r.centre = in_stretch(i, 50U, 80U) ? GAP_CENTRE_HIGH : GAP_CENTRE_LOW;
+        r.barcode = WHITE;
+        line_cal_update(r);
+    }
+}
+
+
+static void
+test_both_white_side(void)
+{
+    line_state_t state;
+    line_cal_result_t result;
+    int8_t err;
+    uint32_t i;
+
+    learn_bracket_height();
+    line_cal_get_result(&result);
+    check("gap side: calibration OK", line_cal_state() == LINE_CAL_OK);
+    check("gap side: learned centre range",
+          (result.centre.low <= (GAP_CENTRE_LOW + 4U))
+          && (result.centre.high >= (GAP_CENTRE_HIGH - 4U)));
+    check("gap side: learned right range",
+          (result.right.low <= (GAP_RIGHT_LOW + 4U))
+          && (result.right.high >= (GAP_RIGHT_HIGH - 4U)));
+
+    /* Centre only, then the line moves right through the gap. */
+    (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
+    check("gap side: centre only reads CENTRE", state == LINE_CENTRE);
+    err = step(538U, 1416U, &state);
+    check("gap side: right at half range: RIGHT", state == LINE_RIGHT);
+    check("gap side: right at half range: error > 0", err > 0);
+    err = step(557U, 1453U, &state);
+    check("gap side: right slightly higher: RIGHT", state == LINE_RIGHT);
+    check("gap side: right slightly higher: error > 0", err > 0);
+
+    /* Right only, then the line moves back left with the centre part on. */
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    check("gap side: right only reads RIGHT", state == LINE_RIGHT);
+    err = step(392U, 209U, &state);
+    check("gap side: centre at a quarter: LEFT", state == LINE_LEFT);
+    check("gap side: centre at a quarter: error < 0", err < 0);
+    err = step(445U, 201U, &state);
+    check("gap side: centre at a third: LEFT", state == LINE_LEFT);
+    check("gap side: centre at a third: error < 0", err < 0);
+
+    /* Both at their learned lows: neither leads, keep the last-seen side. */
+    (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
+    err = step(GAP_CENTRE_LOW, GAP_RIGHT_LOW, &state);
+    check("gap side: both low after centre: LEFT", state == LINE_LEFT);
+    check("gap side: both low after centre: error < 0", err < 0);
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    err = step(GAP_CENTRE_LOW, GAP_RIGHT_LOW, &state);
+    check("gap side: both low after right: RIGHT", state == LINE_RIGHT);
+    check("gap side: both low after right: error > 0", err > 0);
+
+    /* The chosen side sticks while the readings stay level. */
+    (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
+    (void)step(538U, 1416U, &state);
+    err = step(GAP_CENTRE_LOW, GAP_RIGHT_LOW, &state);
+    check("gap side: chosen RIGHT is kept", (state == LINE_RIGHT)
+                                            && (err > 0));
+
+    /* A reading below the learned low counts as zero, not a wrap. */
+    (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
+    (void)step(100U, 100U, &state);
+    check("gap side: below both lows: CENTRE side kept (LEFT)",
+          state == LINE_LEFT);
+
+    /* LOST still comes after 30 white samples. */
+    (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
+    for (i = 0U; i < 30U; i++)
+    {
+        err = step(538U, 1416U, &state);
+    }
+
+    check("gap side: 30 white samples: LOST", state == LINE_LOST);
+    check("gap side: LOST: error 0", err == 0);
+}
+
+
+/* Before a good sweep the last-seen side rules, whatever the readings. */
+static void
+test_both_white_side_uncalibrated(void)
+{
+    line_state_t state;
+    int8_t err;
+
+    line_follow_init();
+    (void)step(CENTRE_ON, WHITE, &state);
+    err = step(300U, 1500U, &state);
+    check("uncalibrated: centre then lower right: LEFT",
+          (state == LINE_LEFT) && (err == -LINE_ERROR_MAX));
+
+    (void)step(WHITE, RIGHT_ON, &state);
+    err = step(1500U, 300U, &state);
+    check("uncalibrated: right then lower centre: RIGHT",
+          (state == LINE_RIGHT) && (err == LINE_ERROR_MAX));
+
+    /* A failed sweep (white gap between the sensors) learns nothing. */
+    line_follow_init();
+    {
+        stretches_t s = { 56U, 76U, 30U, 50U };
+
+        check("failed sweep: FAIL_GAP", run_sweep(&s) == LINE_CAL_FAIL_GAP);
+    }
+
+    (void)step(1700U, WHITE, &state);
+    err = step(WHITE, 1500U, &state);
+    check("failed sweep: last-seen side kept (LEFT)",
+          (state == LINE_LEFT) && (err == -LINE_ERROR_MAX));
+}
+
+
 int
 main(void)
 {
@@ -382,6 +519,8 @@ main(void)
     test_calibration_gap();
     test_calibration_not_measured();
     test_calibration_moving_only();
+    test_both_white_side();
+    test_both_white_side_uncalibrated();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

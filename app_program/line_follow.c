@@ -178,6 +178,65 @@ static bool line_detect_junction(bool centre_black, bool right_black)
 }
 
 
+/*
+ * Which side does the line favour while both sensors read white? Each
+ * reading is taken as a fraction of its own learned span (low to high of
+ * the last good START sweep), and the sensor further up its own range
+ * wins if it leads by more than a thirty-second of the span. The compare
+ * is cross-multiplied, so no division is needed:
+ *
+ *     level_r / span_r - level_c / span_c > 1 / LINE_CAL_REST_DIV
+ *
+ * Returns LINE_RIGHT or LINE_LEFT when one side leads, else the unchanged
+ * last-seen side. Without a good sweep it always returns last-seen.
+ */
+static line_state_t both_white_side(ir_readings_t readings)
+{
+    uint32_t span_c = (uint32_t)cal_result.centre.high - cal_result.centre.low;
+    uint32_t span_r = (uint32_t)cal_result.right.high - cal_result.right.low;
+    uint32_t level_c = 0U;
+    uint32_t level_r = 0U;
+    int32_t lead;
+    int32_t margin;
+    line_state_t side = last_seen;
+
+    if ((cal_state == LINE_CAL_OK) && (span_c > 0U) && (span_r > 0U))
+    {
+        if (readings.centre > cal_result.centre.low)
+        {
+            level_c = (uint32_t)(readings.centre - cal_result.centre.low);
+            level_c = (level_c < span_c) ? level_c : span_c;
+        }
+
+        if (readings.right > cal_result.right.low)
+        {
+            level_r = (uint32_t)(readings.right - cal_result.right.low);
+            level_r = (level_r < span_r) ? level_r : span_r;
+        }
+
+        /* Spans are under 4096, so every product fits in 32 bits. */
+        lead = ((int32_t)(level_r * span_c) - (int32_t)(level_c * span_r))
+               * (int32_t)LINE_CAL_REST_DIV;
+        margin = (int32_t)(span_c * span_r);
+
+        if (lead > margin)
+        {
+            side = LINE_RIGHT;
+        }
+        else if (lead < -margin)
+        {
+            side = LINE_LEFT;
+        }
+        else
+        {
+            /* Neither leads: keep the last-seen side. */
+        }
+    }
+
+    return side;
+}
+
+
 line_state_t line_get_position(ir_readings_t readings)
 {
     bool centre_black;
@@ -219,6 +278,8 @@ line_state_t line_get_position(ir_readings_t readings)
     {
         return LINE_LOST;
     }
+
+    last_seen = both_white_side(readings);
 
     return (last_seen == LINE_RIGHT) ? LINE_RIGHT : LINE_LEFT;
 }
