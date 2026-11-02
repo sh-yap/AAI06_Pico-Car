@@ -111,6 +111,28 @@
   .ev .tag.state{color:var(--accent)} .ev .tag.fault{color:var(--bad)} .ev .tag.obst{color:var(--warn)} .ev .tag.bcode{color:var(--err)} .ev .tag.hump{color:var(--dist)}
   .ev .d{min-width:0;overflow-wrap:anywhere} .ev .d b{font-family:var(--mono)}
   .foot{font-size:12px;color:var(--muted);margin-top:18px}
+
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+  .viz svg{display:block;width:100%;height:auto}
+  .vrow{display:grid;grid-template-columns:62px 1fr 96px;align-items:center;gap:10px;font-size:13px;margin-top:8px}
+  .vrow .nm{font-weight:600}
+  .vrow .num{font-family:var(--mono);text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;font-size:12.5px}
+  .vtrack{position:relative;height:14px;border-radius:7px;background:var(--surface-2);overflow:visible}
+  .vtrack .fill{height:100%;border-radius:7px}
+  .vtrack .thr{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--fg);opacity:.7}
+  .vtrack .tgt{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--fg);opacity:.45}
+  .vline{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .scannav{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:8px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .scannav .btn{padding:4px 12px}
+  .maphead{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+  .maphead h3{margin:0 auto 0 0}
+  .maphead select{font-family:var(--mono);font-size:12.5px;background:var(--surface-2);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:5px 8px;max-width:100%}
+  .maphead label{font-size:12.5px;color:var(--muted);display:flex;gap:5px;align-items:center}
+  .mapwrap{position:relative;height:480px}
+  .mapwrap canvas{position:absolute;inset:0;width:100%;height:100%}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
+  .legend i{display:inline-block;width:14px;height:4px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .legend i.dot{width:7px;height:7px;border-radius:50%}
   code{font-family:var(--mono);background:var(--surface-2);padding:1px 5px;border-radius:4px}
 </style>
 </head>
@@ -150,9 +172,29 @@
   <div class="section-title">State machine</div>
   <div class="states" id="states"></div>
 
+  <div class="section-title">Live sensors</div>
+  <div class="grid3">
+    <div class="card"><h3>Line sensors</h3><div class="cap">Centre and right IR sensors, seen from above. Filled = black (on the tape). The bar tick is the threshold from the START calibration.</div><div class="viz" id="lineViz"></div></div>
+    <div class="card"><h3>Ultrasonic scan</h3><div class="cap" id="scanCap">Servo sweep 60°–120° (90° = straight ahead, above 90° = left).</div><div class="viz" id="scanViz"></div>
+      <div class="scannav"><button class="btn ghost" id="scanPrev" title="Earlier scan">‹</button><span id="scanIdx">no scans</span><button class="btn ghost" id="scanNext" title="Later scan">›</button></div></div>
+    <div class="card"><h3>Wheels</h3><div class="cap">Measured speed. The bar tick is the speed the controller asked for.</div><div class="viz" id="wheelViz"></div></div>
+  </div>
+
+  <div class="section-title">Path map</div>
+  <div class="card full">
+    <div class="maphead"><h3>Where the car went</h3>
+      <select id="runSel" title="Which run to draw"><option value="latest">Latest run</option></select>
+      <label><input type="checkbox" id="showHits" checked> line hits</label>
+      <label><input type="checkbox" id="showScans" checked> scans</label></div>
+    <div class="cap">Worked out from the wheel encoders, so it drifts a few cm per metre. Start ○, end ▲, forward is up at the start. Dots mark where a line sensor saw black, so they trace the tape the car found. ✕ marks the closest obstacle point from each scan.</div>
+    <div class="mapwrap"><canvas id="map"></canvas></div>
+    <div class="legend" id="mapLegend"></div>
+  </div>
+
   <div class="section-title">Charts</div>
   <div class="charts">
-    <div class="card full"><h3>Wheel speed</h3><div class="cap">Measured left / right wheel speed (mm/s). Target is 80 mm/s.</div><div class="plot tall"><canvas id="cSpeed"></canvas></div></div>
+    <div class="card full"><h3>Wheel speed</h3><div class="cap">Measured left / right wheel speed (mm/s). Dashed = what the controller asked for.</div><div class="plot tall"><canvas id="cSpeed"></canvas></div></div>
+    <div class="card full"><h3>Line sensor readings</h3><div class="cap">Raw ADC (0–4095, higher = darker). Dashed = calibrated threshold: above it the sensor counts as black.</div><div class="plot tall"><canvas id="cAdc"></canvas></div></div>
     <div class="card"><h3>Line error</h3><div class="cap">−127 = hard left · 0 = centred · +127 = hard right.</div><div class="plot"><canvas id="cErr"></canvas></div></div>
     <div class="card"><h3>Distance travelled</h3><div class="cap">Cumulative distance (mm) from the encoders.</div><div class="plot"><canvas id="cDist"></canvas></div></div>
   </div>
@@ -216,7 +258,7 @@ function decode(topic,bytes){
 const STATE_DEF=[['READY','','Ready'],['LINE_FOLLOW','sem-ok','Line follow'],['LINE_RECOVERY','sem-warn','Line search'],
   ['EXECUTE_NAV','sem-accent','Barcode turn'],['OBSTACLE_SCAN','sem-warn','Obstacle scan'],['BYPASS','sem-accent','Obstacle bypass'],
   ['OBSTACLE_STOP','sem-warn','Obstacle stop'],['FINISHED','sem-ok','Finished'],['SAFE_STOP','sem-bad','Safe stop']];
-const FAULT_BITS=[[1,'STALL'],[2,'ENCODER'],[4,'MOTION-CMD'],[32,'ULTRASONIC'],[64,'CAL-CONTRAST'],[128,'CAL-LINE-NOT-FOUND'],[256,'CAL-BUDDY4'],[512,'CAL-SENSOR-GAP']];
+const FAULT_BITS=[[1,'STALL'],[2,'ENCODER'],[4,'MOTION-CMD'],[8,'IMU'],[32,'ULTRASONIC'],[64,'CAL-CONTRAST'],[128,'CAL-LINE-NOT-FOUND'],[256,'CAL-BUDDY4'],[512,'CAL-SENSOR-GAP']];
 const faultName=f=>{f=+f||0;if(!f)return'';const b=FAULT_BITS.filter(x=>f&x[0]).map(x=>x[1]);return b.length?b.join('+'):('f'+f);};
 const stateSem=s=>{const d=STATE_DEF.find(x=>x[0]===s);return d?d[1]:'';};
 const shortTime=iso=>{const m=/T?(\d\d:\d\d:\d\d)\.(\d{3})/.exec(iso);if(m)return m[1]+'.'+m[2];const n=/(\d\d:\d\d:\d\d)/.exec(iso);return n?n[1]:iso;};
@@ -224,22 +266,61 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 const css=n=>getComputedStyle(document.body).getPropertyValue(n).trim();
 const CAP_PTS=4000, CAP_EV=600;
 
-function newModel(){return{build:'',first:null,last:null,motion:[],line:[],states:[],events:[],drops:0,pos:{},faults:[],finalState:null,peakSpeed:0,distance:0,runs:0,humps:0,maxHump:0,tilt:null,t0:null,prevState:null,prevFault:-1};}
+/* Car geometry for the path map (vc_task.c, obstacle_config.h). */
+const MM_PER_COUNT=181/2536;   // VC_WHEEL_MM / VC_WHEEL_COUNTS
+const DEG_PER_COUNT=0.034;     // VC_CAL_MDEG_PER_COUNT: (left - right) counts -> degrees, right turn +
+const ENC_SPAN=524288;         // enc_l / enc_r are 19-bit signed and wrap
+const SENSOR_AHEAD_MM=100;     // rear axle to the line sensors (VC_BYPASS_SNAP_MM)
+const RIGHT_SENSOR_MM=20;      // right sensor beside the centre one (approximate)
+const US_AHEAD_MM=65;          // rear axle to the ultrasonic sensor
+const CAP_PATH=20000, CAP_HITS=8000;
+const STATE_COL={LINE_FOLLOW:'--ok',LINE_RECOVERY:'--warn',OBSTACLE_SCAN:'--right',OBSTACLE_STOP:'--right',BYPASS:'--err',EXECUTE_NAV:'--accent',SAFE_STOP:'--bad',FINISHED:'--ok'};
+const stateCol=s=>css(STATE_COL[s]||'--muted');
+
+function newModel(){return{build:'',first:null,last:null,motion:[],line:[],states:[],events:[],drops:0,pos:{},faults:[],finalState:null,peakSpeed:0,distance:0,runs:0,humps:0,maxHump:0,tilt:null,t0:null,prevState:null,prevFault:-1,
+  paths:[],cur:null,pose:null,allowJoin:false,lastLine:null,lastMotion:null,cal:null,scans:[]};}
+
+/* Path map: one path per run, dead-reckoned from the encoder counts. */
+function startPath(M,ts,label){const p={label,ts,pts:[{x:0,y:0,s:M.prevState}],hits:[],scans:[]};M.paths.push(p);M.cur=p;M.pose={x:0,y:0,h:0,pl:null,pr:null};}
+function wrapEnc(d){return ((d%ENC_SPAN)+ENC_SPAN+ENC_SPAN/2)%ENC_SPAN-ENC_SPAN/2;}
+// Point fwd mm ahead of and right mm to the right of the rear axle.
+function carPoint(P,fwd,right){const h=P.h*Math.PI/180;return{x:P.x+fwd*Math.sin(h)+right*Math.cos(h),y:P.y+fwd*Math.cos(h)-right*Math.sin(h)};}
+function trackPose(M,ts,el,er){
+  if(!M.cur){if(!M.allowJoin)return;startPath(M,ts,'Joined '+shortTime(ts));}
+  const P=M.pose;
+  if(P.pl!=null){
+    const dl=wrapEnc(el-P.pl),dr=wrapEnc(er-P.pr);
+    if(Math.abs(dl)<20000&&Math.abs(dr)<20000){   // a jump = reboot: skip it
+      const ds=(dl+dr)/2*MM_PER_COUNT,dh=(dl-dr)*DEG_PER_COUNT,hm=(P.h+dh/2)*Math.PI/180;
+      P.x+=ds*Math.sin(hm);P.y+=ds*Math.cos(hm);P.h+=dh;
+      const pts=M.cur.pts,lp=pts[pts.length-1];
+      if(lp.s!==M.prevState||Math.hypot(P.x-lp.x,P.y-lp.y)>=2||Math.abs(dh)>=1){pts.push({x:P.x,y:P.y,s:M.prevState,h:P.h});if(pts.length>CAP_PATH)pts.splice(1,pts.length-CAP_PATH);}
+    }
+  }
+  P.pl=el;P.pr=er;
+}
+
 function handle(M,ts,topic,j){
   if(!M.first)M.first=ts; M.last=ts;
   const tt=j&&j.t!=null?+j.t:null;
   if(tt!=null&&(M.t0==null||tt<M.t0))M.t0=tt;
   if(topic==='robot/info'){M.build=j._text||'';return;}
   if(topic==='robot/status'){const off=/offline/.test(j._text||'');if(off)M.drops++;M.events.push({ts,t:tt,tag:'conn',txt:'WiFi '+(off?'offline':'online')});trim(M);return;}
-  if(topic==='robot/telemetry/motion'){const o={ts,t:tt,l:+j.spd_l_mm_s||0,r:+j.spd_r_mm_s||0,dist:+j.dist_mm||0};M.motion.push(o);M.peakSpeed=Math.max(M.peakSpeed,Math.abs(o.l),Math.abs(o.r));M.distance=Math.max(M.distance,o.dist);trim(M);}
-  else if(topic==='robot/telemetry/line'){M.line.push({ts,t:tt,pos:j.pos,err:+j.err||0});if(j.pos)M.pos[j.pos]=(M.pos[j.pos]||0)+1;trim(M);}
+  if(topic==='robot/telemetry/motion'){const o={ts,t:tt,l:+j.spd_l_mm_s||0,r:+j.spd_r_mm_s||0,dist:+j.dist_mm||0,tl:+j.tgt_l_mm_s||0,tr:+j.tgt_r_mm_s||0};M.motion.push(o);M.lastMotion=o;M.peakSpeed=Math.max(M.peakSpeed,Math.abs(o.l),Math.abs(o.r));M.distance=Math.max(M.distance,o.dist);
+    if(j.enc_l!=null&&j.enc_r!=null)trackPose(M,ts,+j.enc_l,+j.enc_r);trim(M);}
+  else if(topic==='robot/telemetry/line'){const o={ts,t:tt,pos:j.pos,err:+j.err||0,sensors:+j.sensors||0,c:j.centre_adc!=null?+j.centre_adc:null,r:j.right_adc!=null?+j.right_adc:null};M.line.push(o);M.lastLine=o;if(j.pos)M.pos[j.pos]=(M.pos[j.pos]||0)+1;
+    if(M.cur&&M.pose&&o.sensors){const H=M.cur.hits;if(o.sensors&1)H.push({...carPoint(M.pose,SENSOR_AHEAD_MM,0),k:'c'});if(o.sensors&2)H.push({...carPoint(M.pose,SENSOR_AHEAD_MM,RIGHT_SENSOR_MM),k:'r'});if(H.length>CAP_HITS)H.splice(0,H.length-CAP_HITS);}
+    trim(M);}
   else if(topic==='robot/state'){const s=j.state,f=+j.fault||0;if(s!==M.prevState||f!==M.prevFault){M.states.push({ts,t:tt,state:s,fault:f});if(f){M.events.push({ts,t:tt,tag:'fault',txt:s+' — fault '+faultName(f)});M.faults.push({name:faultName(f)});}else M.events.push({ts,t:tt,tag:'state',txt:s});M.prevState=s;M.prevFault=f;trim(M);}M.finalState={state:s,fault:f};}
   else if(topic==='robot/event/command'){M.events.push({ts,t:tt,tag:'cmd',txt:'Command '+j.cmd+(j.ok?' ✓':' ✗')});if(j.cmd==='start')M.runs++;trim(M);}
-  else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});trim(M);}
+  else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});if(j.run==='BEGIN'){const pl=M.pose?{pl:M.pose.pl,pr:M.pose.pr}:null;startPath(M,ts,'Run '+(M.paths.length+1)+' · '+shortTime(ts));if(pl){M.pose.pl=pl.pl;M.pose.pr=pl.pr;}}trim(M);}
   else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+j.command});trim(M);}
-  else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm → '+j.action+(d===0?' (false)':'')});trim(M);}
+  else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0,a=+j.angle_deg||90;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm at '+a+'°'+(+j.clear_l_mm?', left clear '+j.clear_l_mm+' mm':'')+(+j.clear_r_mm?', right clear '+j.clear_r_mm+' mm':'')+' → '+j.action+(d===0?' (no reading)':'')});
+    const sc={ts,t:tt,dist:d,angle:a,width:+j.width_mm||0,cl:+j.clear_l_mm||0,cr:+j.clear_r_mm||0,action:j.action,run:M.cur?M.cur.label:''};
+    if(M.cur&&M.pose){const s=carPoint(M.pose,US_AHEAD_MM,0),h2=(M.pose.h+(90-a))*Math.PI/180;sc.sx=s.x;sc.sy=s.y;sc.h=M.pose.h;if(d>0){sc.ox=s.x+d*Math.sin(h2);sc.oy=s.y+d*Math.cos(h2);}M.cur.scans.push(sc);}
+    M.scans.push(sc);trim(M);}
   else if(topic==='robot/telemetry/terrain'){if(j.max_hump_dmm!=null)M.maxHump=Math.max(M.maxHump,+j.max_hump_dmm||0);if(j.tilt_mg!=null)M.tilt=+j.tilt_mg;trim(M);}
-  else if(topic==='robot/event/calibration'){M.events.push({ts,t:tt,tag:'state',txt:'Calibration '+j.result+' — centre thr '+j.centre_thr+' ('+j.centre_low+'-'+j.centre_high+'), right thr '+j.right_thr+' ('+j.right_low+'-'+j.right_high+'), barcode thr '+j.barcode_thr+(+j.barcode_learned?' learned':' fallback')+' ('+j.barcode_low+'-'+j.barcode_high+'), B4 floor '+j.b4_floor_mg+' mg ('+j.b4_samples+' samples), swept '+j.sweep_deg+'° ('+(+j.first_right?'right':'left')+' first), sensors '+(+j.overlap===-256?'overlap not measured':(+j.overlap<0?'gap '+(-j.overlap)+' samples':'overlap '+j.overlap+' samples'))});trim(M);}
+  else if(topic==='robot/event/calibration'){if(j.result==='OK')M.cal={c:+j.centre_thr,r:+j.right_thr};M.events.push({ts,t:tt,tag:'state',txt:'Calibration '+j.result+' — centre thr '+j.centre_thr+' ('+j.centre_low+'-'+j.centre_high+'), right thr '+j.right_thr+' ('+j.right_low+'-'+j.right_high+'), barcode thr '+j.barcode_thr+(+j.barcode_learned?' learned':' fallback')+' ('+j.barcode_low+'-'+j.barcode_high+'), B4 floor '+j.b4_floor_mg+' mg ('+j.b4_samples+' samples), swept '+j.sweep_deg+'° ('+(+j.first_right?'right':'left')+' first), sensors '+(+j.overlap===-256?'overlap not measured':(+j.overlap<0?'gap '+(-j.overlap)+' samples':'overlap '+j.overlap+' samples'))});trim(M);}
   else if(topic==='robot/event/hump'){M.humps++;M.events.push({ts,t:tt,tag:'hump',txt:'Hump — peak '+(+j.peak_dmm||0)+' dmm (max '+(+j.max_dmm||0)+')'});trim(M);}
 }
 function trim(M){if(M.motion.length>CAP_PTS)M.motion.splice(0,M.motion.length-CAP_PTS);if(M.line.length>CAP_PTS)M.line.splice(0,M.line.length-CAP_PTS);if(M.events.length>CAP_EV)M.events.splice(0,M.events.length-CAP_EV);}
@@ -298,45 +379,193 @@ function render(M,live){
   if(live&&nearBottom)tl.scrollTop=tl.scrollHeight;
 
   document.getElementById('foot').textContent=`${M.motion.length} motion · ${M.line.length} line · ${M.states.length} state changes · ${M.events.length} events.`;
+
+  renderLineViz(M);renderScanViz(M);renderWheels(M);updateRunSel(M);drawMap(M);
+}
+
+/* ---------- live sensor panels ---------- */
+function adcRow(name,val,thr,black){
+  const v=val==null?null:Math.max(0,Math.min(4095,val));
+  const fill=v==null?0:(100*v/4095);
+  return `<div class="vrow"><div class="nm">${name}</div><div class="vtrack"><div class="fill" style="width:${fill}%;background:${black?'var(--fg)':'var(--muted)'};opacity:${black?1:.45}"></div>`+
+    (thr?`<div class="thr" style="left:${100*Math.min(thr,4095)/4095}%" title="threshold ${thr}"></div>`:'')+
+    `</div><div class="num">${v==null?'—':v}${thr?' / '+thr:''}</div></div>`;
+}
+function renderLineViz(M){
+  const L=M.lastLine,el=document.getElementById('lineViz');
+  if(!L){el.innerHTML='<div class="cap">No line data yet.</div>';return;}
+  const cB=!!(L.sensors&1),rB=!!(L.sensors&2),fg=css('--fg'),mu=css('--muted'),bd=css('--border'),s2=css('--surface-2');
+  // Tape position under the nose: where Buddy 3 says the line is.
+  const tapeX={LEFT:70,CENTRE:150,RIGHT:195,JUNCTION:172}[L.pos];
+  const tapeW=L.pos==='JUNCTION'?80:22;
+  const tape=tapeX==null?`<text x="150" y="40" text-anchor="middle" font-size="13" font-weight="600" fill="${css('--bad')}">line LOST</text>`
+    :`<rect x="${tapeX-tapeW/2}" y="10" width="${tapeW}" height="120" rx="3" fill="${fg}" opacity=".18"/>`;
+  const sensor=(x,on,lab)=>`<circle cx="${x}" cy="62" r="13" fill="${on?fg:s2}" stroke="${on?fg:mu}" stroke-width="2"/><text x="${x}" y="94" text-anchor="middle" font-size="11" fill="${mu}">${lab}</text>`;
+  el.innerHTML=`<svg viewBox="0 0 300 135" role="img" aria-label="line sensors">
+    ${tape}
+    <path d="M70 135 L70 40 Q70 22 90 22 L230 22 Q250 22 250 40 L250 135" fill="none" stroke="${bd}" stroke-width="2"/>
+    <text x="150" y="128" text-anchor="middle" font-size="11" fill="${mu}">front of car ↑</text>
+    ${sensor(150,cB,'centre')}${sensor(195,rB,'right')}
+  </svg>`+
+  adcRow('Centre',L.c,M.cal&&M.cal.c,cB)+adcRow('Right',L.r,M.cal&&M.cal.r,rB)+
+  `<div class="vline"><span class="pill ${L.pos==='LOST'?'bad':L.pos==='CENTRE'?'ok':'warn'}">${esc(L.pos||'—')}</span><span class="pill">err ${L.err}</span>${M.cal?'':'<span class="pill">no calibration yet</span>'}</div>`;
+}
+
+let scanSel=null;   // index into model.scans; null = follow the latest
+function renderScanViz(M){
+  const el=document.getElementById('scanViz'),n=M.scans.length;
+  document.getElementById('scanPrev').disabled=n<2||scanSel===0;
+  document.getElementById('scanNext').disabled=n<2||scanSel==null;
+  if(!n){el.innerHTML='<div class="cap">No scans yet. One appears when the car stops for an obstacle.</div>';document.getElementById('scanIdx').textContent='no scans';return;}
+  const i=scanSel==null?n-1:Math.min(scanSel,n-1),S=M.scans[i];
+  document.getElementById('scanIdx').textContent=`scan ${i+1} of ${n} · ${shortTime(S.ts)}`;
+  const fg=css('--fg'),mu=css('--muted'),bd=css('--border'),ok=css('--ok'),bad=css('--bad');
+  const W=300,H=190,ox=150,oy=176;
+  const far=Math.max(500,S.dist*1.25,Math.min(S.cl,1500),Math.min(S.cr,1500));
+  const k=150/far;                       // px per mm
+  const pt=(deg,mm)=>{const a=deg*Math.PI/180,r=Math.min(mm,far)*k;return[ox+r*Math.cos(a),oy-r*Math.sin(a)];};
+  let g='';
+  for(const mm of [250,500,1000,1500]){if(mm>far)break;const r=mm*k;g+=`<path d="M${ox-r} ${oy} A${r} ${r} 0 0 1 ${ox+r} ${oy}" fill="none" stroke="${bd}" stroke-width="1"/><text x="${ox+r+2}" y="${oy-2}" font-size="9" fill="${mu}">${mm}</text>`;}
+  for(const deg of [60,75,90,105,120]){const[x,y]=pt(deg,far);g+=`<line x1="${ox}" y1="${oy}" x2="${x}" y2="${y}" stroke="${bd}" stroke-dasharray="3 3"/><text x="${x}" y="${y-4}" text-anchor="middle" font-size="9" fill="${mu}">${deg}°</text>`;}
+  const clear=(deg,mm,lab)=>{if(!mm){const[x,y]=pt(deg,far*.7);return `<text x="${x}" y="${y}" text-anchor="middle" font-size="10" fill="${mu}">${lab} ?</text>`;}const[x,y]=pt(deg,mm);return `<line x1="${ox}" y1="${oy}" x2="${x}" y2="${y}" stroke="${ok}" stroke-width="3" stroke-linecap="round"/><text x="${x}" y="${y-6}" text-anchor="middle" font-size="10" font-weight="600" fill="${ok}">${mm>far?'>':''}${Math.round(Math.min(mm,far))}</text>`;};
+  g+=clear(120,S.cl,'left')+clear(60,S.cr,'right');
+  if(S.dist>0){const[x,y]=pt(S.angle,S.dist);g+=`<line x1="${ox}" y1="${oy}" x2="${x}" y2="${y}" stroke="${bad}" stroke-width="2"/><circle cx="${x}" cy="${y}" r="6" fill="${bad}"/><text x="${x}" y="${y-10}" text-anchor="middle" font-size="11" font-weight="700" fill="${bad}">${S.dist} mm</text>`;}
+  g+=`<rect x="${ox-14}" y="${oy-6}" width="28" height="12" rx="3" fill="${fg}"/>`;
+  const act=S.action||'—',actCls=act==='REVERSE_RETRY'||act==='STOP'?'warn':'ok';
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="ultrasonic scan">${g}</svg>
+    <div class="vline"><span class="pill ${actCls}">${esc(act)}</span><span class="pill">closest ${S.dist?S.dist+' mm @ '+S.angle+'°':'none'}</span><span class="pill">width ${S.width>=1023?'≥1023':S.width} mm</span></div>`;
+  document.getElementById('scanCap').textContent='Servo sweep 60°–120° (90° = straight ahead, above 90° = left). Red = closest point, green = side proven clear (length = distance seen), ? = not proven. The car sends this summary, not every angle.';
+}
+
+function renderWheels(M){
+  const o=M.lastMotion,el=document.getElementById('wheelViz');
+  if(!o){el.innerHTML='<div class="cap">No motion data yet.</div>';return;}
+  const span=Math.max(200,Math.abs(o.l),Math.abs(o.r),Math.abs(o.tl),Math.abs(o.tr));
+  const row=(nm,v,t,col)=>{const pc=x=>50+50*x/span;const a=Math.min(pc(0),pc(v)),b=Math.max(pc(0),pc(v));
+    return `<div class="vrow"><div class="nm">${nm}</div><div class="vtrack"><div class="fill" style="position:absolute;left:${a}%;width:${b-a}%;background:${col}"></div><div class="tgt" style="left:${pc(t)}%" title="target ${t}"></div><div class="tgt" style="left:50%;opacity:.2"></div></div><div class="num">${v} / ${t}</div></div>`;};
+  const turn=o.tl===-o.tr&&o.tl!==0?(o.tl>0?'pivot right':'pivot left'):(o.tl===0&&o.tr===0?'stopped':(o.tl>o.tr+5?'curving right':o.tr>o.tl+5?'curving left':'straight'));
+  el.innerHTML=row('Left',o.l,o.tl,css('--left'))+row('Right',o.r,o.tr,css('--right'))+
+    `<div class="vline"><span class="pill">${turn}</span><span class="pill">dist ${o.dist} mm</span></div>
+     <div class="cap" style="margin-top:8px">mm/s, centre = 0, backwards to the left.</div>`;
+}
+
+/* ---------- path map ---------- */
+let mapSel='latest';
+function updateRunSel(M){
+  const sel=document.getElementById('runSel');
+  if(sel.options.length!==M.paths.length+1){
+    sel.innerHTML='<option value="latest">Latest run</option>'+M.paths.map((p,i)=>`<option value="${i}">${esc(p.label)}</option>`).join('');
+    sel.value=(mapSel!=='latest'&&+mapSel<M.paths.length)?mapSel:'latest';
+  }
+  else if(sel.value!==mapSel){sel.value=mapSel;}
+}
+function drawMap(M){
+  const cv=document.getElementById('map'),box=cv.parentElement,dpr=window.devicePixelRatio||1;
+  const W=box.clientWidth,H=box.clientHeight;if(!W||!H)return;
+  if(cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);}
+  const g=cv.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+  const mu=css('--muted'),bd=css('--border'),fg=css('--fg');
+  const P=mapSel==='latest'?M.paths[M.paths.length-1]:M.paths[+mapSel];
+  const legend=Object.entries({LINE_FOLLOW:'line follow',LINE_RECOVERY:'line search',OBSTACLE_SCAN:'scan',BYPASS:'bypass',EXECUTE_NAV:'barcode turn',SAFE_STOP:'safe stop'})
+    .map(([s,l])=>`<span><i style="background:${stateCol(s)}"></i>${l}</span>`).join('')+
+    `<span><i class="dot" style="background:${fg}"></i>centre sensor black</span><span><i class="dot" style="background:${css('--right')}"></i>right sensor black</span><span style="color:${css('--bad')}">✕ obstacle</span>`;
+  document.getElementById('mapLegend').innerHTML=legend;
+  if(!P||P.pts.length<2){g.fillStyle=mu;g.font='13px '+css('--font');g.textAlign='center';g.fillText('No path yet. A path starts when a run begins (needs enc_l / enc_r in robot/telemetry/motion).',W/2,H/2);return;}
+  const showHits=document.getElementById('showHits').checked,showScans=document.getElementById('showScans').checked;
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  const grow=(x,y)=>{if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;};
+  P.pts.forEach(p=>grow(p.x,p.y));
+  if(showHits)P.hits.forEach(p=>grow(p.x,p.y));
+  if(showScans)P.scans.forEach(s=>{if(s.ox!=null)grow(s.ox,s.oy);});
+  const pad=36,sx=(W-2*pad)/Math.max(200,x1-x0),sy=(H-2*pad)/Math.max(200,y1-y0),k=Math.min(sx,sy);
+  const cx=(x0+x1)/2,cy=(y0+y1)/2,X=x=>W/2+(x-cx)*k,Y=y=>H/2-(y-cy)*k;
+  // Grid
+  const step=[100,250,500,1000,2000].find(s=>s*k>=40)||5000;
+  g.strokeStyle=bd;g.lineWidth=1;g.beginPath();
+  for(let gx=Math.floor((cx-W/2/k)/step)*step;gx<=cx+W/2/k;gx+=step){g.moveTo(X(gx),0);g.lineTo(X(gx),H);}
+  for(let gy=Math.floor((cy-H/2/k)/step)*step;gy<=cy+H/2/k;gy+=step){g.moveTo(0,Y(gy));g.lineTo(W,Y(gy));}
+  g.stroke();
+  // Line hits
+  if(showHits){const cC=fg,cR=css('--right');g.globalAlpha=.55;for(const h of P.hits){g.fillStyle=h.k==='c'?cC:cR;g.beginPath();g.arc(X(h.x),Y(h.y),2.2,0,7);g.fill();}g.globalAlpha=1;}
+  // Path, coloured by state
+  g.lineWidth=3;g.lineCap='round';g.lineJoin='round';
+  for(let i=1;i<P.pts.length;i++){const a=P.pts[i-1],b=P.pts[i];g.strokeStyle=stateCol(b.s);g.beginPath();g.moveTo(X(a.x),Y(a.y));g.lineTo(X(b.x),Y(b.y));g.stroke();}
+  // Scans
+  if(showScans){g.font='600 11px '+css('--mono');g.textAlign='left';
+    for(const s of P.scans){if(s.ox==null)continue;const bad=css('--bad');g.strokeStyle=bad;g.setLineDash([4,4]);g.lineWidth=1.5;g.beginPath();g.moveTo(X(s.sx),Y(s.sy));g.lineTo(X(s.ox),Y(s.oy));g.stroke();g.setLineDash([]);
+      const ux=X(s.ox),uy=Y(s.oy);g.lineWidth=2.5;g.beginPath();g.moveTo(ux-6,uy-6);g.lineTo(ux+6,uy+6);g.moveTo(ux+6,uy-6);g.lineTo(ux-6,uy+6);g.stroke();
+      g.fillStyle=bad;g.fillText(s.dist+' mm → '+(s.action||''),ux+9,uy-6);}}
+  // Start and end
+  const s0=P.pts[0],e=P.pts[P.pts.length-1],h=(e.h||0)*Math.PI/180;
+  g.strokeStyle=fg;g.lineWidth=2;g.beginPath();g.arc(X(s0.x),Y(s0.y),6,0,7);g.stroke();
+  const ex=X(e.x),ey=Y(e.y),fx=Math.sin(h),fy=-Math.cos(h);
+  g.fillStyle=fg;g.beginPath();g.moveTo(ex+fx*11,ey+fy*11);g.lineTo(ex-fx*6-fy*7,ey-fy*6+fx*7);g.lineTo(ex-fx*6+fy*7,ey-fy*6-fx*7);g.closePath();g.fill();
+  // Scale bar
+  g.strokeStyle=mu;g.fillStyle=mu;g.lineWidth=2;g.beginPath();g.moveTo(14,H-14);g.lineTo(14+step*k,H-14);g.stroke();g.font='11px '+css('--mono');g.textAlign='left';g.fillText(step+' mm',14,H-20);
 }
 
 /* ---------- charts ---------- */
 let CH=null;
+/* Records of the run picked on the path map (all of them before any run),
+ * timed from the start of that run: t restarts at every reboot. */
+function runWindow(M){
+  const i=mapSel==='latest'?M.paths.length-1:+mapSel,P=M.paths[i],N=M.paths[i+1];
+  const inRun=o=>o.t!=null&&(!P||(o.ts>=P.ts&&(!N||o.ts<N.ts)));
+  const mot=M.motion.filter(inRun),ln=M.line.filter(inRun);
+  const ts=[...mot.slice(0,1),...ln.slice(0,1)].map(o=>o.t);
+  const t0=ts.length?Math.min(...ts):(M.t0!=null?M.t0:0);
+  return {mot,ln,sec:o=>Math.round((o.t-t0)/100)/10};
+}
 function makeCharts(M){
-  if(CH){['speed','err','dist'].forEach(k=>{try{CH[k].destroy();}catch(e){}});}
+  if(CH){['speed','err','dist','adc'].forEach(k=>{try{CH[k].destroy();}catch(e){}});}
   const grid=css('--border'),tick=css('--muted'),fg=css('--fg');
-  const t0=M.t0!=null?M.t0:0,sec=o=>Math.round((o.t-t0)/100)/10;
   const base={responsive:true,maintainAspectRatio:false,parsing:false,animation:false,interaction:{mode:'index',intersect:false},
     scales:{x:{type:'linear',title:{display:true,text:'seconds',color:tick,font:{size:10}},grid:{color:grid},ticks:{color:tick,font:{size:10},maxTicksLimit:8}},
       y:{grid:{color:grid},ticks:{color:tick,font:{size:10}}}},
     plugins:{legend:{display:false},tooltip:{titleColor:fg,bodyColor:fg,backgroundColor:css('--surface'),borderColor:grid,borderWidth:1,padding:9,callbacks:{title:it=>it.length?('t = '+it[0].parsed.x+' s'):''}}}};
-  const mot=M.motion.filter(o=>o.t!=null),ln=M.line.filter(o=>o.t!=null);
+  const {mot,ln,sec}=runWindow(M);
   CH={
     speed:new Chart(document.getElementById('cSpeed'),{type:'line',data:{datasets:[
       {label:'Left',data:mot.map(o=>({x:sec(o),y:o.l})),borderColor:css('--left'),borderWidth:2,pointRadius:0,tension:.2},
-      {label:'Right',data:mot.map(o=>({x:sec(o),y:o.r})),borderColor:css('--right'),borderWidth:2,pointRadius:0,tension:.2}]},
+      {label:'Right',data:mot.map(o=>({x:sec(o),y:o.r})),borderColor:css('--right'),borderWidth:2,pointRadius:0,tension:.2},
+      {label:'Left target',data:mot.map(o=>({x:sec(o),y:o.tl})),borderColor:css('--left'),borderWidth:1.2,borderDash:[5,4],pointRadius:0,stepped:true},
+      {label:'Right target',data:mot.map(o=>({x:sec(o),y:o.tr})),borderColor:css('--right'),borderWidth:1.2,borderDash:[5,4],pointRadius:0,stepped:true}]},
       options:{...base,plugins:{...base.plugins,legend:{display:true,position:'top',align:'end',labels:{color:fg,boxWidth:12,boxHeight:3,font:{size:11.5}}}},
         scales:{...base.scales,y:{...base.scales.y,title:{display:true,text:'mm/s',color:tick,font:{size:10}}}}}}),
     err:new Chart(document.getElementById('cErr'),{type:'line',data:{datasets:[{label:'Error',data:ln.map(o=>({x:sec(o),y:o.err})),borderColor:css('--err'),borderWidth:2,pointRadius:0,stepped:true}]},
       options:{...base,scales:{...base.scales,y:{...base.scales.y,suggestedMin:-135,suggestedMax:135,title:{display:true,text:'err',color:tick,font:{size:10}}}}}}),
     dist:new Chart(document.getElementById('cDist'),{type:'line',data:{datasets:[{label:'Distance',data:mot.map(o=>({x:sec(o),y:o.dist})),borderColor:css('--dist'),backgroundColor:css('--dist')+'33',borderWidth:2,pointRadius:0,fill:true,tension:.2}]},
       options:{...base,scales:{...base.scales,y:{...base.scales.y,title:{display:true,text:'mm',color:tick,font:{size:10}}}}}}),
+    adc:new Chart(document.getElementById('cAdc'),{type:'line',data:{datasets:adcSets(M,ln,sec)},
+      options:{...base,plugins:{...base.plugins,legend:{display:true,position:'top',align:'end',labels:{color:fg,boxWidth:12,boxHeight:3,font:{size:11.5}}}},
+        scales:{...base.scales,y:{...base.scales.y,min:0,suggestedMax:4095,title:{display:true,text:'ADC',color:tick,font:{size:10}}}}}}),
   };
+}
+function adcSets(M,lnAll,sec){
+  const ln=lnAll.filter(o=>o.c!=null);
+  const sets=[{label:'Centre',data:ln.map(o=>({x:sec(o),y:o.c})),borderColor:css('--dist'),borderWidth:1.6,pointRadius:0},
+              {label:'Right',data:ln.map(o=>({x:sec(o),y:o.r})),borderColor:css('--right'),borderWidth:1.6,pointRadius:0}];
+  if(M.cal&&ln.length){const a=sec(ln[0]),b=sec(ln[ln.length-1]);
+    sets.push({label:'Centre threshold',data:[{x:a,y:M.cal.c},{x:b,y:M.cal.c}],borderColor:css('--dist'),borderWidth:1,borderDash:[6,4],pointRadius:0});
+    sets.push({label:'Right threshold',data:[{x:a,y:M.cal.r},{x:b,y:M.cal.r}],borderColor:css('--right'),borderWidth:1,borderDash:[6,4],pointRadius:0});}
+  return sets;
 }
 function updateCharts(M){
   if(!CH)return;
-  const t0=M.t0!=null?M.t0:0,sec=o=>Math.round((o.t-t0)/100)/10;
-  const mot=M.motion.filter(o=>o.t!=null),ln=M.line.filter(o=>o.t!=null);
+  const {mot,ln,sec}=runWindow(M);
   CH.speed.data.datasets[0].data=mot.map(o=>({x:sec(o),y:o.l}));
   CH.speed.data.datasets[1].data=mot.map(o=>({x:sec(o),y:o.r}));
+  CH.speed.data.datasets[2].data=mot.map(o=>({x:sec(o),y:o.tl}));
+  CH.speed.data.datasets[3].data=mot.map(o=>({x:sec(o),y:o.tr}));
   CH.err.data.datasets[0].data=ln.map(o=>({x:sec(o),y:o.err}));
   CH.dist.data.datasets[0].data=mot.map(o=>({x:sec(o),y:o.dist}));
-  CH.speed.update('none');CH.err.update('none');CH.dist.update('none');
+  CH.adc.data.datasets=adcSets(M,ln,sec);
+  CH.speed.update('none');CH.err.update('none');CH.dist.update('none');CH.adc.update('none');
 }
 
 /* ---------- state ---------- */
 let model=newModel(), mode='idle', client=null, dirty=true;
-function setModel(M,live){model=M;mode=live?'live':'file';makeCharts(model);render(model,live);}
+function setModel(M,live){model=M;mode=live?'live':'file';scanSel=null;mapSel='latest';makeCharts(model);render(model,live);}
 
 /* ---------- MQTT live ---------- */
 function setStatus(cls,txt){const s=document.getElementById('status');s.className='status '+cls;document.getElementById('statusText').textContent=txt;}
@@ -349,7 +578,7 @@ function connect(){
   setStatus('connecting','connecting…');document.getElementById('connectBtn').textContent='Disconnect';
   try{client=mqtt.connect(url,{connectTimeout:4000,reconnectPeriod:2000});}catch(e){setStatus('err','bad URL');return;}
   client.on('connect',()=>{setStatus('on','connected · '+host);setCmdEnabled(true);client.subscribe('robot/#');
-    model=newModel();mode='live';makeCharts(model);render(model,true);});
+    model=newModel();model.allowJoin=true;mode='live';makeCharts(model);render(model,true);});
   client.on('reconnect',()=>setStatus('connecting','reconnecting…'));
   client.on('error',()=>setStatus('err','connection error'));
   client.on('close',()=>{setStatus('err','disconnected');setCmdEnabled(false);});
@@ -368,6 +597,13 @@ document.getElementById('connectBtn').onclick=()=>{if(client){disconnect();}else
 document.getElementById('cmdStart').onclick=()=>pub('start');
 document.getElementById('cmdStop').onclick=()=>pub('stop');
 document.getElementById('cmdRestart').onclick=()=>{pub('stop');setTimeout(()=>pub('start'),600);};
+
+/* scan browser, path map controls */
+document.getElementById('scanPrev').onclick=()=>{const n=model.scans.length;if(!n)return;scanSel=Math.max(0,(scanSel==null?n-1:scanSel)-1);renderScanViz(model);};
+document.getElementById('scanNext').onclick=()=>{const n=model.scans.length;if(scanSel==null)return;scanSel=(scanSel+1>=n-1)?null:scanSel+1;renderScanViz(model);};
+document.getElementById('runSel').onchange=e=>{mapSel=e.target.value;makeCharts(model);drawMap(model);};
+['showHits','showScans'].forEach(id=>document.getElementById(id).onchange=()=>drawMap(model));
+window.addEventListener('resize',()=>drawMap(model));
 
 /* live refresh loop */
 setInterval(()=>{if(mode==='live'&&dirty){dirty=false;render(model,true);updateCharts(model);}},350);
