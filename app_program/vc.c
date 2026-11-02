@@ -96,6 +96,15 @@ time_in_state (vc_t const * p_vc, uint32_t now_ms)
 }
 
 
+/* True within VC_POST_BYPASS_MS of the end of a bypass (wrap-safe). */
+static bool
+is_just_after_bypass (vc_t const * p_vc, uint32_t now_ms)
+{
+    return p_vc->b_after_bypass
+           && ((now_ms - p_vc->bypass_end_ms) < VC_POST_BYPASS_MS);
+}
+
+
 /* Change state and apply the new state's entry actions. */
 static void
 enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
@@ -349,12 +358,17 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         enter_state(p_vc, VC_STATE_REACQUIRE_LINE, p_in->now_ms, p_out);
 
         /* Stop and pivot towards where the line was last seen (left if
-         * not known), looking for it with the line sensors. */
+         * not known), looking for it with the line sensors.  Just after a
+         * bypass, less far (see VC_SEARCH_LIMIT_POST_BYPASS_MDEG). */
         p_vc->search             = VC_SEARCH_FIRST;
         p_vc->search_dir         = (0 < p_vc->last_side) ? 1 : -1;
         p_vc->search_origin_mdeg = p_in->cal_angle_mdeg;
+        p_vc->search_limit_mdeg  = is_just_after_bypass(p_vc, p_in->now_ms)
+                                   ? VC_SEARCH_LIMIT_POST_BYPASS_MDEG
+                                   : VC_SEARCH_LIMIT_MDEG;
         p_out->motion            = VC_MOTION_PIVOT;
-        p_out->pivot_mdeg        = p_vc->search_dir * VC_SEARCH_LIMIT_MDEG;
+        p_out->pivot_mdeg        = p_vc->search_dir
+                                   * p_vc->search_limit_mdeg;
     }
     else
     {
@@ -720,6 +734,8 @@ step_bypass (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     else if (p_in->b_obstacle_passed)
     {
         enter_state(p_vc, VC_STATE_REACQUIRE_LINE, p_in->now_ms, p_out);
+        p_vc->b_after_bypass = true;
+        p_vc->bypass_end_ms  = p_in->now_ms;
     }
     else
     {
@@ -751,7 +767,7 @@ step_search_pivot (vc_t * p_vc, vc_inputs_t const * p_in,
             p_vc->search_dir  = -p_vc->search_dir;
             p_out->motion     = VC_MOTION_PIVOT;
             p_out->pivot_mdeg = p_vc->search_dir
-                                * (turned_mdeg + VC_SEARCH_LIMIT_MDEG);
+                                * (turned_mdeg + p_vc->search_limit_mdeg);
         }
         else
         {
@@ -922,6 +938,9 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->search            = VC_SEARCH_NONE;
         p_vc->search_dir        = 0;
         p_vc->search_origin_mdeg = 0;
+        p_vc->search_limit_mdeg = VC_SEARCH_LIMIT_MDEG;
+        p_vc->b_after_bypass    = false;
+        p_vc->bypass_end_ms     = now_ms;
         p_vc->cal_phase         = VC_CAL_STILL;
         p_vc->cal_phase_ms      = now_ms;
         p_vc->cal_out_mdeg      = 0;

@@ -52,6 +52,11 @@ uint32_t obstacle_task_get_word(void);
  * obstacle is still there. */
 void obstacle_task_ack_ahead(void);
 
+/* The car has moved somewhere new (a bypass ended): MONITOR forgets its
+ * earlier readings, so its lost-obstacle rule cannot fire on something it
+ * saw before.  Takes effect within one reading. */
+void obstacle_task_forget(void);
+
 /* Ask for a scan (the car must be stopped).  Takes about 2 s; then
  * OBSTACLE_EVT_SCAN_DONE is set and the result can be read. */
 void obstacle_task_request_scan(void);

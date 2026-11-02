@@ -554,6 +554,9 @@ test_scan_decisions(void)
     uint32_t const hyst[5]     = { 900U, 640U, 450U, 470U, 900U };
     uint32_t const leftish[5]  = { 900U, 900U, 460U, 450U, 900U };
 
+    /* These scenes test the side chosen from the scan itself. */
+    obstacle_scan_set_prefer(OBSTACLE_PREFER_SCAN);
+
     /* 20 cm box straight ahead at 45 cm, background at 90 cm. */
     make_scan(&res, centred, 0U);
     check_u32("centred action", res.profile.action,
@@ -663,6 +666,8 @@ test_scan_real(void)
         { 0U, 0U, 1887U, 1880U, 1857U, 1869U, 1861U, 1861U, 1857U, 1861U,
           1865U, 1879U, 1888U };
 
+    obstacle_scan_set_prefer(OBSTACLE_PREFER_SCAN);
+
     /* Right side proven (background at 60-65), left unproven. */
     make_fine_scan(&res, centred);
     check_u32("real centred", res.profile.action,
@@ -686,6 +691,35 @@ test_scan_real(void)
     check_u32("real nothing", res.profile.action,
               OBSTACLE_ACTION_CONTINUE);
     check_u32("real nothing closest", res.profile.distance_mm, 1857U);
+
+    /* Side fixed for the course (track 2026-11-02): left whatever the
+     * scan's proven side, but the other decisions are unchanged. */
+    obstacle_scan_set_prefer(OBSTACLE_PREFER_LEFT);
+    make_fine_scan(&res, centred);
+    check_u32("prefer left centred", res.profile.action,
+              OBSTACLE_ACTION_TURN_LEFT);
+    make_fine_scan(&res, box_left);
+    check_u32("prefer left box left", res.profile.action,
+              OBSTACLE_ACTION_TURN_LEFT);
+    make_fine_scan(&res, box_right);
+    check_u32("prefer left box right", res.profile.action,
+              OBSTACLE_ACTION_TURN_LEFT);
+    make_fine_scan(&res, nothing);
+    check_u32("prefer left nothing", res.profile.action,
+              OBSTACLE_ACTION_CONTINUE);
+
+    obstacle_scan_set_prefer(OBSTACLE_PREFER_RIGHT);
+    make_fine_scan(&res, box_right);
+    check_u32("prefer right box right", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+
+    /* An unknown value is ignored. */
+    obstacle_scan_set_prefer(7U);
+    make_fine_scan(&res, centred);
+    check_u32("prefer ignored", res.profile.action,
+              OBSTACLE_ACTION_TURN_RIGHT);
+
+    obstacle_scan_set_prefer(OBSTACLE_BYPASS_PREFER);
 }
 
 /*!
@@ -934,24 +968,31 @@ car_box_gap(double ax, double ay, double heading,
 }
 
 /*!
- * @brief Drive the whole "^" path and return the smallest gap to a box.
+ * @brief Drive the whole out-along-back path and return the smallest gap
+ *        to a box.
  *
  * Left is +y.  A right bypass is the mirror image, so the box offset is
- * given towards the bypass side.
+ * given towards the bypass side.  After the parallel leg the car turns
+ * return_deg towards the line (vc_task.c) and drives until it is 50 mm
+ * past the line.
  *
  * @param[in] p_plan      Plan to follow.
  * @param[in] near_mm     Box near face, from the rear axle at the stop.
  * @param[in] offset_mm   Box centre shifted towards the bypass side.
+ * @param[in] return_deg  Turn towards the line after the parallel leg.
  *
  * @return Smallest gap (mm) seen anywhere along the path.
  */
 static double
 simulate_bypass(obstacle_bypass_plan_t const * p_plan,
-                double near_mm, double offset_mm)
+                double near_mm, double offset_mm, double return_deg)
 {
+    double const deg = 3.14159265358979 / 180.0;
     double const w = (double)OBSTACLE_MAX_WIDTH_MM;
-    double const th = (double)p_plan->turn_deg * 3.14159265358979 / 180.0;
-    double const leg = (double)p_plan->leg_mm;
+    double const th = (double)p_plan->turn_deg * deg;
+    double const back = return_deg * deg;
+    double const out = (double)p_plan->out_mm;
+    double const along = (double)p_plan->along_mm;
     double const x0 = near_mm;
     double const x1 = near_mm + w;
     double const y0 = offset_mm - (w / 2.0);
@@ -963,30 +1004,44 @@ simulate_bypass(obstacle_bypass_plan_t const * p_plan,
     double       ax;
     double       ay;
 
-    for (a = 0.0; a <= th; a += 0.005)                  /* First pivot. */
+    for (a = 0.0; a <= th; a += 0.005)                  /* Turn out.    */
     {
         gap = car_box_gap(0.0, 0.0, a, x0, x1, y0, y1);
         best = (gap < best) ? gap : best;
     }
 
-    for (s = 0.0; s <= leg; s += 2.0)                   /* Leg 1.       */
+    for (s = 0.0; s <= out; s += 2.0)                   /* Out.         */
     {
         gap = car_box_gap(s * cos(th), s * sin(th), th, x0, x1, y0, y1);
         best = (gap < best) ? gap : best;
     }
 
-    ax = leg * cos(th);
-    ay = leg * sin(th);
+    ax = out * cos(th);
+    ay = out * sin(th);
 
-    for (a = th; a >= -th; a -= 0.005)                  /* Apex pivot.  */
+    for (a = th; a >= 0.0; a -= 0.005)                  /* To parallel. */
     {
         gap = car_box_gap(ax, ay, a, x0, x1, y0, y1);
         best = (gap < best) ? gap : best;
     }
 
-    for (s = 0.0; s <= leg; s += 2.0)                   /* Leg 2.       */
+    for (s = 0.0; s <= along; s += 2.0)                 /* Along.       */
     {
-        gap = car_box_gap(ax + (s * cos(th)), ay - (s * sin(th)), -th,
+        gap = car_box_gap(ax + s, ay, 0.0, x0, x1, y0, y1);
+        best = (gap < best) ? gap : best;
+    }
+
+    ax += along;
+
+    for (a = 0.0; a >= -back; a -= 0.005)               /* To the line. */
+    {
+        gap = car_box_gap(ax, ay, a, x0, x1, y0, y1);
+        best = (gap < best) ? gap : best;
+    }
+
+    for (s = 0.0; (ay - (s * sin(back))) >= -50.0; s += 2.0)  /* Back. */
+    {
+        gap = car_box_gap(ax + (s * cos(back)), ay - (s * sin(back)), -back,
                           x0, x1, y0, y1);
         best = (gap < best) ? gap : best;
     }
@@ -998,19 +1053,30 @@ static void
 test_plan_bypass(void)
 {
     static uint32_t const distances[] = { 250U, 350U, 441U, 600U };
+    /* Return angles; 0 = the plan's back_deg (the path vc_task.c
+     * drives).  The others cover a slipped turn. */
+    static double const   returns[] = { 0.0, 30.0, 45.0, 60.0 };
     obstacle_bypass_plan_t plan;
     uint32_t               idx;
+    uint32_t               ret;
     double                 near_mm;
     double                 gap;
+    double                 back_deg;
 
-    /* Worked example: box at 441 mm. */
+    /* Worked example: box at 441 mm.  Out 512 mm to 200 mm aside (the
+     * diagonal ends at x = 471), along to x = 935 (506 + 200 + 30 + 99
+     * + 100 extra), back at 2 x 23 = 46 deg: 200 / sin 46 = 279 mm. */
     check_u32("plan ok", obstacle_plan_bypass(441U,
               OBSTACLE_ACTION_TURN_LEFT, &plan), true);
     check_u32("plan side", plan.side, OBSTACLE_ACTION_TURN_LEFT);
     check_u32("plan turn", plan.turn_deg, 23U);
-    check_u32("plan leg", plan.leg_mm, 908U);
-    check_u32("plan apex", plan.apex_mm, 354U);
-    check_u32("plan check", plan.check_mm, 1008U);
+    check_u32("plan out", plan.out_mm, 512U);
+    check_u32("plan aside", plan.side_mm, 200U);
+    check_u32("plan along", plan.along_mm,
+              364U + OBSTACLE_PLAN_ALONG_EXTRA_MM);
+    check_u32("plan back deg", plan.back_deg, 46U);
+    check_u32("plan back", plan.back_mm, 279U);
+    check_u32("plan check", plan.check_mm, 612U);
 
     check_u32("plan not a turn", obstacle_plan_bypass(441U,
               OBSTACLE_ACTION_REVERSE_RETRY, &plan), false);
@@ -1026,17 +1092,59 @@ test_plan_bypass(void)
                   OBSTACLE_ACTION_TURN_RIGHT, &plan), true);
         near_mm = (double)(distances[idx] + OBSTACLE_AXLE_TO_SENSOR_MM);
 
-        /* As planned: the margin is kept everywhere. */
-        gap = simulate_bypass(&plan, near_mm, 0.0);
-        check_u32("plan sim margin",
-                  (gap >= ((double)OBSTACLE_PLAN_MARGIN_MM - 1.0)) ? 1U : 0U,
-                  1U);
+        for (ret = 0U; ret < 4U; ret++)
+        {
+            back_deg = (0.0 == returns[ret]) ?
+                       (double)plan.back_deg : returns[ret];
 
-        /* Sensor 15 mm long and the box 20 mm towards the bypass side:
-         * still no contact. */
-        gap = simulate_bypass(&plan, near_mm - 15.0, 20.0);
-        check_u32("plan sim worst case", (gap > 0.0) ? 1U : 0U, 1U);
+            /* As planned: the margin is kept everywhere. */
+            gap = simulate_bypass(&plan, near_mm, 0.0, back_deg);
+            check_u32("plan sim margin",
+                      (gap >= ((double)OBSTACLE_PLAN_MARGIN_MM - 1.0)) ?
+                      1U : 0U, 1U);
+
+            /* Sensor 15 mm long and the box 20 mm towards the bypass
+             * side: still no contact. */
+            gap = simulate_bypass(&plan, near_mm - 15.0, 20.0, back_deg);
+            check_u32("plan sim worst case", (gap > 0.0) ? 1U : 0U, 1U);
+        }
     }
+}
+
+static void
+test_plan_line_watch(void)
+{
+    obstacle_line_watch_t watch;
+    int32_t const         held = OBSTACLE_PLAN_LINE_HELD_MM;
+
+    obstacle_plan_line_reset(&watch);
+    check_u32("line white", obstacle_plan_line_watch(&watch, false, 200),
+              OBSTACLE_LINE_NONE);
+
+    /* Track test 2026-11-02: black for about 25 mm, crossed almost
+     * square.  Never handed over; reported as a crossing. */
+    check_u32("line cross start", obstacle_plan_line_watch(&watch, true, 290),
+              OBSTACLE_LINE_NONE);
+    check_u32("line cross mid", obstacle_plan_line_watch(&watch, true, 315),
+              OBSTACLE_LINE_NONE);
+    check_u32("line crossed", obstacle_plan_line_watch(&watch, false, 320),
+              OBSTACLE_LINE_CROSSED);
+    check_u32("line after cross", obstacle_plan_line_watch(&watch, false, 330),
+              OBSTACLE_LINE_NONE);
+
+    /* Running along a line: held once black lasts HELD_MM from where it
+     * began (not from the previous crossing). */
+    check_u32("line along start", obstacle_plan_line_watch(&watch, true, 340),
+              OBSTACLE_LINE_NONE);
+    check_u32("line along short", obstacle_plan_line_watch(&watch, true,
+              340 + held - 1), OBSTACLE_LINE_NONE);
+    check_u32("line held", obstacle_plan_line_watch(&watch, true, 340 + held),
+              OBSTACLE_LINE_HELD);
+
+    /* A reset forgets black from an earlier leg. */
+    obstacle_plan_line_reset(&watch);
+    check_u32("line reset white", obstacle_plan_line_watch(&watch, false, 0),
+              OBSTACLE_LINE_NONE);
 }
 
 int
@@ -1059,6 +1167,7 @@ main(void)
     test_scan_real();
     test_scan_path();
     test_plan_bypass();
+    test_plan_line_watch();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);
