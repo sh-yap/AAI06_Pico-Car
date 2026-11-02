@@ -18,8 +18,21 @@
 #include <tm/tmonitor.h>
 
 
-/* Polling period - may need adjusting once barcode timing is tested. */
+/* Polling period.  A cyclic handler sets it, because a 10 ms delay runs
+ * 20 ms on the 10 ms kernel tick (a relative wait adds one extra tick). */
 #define BUDDY3_TASK_PERIOD_MS    10U
+
+static ID g_buddy3_tid;
+
+
+/* Wakes the Buddy 3 task once per period. */
+static void
+buddy3_tick_handler(void *p_exinf)
+{
+    (void)p_exinf;
+
+    (void)tk_wup_tsk(g_buddy3_tid);
+}
 
 /*
  * Fallback threshold for the dedicated barcode IR sensor (GP28 / ADC2),
@@ -238,6 +251,9 @@ void buddy3_task(INT stacd, void *exinf)
     buddy3_status_t status;
     buddy3_packed_t packed;
 
+    T_CCYC ccyc = {0};
+    bool b_tick_ok;
+
 #if BUDDY3_DEBUG
     uint32_t debug_cycle = 0U;
     bool barcode_was_ready;
@@ -249,6 +265,18 @@ void buddy3_task(INT stacd, void *exinf)
     ir_sensor_init();
     line_follow_init();
     barcode_init();
+
+    g_buddy3_tid = tk_get_tid();
+    ccyc.cycatr  = TA_HLNG | TA_STA | TA_PHS;
+    ccyc.cychdr  = (FP)buddy3_tick_handler;
+    ccyc.cyctim  = BUDDY3_TASK_PERIOD_MS;
+    ccyc.cycphs  = BUDDY3_TASK_PERIOD_MS;
+    b_tick_ok    = (0 < tk_cre_cyc(&ccyc));
+
+    if (false == b_tick_ok)
+    {
+        tm_printf((UB*)"buddy3: cyclic handler failed, using tk_dly_tsk (20 ms loop)\n");
+    }
 
     while (1)
     {
@@ -325,6 +353,13 @@ void buddy3_task(INT stacd, void *exinf)
         (void)tk_snd_mbf(buddy3_output_mbfid, &packed,
                           (INT)sizeof(packed), TMO_POL);
 
-        tk_dly_tsk(BUDDY3_TASK_PERIOD_MS);
+        if (b_tick_ok)
+        {
+            (void)tk_slp_tsk(TMO_FEVR);
+        }
+        else
+        {
+            tk_dly_tsk(BUDDY3_TASK_PERIOD_MS);
+        }
     }
 }
