@@ -301,6 +301,227 @@ test_calibration_not_measured(void)
 
 
 /*
+ * Learned levels and gaps from raw readings. A sweep of 120 samples built
+ * from per-sensor levels, then run until the calibration stops.
+ */
+#define RAW_SAMPLES    120U
+#define RAW_LOW        170U
+
+static line_cal_state_t
+run_raw(uint16_t const *p_centre, uint16_t const *p_right)
+{
+    uint32_t i;
+    ir_readings_t r;
+
+    line_follow_init();
+    line_cal_begin();
+    line_cal_sweep();
+
+    for (i = 0U; (i < RAW_SAMPLES) && (line_cal_state() == LINE_CAL_RUNNING);
+         i++)
+    {
+        r = (ir_readings_t){ p_centre[i], p_right[i], WHITE };
+        line_cal_update(r);
+    }
+
+    return line_cal_state();
+}
+
+
+static void
+raw_fill(uint16_t *p_levels, uint16_t value)
+{
+    uint32_t i;
+
+    for (i = 0U; i < RAW_SAMPLES; i++)
+    {
+        p_levels[i] = value;
+    }
+}
+
+
+/* A short centre peak: the smoothed value reaches only 60 percent of it. */
+static void
+test_calibration_raw_peak(void)
+{
+    line_cal_result_t result;
+    uint16_t centre[RAW_SAMPLES];
+    uint16_t right[RAW_SAMPLES];
+    uint32_t i;
+
+    raw_fill(centre, RAW_LOW);
+    raw_fill(right, RAW_LOW);
+
+    for (i = 30U; i < 33U; i++)
+    {
+        centre[i] = 2000U;
+    }
+
+    for (i = 28U; i < 45U; i++)
+    {
+        right[i] = 3000U;
+    }
+
+    check("raw peak: OK", run_raw(centre, right) == LINE_CAL_OK);
+    line_cal_get_result(&result);
+    check("raw peak: high within 20 of the 3-sample peak (old code ~1230)",
+          (result.centre.high >= 1980U) && (result.centre.high <= 2020U));
+    check("raw peak: low is the white level",
+          result.centre.low == RAW_LOW);
+    check("raw peak: threshold is the midpoint",
+          result.centre.threshold == (RAW_LOW + ((2000U - RAW_LOW) / 2U)));
+    check("raw peak: full black below the high",
+          (result.centre_full_black < 2000U)
+          && (result.centre_full_black > result.centre.threshold));
+
+    /* One spike far above the line does not set the high. */
+    raw_fill(centre, RAW_LOW);
+
+    for (i = 30U; i < 34U; i++)
+    {
+        centre[i] = 1500U;
+    }
+
+    centre[10] = 3000U;
+    check("spike: OK", run_raw(centre, right) == LINE_CAL_OK);
+    line_cal_get_result(&result);
+    check("spike: high is the line, not the spike",
+          (result.centre.high >= 1480U) && (result.centre.high <= 1520U));
+
+    /* A single stray low sample does not set the low either. */
+    raw_fill(centre, 500U);
+    centre[3] = 100U;
+
+    for (i = 30U; i < 34U; i++)
+    {
+        centre[i] = 2000U;
+    }
+
+    check("low spike: OK", run_raw(centre, right) == LINE_CAL_OK);
+    line_cal_get_result(&result);
+    check("low spike: low is the white level",
+          result.centre.low == 500U);
+}
+
+
+/*
+ * Centre black 30..49, right black 56..75, a gap of 6 samples (50..55)
+ * with both below their thresholds. BLIND_NONE means no sample of the gap
+ * is made blind.
+ */
+#define BLIND_NONE    0U
+
+static line_cal_state_t
+run_gap_levels(uint16_t centre_gap, uint16_t right_gap, uint32_t blind_at,
+               line_cal_result_t *p_result)
+{
+    uint16_t centre[RAW_SAMPLES];
+    uint16_t right[RAW_SAMPLES];
+    line_cal_state_t state;
+    uint32_t i;
+
+    raw_fill(centre, RAW_LOW);
+    raw_fill(right, RAW_LOW);
+
+    for (i = 30U; i < 50U; i++)
+    {
+        centre[i] = 3800U;
+    }
+
+    for (i = 56U; i < 76U; i++)
+    {
+        right[i] = 3800U;
+    }
+
+    for (i = 50U; i < 56U; i++)
+    {
+        centre[i] = centre_gap;
+        right[i] = right_gap;
+    }
+
+    if (blind_at != BLIND_NONE)
+    {
+        centre[blind_at] = RAW_LOW;
+        right[blind_at] = RAW_LOW;
+    }
+
+    state = run_raw(centre, right);
+    line_cal_get_result(p_result);
+    return state;
+}
+
+
+static void
+test_calibration_blind_gap(void)
+{
+    line_cal_result_t result;
+    line_cal_state_t state;
+
+    /* The right sensor stays at 1000, well above span/32 (about 113),
+     * through every gap sample but still below its threshold (1985). */
+    state = run_gap_levels(RAW_LOW, 1000U, BLIND_NONE, &result);
+    check("partial gap, right: OK", state == LINE_CAL_OK);
+    check("partial gap, right: measured as -6", result.gap_measured
+                                                && (result.gap_overlap == -6));
+
+    /* Only the centre stays above its margin: the right is at its low, so
+     * the side is not known and the gap is blind (centre does not count). */
+    state = run_gap_levels(1000U, RAW_LOW, BLIND_NONE, &result);
+    check("partial gap, centre only: FAIL_GAP", state == LINE_CAL_FAIL_GAP);
+    check("partial gap, centre only: measured as -6", result.gap_measured
+                                                      && (result.gap_overlap == -6));
+
+    /* A rise just inside the margin (span/32 = 113) is still blind. */
+    state = run_gap_levels(RAW_LOW + 100U, RAW_LOW + 100U, BLIND_NONE,
+                           &result);
+    check("gap inside the margin: FAIL_GAP", state == LINE_CAL_FAIL_GAP);
+
+    /* Both at their lows for the whole gap. */
+    state = run_gap_levels(RAW_LOW, RAW_LOW, BLIND_NONE, &result);
+    check("blind gap: FAIL_GAP", state == LINE_CAL_FAIL_GAP);
+    check("blind gap: measured as -6", result.gap_measured
+                                       && (result.gap_overlap == -6));
+
+    /* One blind sample (right at its low) among partial ones is enough. */
+    state = run_gap_levels(1000U, 1000U, 53U, &result);
+    check("one blind sample in the gap: FAIL_GAP",
+          state == LINE_CAL_FAIL_GAP);
+}
+
+
+/* Stretches that overlap, and a sweep with no contrast, behave as before. */
+static void
+test_calibration_overlap_and_contrast(void)
+{
+    uint16_t centre[RAW_SAMPLES];
+    uint16_t right[RAW_SAMPLES];
+    uint32_t i;
+
+    raw_fill(centre, RAW_LOW);
+    raw_fill(right, RAW_LOW);
+
+    for (i = 30U; i < 50U; i++)
+    {
+        centre[i] = 3800U;
+    }
+
+    for (i = 40U; i < 60U; i++)
+    {
+        right[i] = 3800U;
+    }
+
+    check("overlap: OK", run_raw(centre, right) == LINE_CAL_OK);
+
+    raw_fill(centre, RAW_LOW);
+    raw_fill(right, RAW_LOW);
+    (void)run_raw(centre, right);
+    check("no contrast: still running", line_cal_state() == LINE_CAL_RUNNING);
+    check("no contrast: FAIL_CONTRAST",
+          line_cal_end() == LINE_CAL_FAIL_CONTRAST);
+}
+
+
+/*
  * Levels come from moving samples only. The centre sensor rests on the
  * line while the car is still and reads 3800, higher than the 2300 it
  * reads moving. The threshold must be the midpoint of the moving
@@ -374,10 +595,11 @@ test_calibration_moving_only(void)
 
 
 /*
- * Both sensors white: the side comes from the readings as fractions of the
- * ranges the START sweep learned, not just the last-seen side. The sweep
- * uses the 2026-11-02 bracket-height levels: centre 171 to 1270, right
- * 240 to 2981, black zones overlapping by 10 samples.
+ * Both sensors white: if the right sensor is above its learned low by more
+ * than span/32 the side is RIGHT, otherwise the last-seen side stays. The
+ * centre reading decides nothing. The sweep uses the 2026-11-02
+ * bracket-height levels: centre 171 to 1270, right 240 to 2981, black zones
+ * overlapping by 10 samples.
  */
 #define GAP_CENTRE_LOW     171U
 #define GAP_CENTRE_HIGH    1270U
@@ -385,7 +607,8 @@ test_calibration_moving_only(void)
 #define GAP_RIGHT_HIGH     2981U
 
 static void
-learn_bracket_height(void)
+learn_levels(uint16_t centre_low, uint16_t centre_high, uint16_t right_low,
+             uint16_t right_high)
 {
     ir_readings_t r;
     uint32_t i;
@@ -396,11 +619,19 @@ learn_bracket_height(void)
 
     for (i = 0U; (i < 200U) && (line_cal_state() == LINE_CAL_RUNNING); i++)
     {
-        r.right = in_stretch(i, 30U, 60U) ? GAP_RIGHT_HIGH : GAP_RIGHT_LOW;
-        r.centre = in_stretch(i, 50U, 80U) ? GAP_CENTRE_HIGH : GAP_CENTRE_LOW;
+        r.right = in_stretch(i, 30U, 60U) ? right_high : right_low;
+        r.centre = in_stretch(i, 50U, 80U) ? centre_high : centre_low;
         r.barcode = WHITE;
         line_cal_update(r);
     }
+}
+
+
+static void
+learn_bracket_height(void)
+{
+    learn_levels(GAP_CENTRE_LOW, GAP_CENTRE_HIGH, GAP_RIGHT_LOW,
+                 GAP_RIGHT_HIGH);
 }
 
 
@@ -432,15 +663,27 @@ test_both_white_side(void)
     check("gap side: right slightly higher: RIGHT", state == LINE_RIGHT);
     check("gap side: right slightly higher: error > 0", err > 0);
 
-    /* Right only, then the line moves back left with the centre part on. */
+    /* Right only, then the centre part on with the right at its low: the
+     * right was last seen, and the centre alone does not change that. */
     (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
     check("gap side: right only reads RIGHT", state == LINE_RIGHT);
     err = step(392U, 209U, &state);
-    check("gap side: centre at a quarter: LEFT", state == LINE_LEFT);
-    check("gap side: centre at a quarter: error < 0", err < 0);
+    check("gap side: centre at a quarter after right: RIGHT",
+          state == LINE_RIGHT);
+    check("gap side: centre at a quarter after right: error > 0", err > 0);
     err = step(445U, 201U, &state);
-    check("gap side: centre at a third: LEFT", state == LINE_LEFT);
-    check("gap side: centre at a third: error < 0", err < 0);
+    check("gap side: centre at a third after right: RIGHT",
+          state == LINE_RIGHT);
+    check("gap side: centre at a third after right: error > 0", err > 0);
+
+    /* Centre only, then centre part on with the right at its low: the
+     * centre alone does not choose, so last-seen (centre, reported LEFT)
+     * stays. */
+    (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
+    err = step(445U, 201U, &state);
+    check("gap side: centre partial after centre: LEFT",
+          state == LINE_LEFT);
+    check("gap side: centre partial after centre: error < 0", err < 0);
 
     /* Both at their learned lows: neither leads, keep the last-seen side. */
     (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
@@ -464,6 +707,9 @@ test_both_white_side(void)
     (void)step(100U, 100U, &state);
     check("gap side: below both lows: CENTRE side kept (LEFT)",
           state == LINE_LEFT);
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    (void)step(100U, 100U, &state);
+    check("gap side: below both lows: RIGHT side kept", state == LINE_RIGHT);
 
     /* LOST still comes after 30 white samples. */
     (void)step(GAP_CENTRE_HIGH, GAP_RIGHT_LOW, &state);
@@ -474,6 +720,19 @@ test_both_white_side(void)
 
     check("gap side: 30 white samples: LOST", state == LINE_LOST);
     check("gap side: LOST: error 0", err == 0);
+
+    /* Ranges from the car_cal1 hardware log: the right sensor sees part of
+     * the line while both are below threshold. */
+    learn_levels(182U, 2318U, 224U, 3572U);
+    check("gap side: car_cal1 calibration OK", line_cal_state() == LINE_CAL_OK);
+    (void)step(2318U, 224U, &state);
+    err = step(1176U, 717U, &state);
+    check("gap side: car_cal1 (1176, 717): RIGHT",
+          (state == LINE_RIGHT) && (err > 0));
+    (void)step(2318U, 224U, &state);
+    err = step(965U, 1045U, &state);
+    check("gap side: car_cal1 (965, 1045): RIGHT",
+          (state == LINE_RIGHT) && (err > 0));
 }
 
 
@@ -518,6 +777,9 @@ main(void)
     test_lost();
     test_calibration_gap();
     test_calibration_not_measured();
+    test_calibration_raw_peak();
+    test_calibration_blind_gap();
+    test_calibration_overlap_and_contrast();
     test_calibration_moving_only();
     test_both_white_side();
     test_both_white_side_uncalibrated();

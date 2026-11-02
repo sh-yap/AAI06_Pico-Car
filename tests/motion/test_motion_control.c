@@ -16,6 +16,173 @@ static void expect(int condition, const char *name)
     printf("PASS: %s\n", name);
 }
 
+/* Synthetic plant for the response learner.  The speed measured at cycle k
+   follows the power applied at cycle k - 2 (history[0] is cycle k - 1). */
+typedef struct {
+    float turn_gain;
+    float fwd_gain;
+    float fwd_offset;
+    float noise_mm_s;
+    uint32_t seed;
+    int32_t history_left[3];
+    int32_t history_right[3];
+} learn_plant_t;
+
+static float learn_noise(learn_plant_t *plant)
+{
+    plant->seed = (plant->seed * 1664525U) + 1013904223U;
+    return (((float)((plant->seed >> 16) & 0xFFFFU) / 32768.0f) - 1.0f)
+           * plant->noise_mm_s;
+}
+
+/* One cycle: measure speeds from the old power, observe, choose new power
+   (mean 150 to 250 permille, difference swinging about 100), record. */
+static void learn_cycle(motion_learn_t *learn, learn_plant_t *plant,
+                        unsigned cycle, motion_learn_mode_t mode)
+{
+    float mean_old = (float)(plant->history_left[1] + plant->history_right[1])
+                     * 0.5f;
+    float diff_old = (float)(plant->history_left[1] - plant->history_right[1]);
+    float mean_speed = (plant->fwd_gain * mean_old) + plant->fwd_offset;
+    float diff_speed = plant->turn_gain * diff_old;
+    int32_t mean_new = 150 + (int32_t)((cycle * 37U) % 100U);
+    int32_t diff_new = (int32_t)((cycle * 53U) % 120U) - 60;
+    int32_t left_new = mean_new + (diff_new / 2);
+    int32_t right_new = mean_new - (diff_new / 2);
+
+    motion_learn_observe(learn,
+                         (int32_t)(mean_speed + (diff_speed * 0.5f)
+                                   + learn_noise(plant)),
+                         (int32_t)(mean_speed - (diff_speed * 0.5f)
+                                   + learn_noise(plant)));
+    motion_learn_record(learn, mode, left_new, right_new);
+    plant->history_left[2] = plant->history_left[1];
+    plant->history_right[2] = plant->history_right[1];
+    plant->history_left[1] = plant->history_left[0];
+    plant->history_right[1] = plant->history_right[0];
+    plant->history_left[0] = left_new;
+    plant->history_right[0] = right_new;
+}
+
+static float learn_abs(float value)
+{
+    return value < 0.0f ? -value : value;
+}
+
+static void learner_checks(void)
+{
+    motion_learn_t learn;
+    motion_learn_t before;
+    learn_plant_t plant = { 0.3f, 0.55f, -30.0f, 2.0f, 1U, {0}, {0} };
+    unsigned cycle;
+    float left_ff = 111.0f;
+    float right_ff = 222.0f;
+
+    /* Convergence from a 0.22 seed to a plant of 0.3, delay 2 cycles. */
+    motion_learn_init(&learn, 2U, 2.0f, -280.0f, 0.22f);
+    expect(learn_abs(learn.turn_gain - 0.22f) < 1e-6f &&
+           learn.turn_source == MOTION_LEARN_SRC_DEFAULT,
+           "learner starts at its seed");
+    for (cycle = 0U; cycle < 150U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_DRIVE);
+    }
+    expect(learn_abs(learn.turn_gain - 0.3f) < 0.02f &&
+           learn.turn_source == MOTION_LEARN_SRC_DRIVING,
+           "learner converges near 0.3 from a 0.22 seed, delay 2 cycles");
+    expect(learn_abs(learn.fwd_gain - 0.55f) < 0.06f &&
+           learn_abs(learn.fwd_offset + 30.0f) < 12.0f &&
+           learn.b_fwd_from_driving,
+           "forward gain and offset converge");
+
+    /* The plant changes to 0.2 mid-run. */
+    plant.turn_gain = 0.2f;
+    for (cycle = 150U; cycle < 200U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_DRIVE);
+    }
+    expect(learn_abs(learn.turn_gain - 0.2f) < 0.03f,
+           "learner follows a change to 0.2 within 50 cycles");
+
+    /* Cycles that are not informative change nothing, even with a very
+       different plant (saturated, braked, stopped or boosted cycles are
+       recorded as MOTION_LEARN_NONE by Motion). */
+    learn_cycle(&learn, &plant, 200U, MOTION_LEARN_NONE);   /* Last pair. */
+    before = learn;
+    plant.turn_gain = 1.0f;
+    for (cycle = 201U; cycle < 260U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_NONE);
+    }
+    expect(learn.turn_gain == before.turn_gain &&
+           learn.turn_fit.n == before.turn_fit.n &&
+           learn.fwd_fit.sxy == before.fwd_fit.sxy,
+           "saturated and braked cycles are ignored");
+    /* After a gap the first delay + 1 informative cycles are not used, so
+       power from before the gap never meets a speed after it. */
+    for (cycle = 260U; cycle < 263U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_DRIVE);
+    }
+    expect(learn.turn_fit.n == before.turn_fit.n,
+           "no pair crosses an uninformative cycle");
+
+    /* An estimate outside the bounds falls back to the seed. */
+    motion_learn_init(&learn, 2U, 2.0f, -280.0f, 0.22f);
+    plant = (learn_plant_t){ 5.0f, 0.55f, -30.0f, 0.0f, 1U, {0}, {0} };
+    for (cycle = 0U; cycle < 150U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_DRIVE);
+    }
+    expect(learn_abs(learn.turn_gain - 0.22f) < 1e-6f &&
+           learn.turn_source == MOTION_LEARN_SRC_DEFAULT,
+           "turning gain above the bound falls back to the seed");
+    motion_learn_init(&learn, 2U, 2.0f, -280.0f, 0.22f);
+    plant = (learn_plant_t){ 0.3f, 0.5f, -400.0f, 0.0f, 1U, {0}, {0} };
+    for (cycle = 0U; cycle < 150U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_DRIVE);
+    }
+    expect(learn_abs(learn.fwd_gain - 2.0f) < 1e-6f &&
+           learn_abs(learn.fwd_offset + 280.0f) < 1e-3f &&
+           !learn.b_fwd_from_driving,
+           "forward line that starts moving above 200 permille falls back");
+
+    /* Pivots seed the turning gain, then driving data takes over. */
+    motion_learn_init(&learn, 2U, 2.0f, -280.0f, 2.0f);
+    plant = (learn_plant_t){ 0.245f, 0.55f, -30.0f, 0.0f, 1U, {0}, {0} };
+    for (cycle = 0U; cycle < 30U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_PIVOT);
+    }
+    expect(learn_abs(learn.turn_gain - 0.245f) < 0.005f &&
+           learn.turn_source == MOTION_LEARN_SRC_PIVOT,
+           "pivots seed the turning gain");
+    plant.turn_gain = 0.3f;
+    for (cycle = 30U; cycle < 180U; cycle++) {
+        learn_cycle(&learn, &plant, cycle, MOTION_LEARN_DRIVE);
+    }
+    expect(learn_abs(learn.turn_gain - 0.3f) < 0.02f &&
+           learn.turn_source == MOTION_LEARN_SRC_DRIVING &&
+           learn_abs(learn.turn_seed - 0.245f) < 0.005f,
+           "driving data takes over from the pivot seed");
+
+    /* Feedforward: mean 102 mm/s and difference 96 mm/s. */
+    learn.fwd_gain = 0.55f;
+    learn.fwd_offset = -30.0f;
+    learn.turn_gain = 0.3f;
+    motion_learn_feedforward(&learn, 150.0f, 54.0f, 80.0f, 900.0f,
+                             &left_ff, &right_ff);
+    expect(learn_abs(left_ff - (((102.0f + 30.0f) / 0.55f) + (48.0f / 0.3f)))
+               < 0.01f &&
+           learn_abs(right_ff - (((102.0f + 30.0f) / 0.55f) - (48.0f / 0.3f)))
+               < 0.01f,
+           "feedforward from mean and difference");
+    left_ff = 111.0f;
+    right_ff = 222.0f;
+    motion_learn_feedforward(&learn, 100.0f, -150.0f, 80.0f, 900.0f,
+                             &left_ff, &right_ff);
+    expect(left_ff == 111.0f && right_ff == 222.0f,
+           "feedforward leaves a reversing mean to the old line");
+    motion_learn_feedforward(&learn, 200.0f, 0.0f, 80.0f, 900.0f,
+                             &left_ff, &right_ff);
+    expect(left_ff > 80.0f && right_ff == 222.0f,
+           "feedforward leaves a stopped wheel to the old line");
+}
+
 int main(void)
 {
     motion_command_t command = {0};
@@ -151,6 +318,27 @@ int main(void)
            "feedforward saturation");
     expect(motion_feedforward_permille(-10000, 57U, 318U, 225U, 100U, 50U, 80U, 900U) == -900,
            "reverse feedforward saturation");
+    {
+        float sl;
+        float sr;
+
+        motion_slew_split(80.0f, 300.0f, 300.0f, 80.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 300.0f && sr == 80.0f, "split steer flip in one cycle");
+        motion_slew_split(0.0f, 0.0f, 300.0f, 300.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 25.0f && sr == 25.0f, "split forward step stays slewed");
+        motion_slew_split(100.0f, 100.0f, 300.0f, 200.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 175.0f && sr == 75.0f, "split mixed change limits forward part");
+        motion_slew_split(100.0f, 100.0f, 300.0f, -100.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 300.0f && sr == 75.0f, "split sign change still limited");
+        motion_slew_split(100.0f, 100.0f, -100.0f, 300.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 75.0f && sr == 300.0f, "split sign change on left still limited");
+        motion_slew_split(850.0f, 850.0f, 900.0f, 500.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 900.0f && sr == 625.0f, "split output clamped to maximum");
+        motion_slew_split(0.0f, 100.0f, 0.0f, 300.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 0.0f && sr == 225.0f, "split braked left wheel stays at zero");
+        motion_slew_split(100.0f, 0.0f, 300.0f, 0.0f, 25.0f, 900.0f, &sl, &sr);
+        expect(sl == 225.0f && sr == 0.0f, "split braked right wheel stays at zero");
+    }
     expect(motion_slew_target(0.0f, 100.0f, 30.0f) == 30.0f, "slew limit");
     pid_result = motion_pid_step(&pid, 100.0f, 0.0f, 0.02f);
     expect(pid_result.output <= 100.0f && pid_result.output > 0.0f, "PID saturation");
@@ -257,6 +445,7 @@ int main(void)
     stage4_flags = motion_stage4_assess(&stage4_case, 0, 0, 0U, true);
     expect(motion_stage4_result_code(stage4_flags) == 2U,
            "Stage 4 abort result priority");
+    learner_checks();
     puts("All Buddy 2 host tests passed.");
     return EXIT_SUCCESS;
 }

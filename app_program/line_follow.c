@@ -179,58 +179,60 @@ static bool line_detect_junction(bool centre_black, bool right_black)
 
 
 /*
- * Which side does the line favour while both sensors read white? Each
- * reading is taken as a fraction of its own learned span (low to high of
- * the last good START sweep), and the sensor further up its own range
- * wins if it leads by more than a thirty-second of the span. The compare
- * is cross-multiplied, so no division is needed:
+ * A reading as a distance above the sensor's learned low, held within the
+ * learned span (so a reading below the low is zero, not a wrap).
+ */
+static uint32_t cal_level(uint16_t reading, uint16_t low, uint32_t span)
+{
+    uint32_t level = 0U;
+
+    if (reading > low)
+    {
+        level = (uint32_t)(reading - low);
+        level = (level < span) ? level : span;
+    }
+
+    return level;
+}
+
+
+/*
+ * Is the right sensor above its learned low by more than a thirty-second of
+ * its own span? Then it sees some of the line. The ranges are those just
+ * learned, so the caller decides whether they can be trusted.
+ */
+static bool right_sees_line(uint16_t reading)
+{
+    uint32_t span_r = (uint32_t)cal_result.right.high - cal_result.right.low;
+    bool sees = false;
+
+    if (span_r > 0U)
+    {
+        sees = ((cal_level(reading, cal_result.right.low, span_r)
+                 * LINE_CAL_REST_DIV) > span_r);
+    }
+
+    return sees;
+}
+
+
+/*
+ * Which side does the line favour while both sensors read white? The right
+ * sensor sits right of the centre sensor, so if it sees any of the line the
+ * line lies between the two or beyond the right sensor, and RIGHT is always
+ * right. A partial centre reading alone is ambiguous (just left or just
+ * right of centre), so it decides nothing.
  *
- *     level_r / span_r - level_c / span_c > 1 / LINE_CAL_REST_DIV
- *
- * Returns LINE_RIGHT or LINE_LEFT when one side leads, else the unchanged
+ * Returns LINE_RIGHT if the right sensor sees the line, else the unchanged
  * last-seen side. Without a good sweep it always returns last-seen.
  */
 static line_state_t both_white_side(ir_readings_t readings)
 {
-    uint32_t span_c = (uint32_t)cal_result.centre.high - cal_result.centre.low;
-    uint32_t span_r = (uint32_t)cal_result.right.high - cal_result.right.low;
-    uint32_t level_c = 0U;
-    uint32_t level_r = 0U;
-    int32_t lead;
-    int32_t margin;
     line_state_t side = last_seen;
 
-    if ((cal_state == LINE_CAL_OK) && (span_c > 0U) && (span_r > 0U))
+    if ((cal_state == LINE_CAL_OK) && right_sees_line(readings.right))
     {
-        if (readings.centre > cal_result.centre.low)
-        {
-            level_c = (uint32_t)(readings.centre - cal_result.centre.low);
-            level_c = (level_c < span_c) ? level_c : span_c;
-        }
-
-        if (readings.right > cal_result.right.low)
-        {
-            level_r = (uint32_t)(readings.right - cal_result.right.low);
-            level_r = (level_r < span_r) ? level_r : span_r;
-        }
-
-        /* Spans are under 4096, so every product fits in 32 bits. */
-        lead = ((int32_t)(level_r * span_c) - (int32_t)(level_c * span_r))
-               * (int32_t)LINE_CAL_REST_DIV;
-        margin = (int32_t)(span_c * span_r);
-
-        if (lead > margin)
-        {
-            side = LINE_RIGHT;
-        }
-        else if (lead < -margin)
-        {
-            side = LINE_LEFT;
-        }
-        else
-        {
-            /* Neither leads: keep the last-seen side. */
-        }
+        side = LINE_RIGHT;
     }
 
     return side;
@@ -452,6 +454,65 @@ static bool cal_sensor_done(cal_track_t const *p_track)
 }
 
 
+/*
+ * Take a sensor's low and high from the raw readings in the history: the
+ * second-lowest and second-highest, so one stray sample is rejected. The
+ * smoothed track cannot reach the height of a peak only a few samples
+ * long. If the raw range is too narrow to use, the smoothed one stays.
+ */
+static void cal_use_raw_range(cal_track_t *p_track, bool centre)
+{
+    uint32_t count = cal_history_count;
+    uint32_t used = (count < LINE_CAL_HISTORY) ? count : LINE_CAL_HISTORY;
+    uint32_t k;
+    uint16_t value;
+    uint16_t low1 = UINT16_MAX;
+    uint16_t low2 = UINT16_MAX;
+    uint16_t high1 = 0U;
+    uint16_t high2 = 0U;
+
+    for (k = 0U; k < used; k++)
+    {
+        value = centre ? cal_history[k].centre : cal_history[k].right;
+
+        if (value < low1)
+        {
+            low2 = low1;
+            low1 = value;
+        }
+        else if (value < low2)
+        {
+            low2 = value;
+        }
+        else
+        {
+            /* Not among the two lowest. */
+        }
+
+        if (value > high1)
+        {
+            high2 = high1;
+            high1 = value;
+        }
+        else if (value > high2)
+        {
+            high2 = value;
+        }
+        else
+        {
+            /* Not among the two highest. */
+        }
+    }
+
+    if ((used >= 2U) && (high2 > low2)
+        && ((uint32_t)(high2 - low2) >= LINE_CAL_MIN_SPAN))
+    {
+        p_track->low = low2;
+        p_track->high = high2;
+    }
+}
+
+
 /* Threshold = midpoint of the lowest and highest reading. */
 static uint16_t cal_midpoint(cal_track_t const *p_track)
 {
@@ -505,6 +566,33 @@ void line_cal_sweep(void)
 
 
 /*
+ * Is any history sample from index begin up to (not including) end blind?
+ * These samples lie between the two black stretches, so both sensors are
+ * below their thresholds. A sample is blind when the right sensor does not
+ * see the line (see right_sees_line), whatever the centre reads: the same
+ * test both_white_side() needs to tell which side the line left by.
+ */
+static bool cal_gap_blind(uint32_t begin, uint32_t end, uint32_t oldest)
+{
+    uint32_t k;
+    cal_sample_t sample;
+    bool blind = false;
+
+    for (k = begin; k < end; k++)
+    {
+        sample = cal_history[(oldest + k) & LINE_CAL_HISTORY_MASK];
+
+        if (!right_sees_line(sample.right))
+        {
+            blind = true;
+        }
+    }
+
+    return blind;
+}
+
+
+/*
  * Is there a heading where the line lies between the two line sensors with
  * both reading white? In one pass the sensors cross the line in a fixed
  * order, so the line covers both at once exactly when their black
@@ -521,13 +609,16 @@ void line_cal_sweep(void)
  * stretches the envelope towards more overlap, never less, so such data
  * cannot make a gap appear.
  *
+ * A gap only matters if it is blind (see cal_gap_blind). *p_blind is set
+ * when the samples between the stretches include a blind one.
+ *
  * Returns false (not measured) when the data cannot show a gap: a sensor
  * never above its threshold, or a negative overlap while the ring has
  * dropped older samples and a stretch starts at its oldest sample, which
  * could have started earlier and overlapped.
  */
 static bool cal_measure_overlap(uint16_t c_thr, uint16_t r_thr,
-                                int16_t *p_overlap)
+                                int16_t *p_overlap, bool *p_blind)
 {
     uint32_t count = cal_history_count;
     uint32_t used = (count < LINE_CAL_HISTORY) ? count : LINE_CAL_HISTORY;
@@ -542,6 +633,8 @@ static bool cal_measure_overlap(uint16_t c_thr, uint16_t r_thr,
     int32_t first;
     int32_t last;
     bool measured = false;
+
+    *p_blind = false;
 
     for (k = 0U; k < used; k++)
     {
@@ -579,6 +672,12 @@ static bool cal_measure_overlap(uint16_t c_thr, uint16_t r_thr,
         }
 
         *p_overlap = (int16_t)overlap;
+
+        if (measured && (overlap < 0))
+        {
+            *p_blind = cal_gap_blind((uint32_t)last + 1U, (uint32_t)first,
+                                     oldest);
+        }
     }
 
     return measured;
@@ -605,9 +704,17 @@ void line_cal_update(ir_readings_t readings)
 
     if (cal_sensor_done(&cal_centre) && cal_sensor_done(&cal_right))
     {
-        uint16_t new_centre = cal_midpoint(&cal_centre);
-        uint16_t new_right = cal_midpoint(&cal_right);
+        uint16_t new_centre;
+        uint16_t new_right;
         int16_t overlap = 0;
+        bool blind = false;
+
+        /* The sweep ends on the smoothed values; the levels are the raw
+         * ones. */
+        cal_use_raw_range(&cal_centre, true);
+        cal_use_raw_range(&cal_right, false);
+        new_centre = cal_midpoint(&cal_centre);
+        new_right = cal_midpoint(&cal_right);
 
         cal_record_ranges();
         cal_result.centre.threshold = new_centre;
@@ -620,7 +727,7 @@ void line_cal_update(ir_readings_t readings)
                                                      / LINE_CAL_FULL_BLACK_DIV));
 
         cal_result.gap_measured = cal_measure_overlap(new_centre, new_right,
-                                                      &overlap);
+                                                      &overlap, &blind);
         cal_result.gap_overlap = overlap;
 
         /* The barcode sensor may sit beside the line and never see black.
@@ -630,9 +737,9 @@ void line_cal_update(ir_readings_t readings)
             cal_result.barcode.threshold = cal_midpoint(&cal_barcode);
         }
 
-        if (cal_result.gap_measured && (overlap < 0))
+        if (cal_result.gap_measured && (overlap < 0) && blind)
         {
-            /* A white gap between the sensors: the thresholds stay as
+            /* A blind gap between the sensors: the thresholds stay as
              * they were, the result keeps what was measured. */
             cal_state = LINE_CAL_FAIL_GAP;
             return;

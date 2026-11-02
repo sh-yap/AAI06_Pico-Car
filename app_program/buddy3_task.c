@@ -17,6 +17,15 @@
 
 #include <tm/tmonitor.h>
 
+#ifndef VC_RECORDER
+#define VC_RECORDER              (0)    /* Test-only recorder, run_rec.h.   */
+#endif
+
+#if VC_RECORDER
+#include <stdint.h>
+#include "run_rec.h"
+#endif
+
 
 /* Polling period.  A cyclic handler sets it, because a 10 ms delay runs
  * 20 ms on the 10 ms kernel tick (a relative wait adds one extra tick). */
@@ -259,6 +268,11 @@ void buddy3_task(INT stacd, void *exinf)
     bool barcode_was_ready;
 #endif
 
+#if VC_RECORDER
+    bc_rec_record_t bc_rec;
+    uint8_t bc_edges;
+#endif
+
     (void)stacd;
     (void)exinf;
 
@@ -320,7 +334,37 @@ void buddy3_task(INT stacd, void *exinf)
          * Both safely return NONE if nothing is ready.
          */
         barcode_code = barcode_get_code();
+
+#if VC_RECORDER
+        /* Sample the capture state before barcode_get_command() clears it.
+         * Nothing here changes what Buddy 3 sends. */
+        bc_edges           = barcode_get_edge_count();
+        bc_rec.ms          = timestamp_ms;
+        bc_rec.enc         = encoder_position;
+        bc_rec.barcode_adc = readings.barcode;
+        bc_rec.threshold   = buddy3_barcode_threshold();
+        bc_rec.centre_adc  = readings.centre;
+        bc_rec.right_adc   = readings.right;
+        bc_rec.edges       = bc_edges;
+        bc_rec.code        = (uint8_t)barcode_code;
+        bc_rec.ch          = (uint8_t)barcode_get_char();
+        bc_rec.flags       = barcode_is_black ? BC_REC_FLAG_BLACK : 0U;
+
+        if (barcode_available())
+        {
+            bc_rec.flags |= BC_REC_FLAG_DONE;
+        }
+        else if (0U != bc_edges)
+        {
+            bc_rec.flags |= BC_REC_FLAG_ACTIVE;
+        }
+#endif
+
         nav_command = barcode_get_command();
+
+#if VC_RECORDER
+        bc_rec_add(&bc_rec);
+#endif
 
 #if BUDDY3_DEBUG
         if (barcode_was_ready)
