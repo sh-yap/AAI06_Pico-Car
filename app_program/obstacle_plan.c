@@ -175,4 +175,43 @@ obstacle_plan_bypass(uint32_t                 distance_mm,
     return (b_found);
 }
 
+void
+obstacle_plan_line_reset (obstacle_line_watch_t * p_watch)
+{
+    p_watch->b_black  = false;
+    p_watch->start_mm = 0;
+}
+
+obstacle_line_seen_t
+obstacle_plan_line_watch (obstacle_line_watch_t * p_watch, bool b_black,
+                          int32_t leg_mm)
+{
+    obstacle_line_seen_t seen = OBSTACLE_LINE_NONE;
+
+    if (b_black)
+    {
+        if (!p_watch->b_black)
+        {
+            p_watch->b_black  = true;
+            p_watch->start_mm = leg_mm;
+        }
+
+        if ((leg_mm - p_watch->start_mm) >= OBSTACLE_PLAN_LINE_HELD_MM)
+        {
+            seen = OBSTACLE_LINE_HELD;
+        }
+    }
+    else if (p_watch->b_black)
+    {
+        p_watch->b_black = false;
+        seen             = OBSTACLE_LINE_CROSSED;
+    }
+    else
+    {
+        /* White and was white: nothing seen. */
+    }
+
+    return (seen);
+}
+
 /*** end of file ***/

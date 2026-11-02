@@ -216,6 +216,13 @@
  * return took the car too far down the course). */
 #define OBSTACLE_PLAN_BACK_MAX_DEG      (60U)
 
+/* A line seen on the parallel leg is only followed once the line sensors
+ * have stayed black for this far: the car is then running along it.  A
+ * line that goes white sooner was crossed, and the bypass carries on
+ * (track test 2026-11-02: a line crossed almost square was black for
+ * about 25 mm, and handing over there lost it). */
+#define OBSTACLE_PLAN_LINE_HELD_MM      (40)
+
 /* The path check before leg 1 needs this much more than the leg. */
 #define OBSTACLE_PLAN_CHECK_EXTRA_MM    (100U)
 

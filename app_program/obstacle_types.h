@@ -154,6 +154,20 @@ typedef struct
     uint32_t          check_mm;   /* Path check need after the turn.    */
 } obstacle_bypass_plan_t;
 
+/* What the line sensors showed on the parallel leg (obstacle_plan.h). */
+typedef enum
+{
+    OBSTACLE_LINE_NONE = 0,    /* White, or black for less than HELD_MM.  */
+    OBSTACLE_LINE_CROSSED,     /* Black, then white within HELD_MM.       */
+    OBSTACLE_LINE_HELD         /* Black for HELD_MM: running along it.    */
+} obstacle_line_seen_t;
+
+typedef struct
+{
+    bool    b_black;           /* Black at the last call.                 */
+    int32_t start_mm;          /* Leg distance where black began.         */
+} obstacle_line_watch_t;
+
 /* One ultrasonic measurement. */
 typedef struct
 {

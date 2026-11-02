@@ -1111,6 +1111,42 @@ test_plan_bypass(void)
     }
 }
 
+static void
+test_plan_line_watch(void)
+{
+    obstacle_line_watch_t watch;
+    int32_t const         held = OBSTACLE_PLAN_LINE_HELD_MM;
+
+    obstacle_plan_line_reset(&watch);
+    check_u32("line white", obstacle_plan_line_watch(&watch, false, 200),
+              OBSTACLE_LINE_NONE);
+
+    /* Track test 2026-11-02: black for about 25 mm, crossed almost
+     * square.  Never handed over; reported as a crossing. */
+    check_u32("line cross start", obstacle_plan_line_watch(&watch, true, 290),
+              OBSTACLE_LINE_NONE);
+    check_u32("line cross mid", obstacle_plan_line_watch(&watch, true, 315),
+              OBSTACLE_LINE_NONE);
+    check_u32("line crossed", obstacle_plan_line_watch(&watch, false, 320),
+              OBSTACLE_LINE_CROSSED);
+    check_u32("line after cross", obstacle_plan_line_watch(&watch, false, 330),
+              OBSTACLE_LINE_NONE);
+
+    /* Running along a line: held once black lasts HELD_MM from where it
+     * began (not from the previous crossing). */
+    check_u32("line along start", obstacle_plan_line_watch(&watch, true, 340),
+              OBSTACLE_LINE_NONE);
+    check_u32("line along short", obstacle_plan_line_watch(&watch, true,
+              340 + held - 1), OBSTACLE_LINE_NONE);
+    check_u32("line held", obstacle_plan_line_watch(&watch, true, 340 + held),
+              OBSTACLE_LINE_HELD);
+
+    /* A reset forgets black from an earlier leg. */
+    obstacle_plan_line_reset(&watch);
+    check_u32("line reset white", obstacle_plan_line_watch(&watch, false, 0),
+              OBSTACLE_LINE_NONE);
+}
+
 int
 main(void)
 {
@@ -1131,6 +1167,7 @@ main(void)
     test_scan_real();
     test_scan_path();
     test_plan_bypass();
+    test_plan_line_watch();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);
