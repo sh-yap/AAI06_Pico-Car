@@ -9,11 +9,12 @@
  *     Buddy 3's task.  With 0 the line is always "centred" and a run ends
  *     itself after VC_TEST_RUN_MS (bench safety);
  *   - Buddy 5 (obstacle), VC_HAVE_BUDDY5: "obstacle ahead" and sensor
- *     fault from Buddy 5's task; the scan, its recommendation and the "^"
+ *     fault from Buddy 5's task; the scan, its recommendation and the
  *     bypass plan (obstacle_plan.h).  The bypass itself is run here, step
- *     by step, while the VC is in BYPASS: turn, Buddy 5 path check, leg,
- *     turn back steeply, drive towards the line until Buddy 3 sees it;
- *     then "obstacle passed" and line following takes over;
+ *     by step, while the VC is in BYPASS: turn, Buddy 5 path check, out,
+ *     turn parallel, along past the obstacle, back at the same angle until
+ *     Buddy 3 sees the line, onto it, turn straight; then "obstacle
+ *     passed" and line following takes over;
  *   - Buddy 4 (terrain), VC_HAVE_BUDDY4: packed terrain words from Buddy
  *     4's task.  The car slows on a ramp and whenever Buddy 4 is not
  *     ready or silent, and START waits for it.  With 0 the car never
@@ -58,6 +59,7 @@
 #endif
 
 #if VC_HAVE_BUDDY5
+#include "obstacle_config.h"
 #include "obstacle_types.h"
 #include "obstacle_task.h"
 #include "obstacle_plan.h"
@@ -128,24 +130,27 @@
 #define VC_TERRAIN_DRAIN_MAX     (8U)      /* Buddy 4 words read per step. */
 #define VC_TRACE_STEPS           (5U)      /* Run trace every 100 ms.      */
 
-/* Bypass ("^").  Turns are encoder turns at VC_TURN_SPEED_MM_S.  On the
- * old 145 mm Motion track width a 22 deg command turned about 20 deg
- * (2026-11-01); with the 119 mm track this branch uses, re-measure before
- * changing VC_BYPASS_TURN_PCT from 100. */
+/* Bypass.  Turns are encoder turns at VC_TURN_SPEED_MM_S, calibrated by
+ * OBSTACLE_TURN_LEFT_PCT / _RIGHT_PCT (obstacle_config.h). */
 #define VC_BYPASS_SPEED_MM_S     (150)     /* Leg speed.                   */
-#define VC_BYPASS_TURN_PCT       (100)     /* Commanded / planned angle.   */
 #define VC_BYPASS_GUARD_MM       (150U)    /* Nearer on a leg = stop.      */
 #define VC_BYPASS_TURN_MS        (3000U)   /* Motion timeout per turn.     */
-/* Return to the line at a steep angle and stop on it, instead of a
- * mirror-image leg: floor tests 2026-11-01 (b key, no line) ended 15 cm
- * left and 19 cm right of the line, the apex turn varying about +-10 deg
- * from slip, and once the car never came back across the line.  At the
- * apex the car turns turn_deg + RETURN_DEG, so it heads for the line at
- * about RETURN_DEG (20-40 deg with that slip), then drives until Buddy 3
- * sees the line: watched from apex_mm on, at most RETURN_MAX_PCT % of
- * apex_mm.  Line following then lines the car up. */
-#define VC_BYPASS_RETURN_DEG     (30U)
-#define VC_BYPASS_RETURN_MAX_PCT (300U)
+#define VC_BYPASS_QUIET_MS       (800U)    /* Stale "ahead" ignored after
+                                              the bypass (unless nearer
+                                              than VC_BYPASS_GUARD_MM).    */
+/* Path --/--\-- : out to side_mm, parallel past the obstacle, back at
+ * back_deg (twice the way out, from the plan), then turn straight and hand
+ * over to line following.  The parallel leg keeps the car as near the
+ * line as the obstacle allows: the course has walls, and the earlier "^"
+ * went about 36 cm out and left the course.  A 45 deg return that stopped
+ * on the line left line following to swing 45 deg, which it rarely managed
+ * (track tests 2026-11-02).  So as soon as Buddy 3 sees the line the car
+ * drives on SNAP_MM (rear axle to the line sensors) to bring the axle over
+ * the line, turns straight and hands over.  The way back is
+ * RETURN_MAX_PCT % of back_mm, so with the +-10 deg turn slip
+ * (2026-11-01) it still crosses the line. */
+#define VC_BYPASS_RETURN_MAX_PCT (130U)
+#define VC_BYPASS_SNAP_MM        (100U)
 
 /* ------------------------------------------------------------------------ *
  * Private data (used only by the VC task)
@@ -735,6 +740,31 @@ typedef enum
 static obst_req_t             g_scan_req;
 static obstacle_profile_t     g_profile;    /* Latest scan.              */
 static obstacle_bypass_plan_t g_plan;       /* For TURN recommendations. */
+static bool                   g_b_ahead_quiet;  /* See read_obstacle(). */
+static uint32_t               g_ahead_quiet_until_ms;
+
+
+/* True if Buddy 5's latest reading is within the bypass guard distance. */
+static bool
+is_ahead_close (void)
+{
+    obstacle_status_t status;
+
+    return obstacle_task_get_status(&status)
+           && (OBSTACLE_RANGE_OK == status.range_status)
+           && (VC_BYPASS_GUARD_MM > status.distance_mm);
+}
+
+
+/* The bypass has ended: ignore a stale "ahead" for VC_BYPASS_QUIET_MS. */
+static void
+start_ahead_quiet (uint32_t now)
+{
+    obstacle_task_forget();
+    obstacle_task_ack_ahead();
+    g_b_ahead_quiet        = true;
+    g_ahead_quiet_until_ms = now + VC_BYPASS_QUIET_MS;
+}
 
 
 /* Advance a request on its DONE bit; true once, when the result is ready. */
@@ -857,7 +887,23 @@ read_obstacle (vc_inputs_t * p_in, vc_state_t state)
 
     if ((0 < flg) && (E_OK == tk_ref_flg(flg, &rflg)))
     {
-        if (is_running(state))
+        if (g_b_ahead_quiet
+            && ((int32_t) (p_in->now_ms - g_ahead_quiet_until_ms) >= 0))
+        {
+            g_b_ahead_quiet = false;
+        }
+
+        if (is_running(state) && g_b_ahead_quiet && (!is_ahead_close()))
+        {
+            /* Just after a bypass: "ahead" was latched while passing the
+             * obstacle (track test 2026-11-02 started a second bypass from
+             * it).  Keep clearing it; a real obstacle is raised again. */
+            if (0U != (rflg.flgptn & OBSTACLE_EVT_AHEAD))
+            {
+                obstacle_task_ack_ahead();
+            }
+        }
+        else if (is_running(state))
         {
             p_in->b_obstacle_ahead =
                 (0U != (rflg.flgptn & OBSTACLE_EVT_AHEAD));
@@ -1136,9 +1182,13 @@ typedef enum
     BYPASS_IDLE = 0,
     BYPASS_TURN_OUT,        /* Turn turn_deg towards the bypass side.     */
     BYPASS_CHECK,           /* Buddy 5 path check along leg 1.            */
-    BYPASS_LEG_OUT,         /* Leg 1, out to the apex.                    */
-    BYPASS_TURN_APEX,       /* Turn back turn_deg + VC_BYPASS_RETURN_DEG.  */
-    BYPASS_LEG_BACK         /* Towards the line until Buddy 3 sees it.    */
+    BYPASS_LEG_OUT,         /* Diagonal out to side_mm.                   */
+    BYPASS_TURN_ALONG,      /* Turn back turn_deg: parallel to the line.  */
+    BYPASS_LEG_ALONG,       /* Parallel, past the obstacle.               */
+    BYPASS_TURN_BACK,       /* Turn back_deg towards the line.            */
+    BYPASS_LEG_BACK,        /* Back towards the line, watching for it.    */
+    BYPASS_SNAP,            /* Line seen: on until the axle is over it.   */
+    BYPASS_TURN_STRAIGHT    /* Turn back_deg to face along the line.      */
 } bypass_step_t;
 
 static bypass_step_t g_bypass_step;
@@ -1153,15 +1203,18 @@ other_side (obstacle_action_t side)
 }
 
 
-/* Encoder turn of deg (x VC_BYPASS_TURN_PCT %) towards side. */
+/* Encoder turn of deg towards side, calibrated per direction
+ * (OBSTACLE_TURN_LEFT_PCT / _RIGHT_PCT). */
 static void
 queue_bypass_turn (obstacle_action_t side, uint32_t deg)
 {
     motion_command_t cmd = {0};
     int32_t          mdeg;
+    uint32_t const   pct = (OBSTACLE_ACTION_TURN_LEFT == side)
+                           ? OBSTACLE_TURN_LEFT_PCT : OBSTACLE_TURN_RIGHT_PCT;
 
     /* deg is at most 2 x OBSTACLE_PLAN_MAX_DEG, so this fits easily. */
-    mdeg = (int32_t) ((deg * 1000U * (uint32_t) VC_BYPASS_TURN_PCT) / 100U);
+    mdeg = (int32_t) ((deg * 1000U * pct) / 100U);
 
     cmd.type                        = MOTION_COMMAND_TURN_ANGLE;
     cmd.timeout_ms                  = VC_BYPASS_TURN_MS;
@@ -1197,42 +1250,44 @@ bypass_start (void)
     g_bypass_step = BYPASS_TURN_OUT;
     g_path_req    = OBST_REQ_IDLE;
     queue_bypass_turn(g_plan.side, g_plan.turn_deg);
-    tm_printf((UB *) "[vc] bypass %s: turn %u deg, legs %u mm\n",
+    tm_printf((UB *) "[vc] bypass %s: turn %u deg, out %u mm, along %u mm\n",
               (UB *) ((OBSTACLE_ACTION_TURN_LEFT == g_plan.side) ? "LEFT"
                                                                  : "RIGHT"),
-              (UINT) g_plan.turn_deg, (UINT) g_plan.leg_mm);
+              (UINT) g_plan.turn_deg, (UINT) g_plan.out_mm,
+              (UINT) g_plan.along_mm);
 }
 
 
-/* True once the car is on its way back, at least apex_mm from the apex,
- * and Buddy 3 sees a line.  Nearer the apex, a line would be something
- * beside the obstacle: at RETURN_DEG the line is about 2 x apex_mm away. */
+/* True when Buddy 3 sees a line where it can only be the course's line:
+ * on the way back, or on the second half of the parallel leg (the car is
+ * then past most of the obstacle; it is there when the car stopped off the
+ * line, or the turns slipped - track test 2026-11-02). */
 static bool
 is_line_back (vc_inputs_t const * p_in)
 {
     bool const b_watching =
-        (BYPASS_LEG_BACK == g_bypass_step) && (0U != g_manoeuvre_seq)
-        && (g_manoeuvre_mm >= (int32_t) g_plan.apex_mm);
+        (0U != g_manoeuvre_seq)
+        && ((BYPASS_LEG_BACK == g_bypass_step)
+            || ((BYPASS_LEG_ALONG == g_bypass_step)
+                && (g_manoeuvre_mm >= (int32_t) (g_plan.along_mm / 2U))));
 
     return b_watching && (VC_LINE_LOST != p_in->line);
 }
 
 
-/* True if the sensor sees something within the guard distance. */
-static bool
-is_leg_blocked (void)
+/* The car faces along the line again: hand over to line following. */
+static void
+bypass_finish (vc_inputs_t * p_in)
 {
-    obstacle_status_t status;
-
-    return obstacle_task_get_status(&status)
-           && (OBSTACLE_RANGE_OK == status.range_status)
-           && (VC_BYPASS_GUARD_MM > status.distance_mm);
+    start_ahead_quiet(p_in->now_ms);
+    g_bypass_step           = BYPASS_IDLE;
+    p_in->b_obstacle_passed = true;
 }
 
 
 /* Each step, before vc_step(): move the bypass on when Motion finishes a
  * step or Buddy 5's path check is ready.  Ends with "obstacle passed" -
- * early if Buddy 3 sees the line on the way back (is_line_back());
+ * after snapping onto the line if Buddy 3 sees it on the way back;
  * a refused path, or something close on a leg, is reported as a motion
  * failure, which the VC turns into EMERGENCY_STOP. */
 static void
@@ -1255,21 +1310,28 @@ bypass_run (vc_inputs_t * p_in)
         }
 
         if (((BYPASS_LEG_OUT == g_bypass_step)
-             || (BYPASS_LEG_BACK == g_bypass_step)) && is_leg_blocked())
+             || (BYPASS_LEG_ALONG == g_bypass_step)
+             || (BYPASS_LEG_BACK == g_bypass_step)
+             || (BYPASS_SNAP == g_bypass_step)) && is_ahead_close())
         {
             tm_printf((UB *) "[vc] bypass: something within %u mm\n",
                       (UINT) VC_BYPASS_GUARD_MM);
             b_fail = true;
         }
+        else if (is_line_back(p_in) && (BYPASS_LEG_ALONG == g_bypass_step))
+        {
+            /* Already facing along the line and on it: no more turns. */
+            stop_motion();
+            bypass_finish(p_in);
+            tm_printf((UB *) "[vc] bypass: on the line early: following it\n");
+        }
         else if (is_line_back(p_in))
         {
-            /* Line following takes over from here: the VC goes to
-             * REACQUIRE_LINE, sees the line and follows it. */
-            stop_motion();
-            obstacle_task_ack_ahead();
-            g_bypass_step           = BYPASS_IDLE;
-            p_in->b_obstacle_passed = true;
-            tm_printf((UB *) "[vc] bypass: line found, following it\n");
+            /* The line sensors are SNAP_MM ahead of the axle: drive that
+             * far so the axle is over the line, then turn straight. */
+            queue_bypass_leg(VC_BYPASS_SNAP_MM);
+            g_bypass_step = BYPASS_SNAP;
+            tm_printf((UB *) "[vc] bypass: line found\n");
         }
         else
         {
@@ -1296,7 +1358,7 @@ bypass_run (vc_inputs_t * p_in)
                             && ((OBSTACLE_PATH_CLEAR == path.verdict)
                                 || (OBSTACLE_PATH_OPEN == path.verdict)))
                         {
-                            queue_bypass_leg(g_plan.leg_mm);
+                            queue_bypass_leg(g_plan.out_mm);
                             g_bypass_step = BYPASS_LEG_OUT;
                         }
                         else
@@ -1311,16 +1373,32 @@ bypass_run (vc_inputs_t * p_in)
                     if (p_in->b_motion_done)
                     {
                         queue_bypass_turn(other_side(g_plan.side),
-                                          g_plan.turn_deg
-                                          + VC_BYPASS_RETURN_DEG);
-                        g_bypass_step = BYPASS_TURN_APEX;
+                                          g_plan.turn_deg);
+                        g_bypass_step = BYPASS_TURN_ALONG;
                     }
                     break;
 
-                case BYPASS_TURN_APEX:
+                case BYPASS_TURN_ALONG:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_leg((g_plan.apex_mm
+                        queue_bypass_leg(g_plan.along_mm);
+                        g_bypass_step = BYPASS_LEG_ALONG;
+                    }
+                    break;
+
+                case BYPASS_LEG_ALONG:
+                    if (p_in->b_motion_done)
+                    {
+                        queue_bypass_turn(other_side(g_plan.side),
+                                          g_plan.back_deg);
+                        g_bypass_step = BYPASS_TURN_BACK;
+                    }
+                    break;
+
+                case BYPASS_TURN_BACK:
+                    if (p_in->b_motion_done)
+                    {
+                        queue_bypass_leg((g_plan.back_mm
                                           * VC_BYPASS_RETURN_MAX_PCT) / 100U);
                         g_bypass_step = BYPASS_LEG_BACK;
                     }
@@ -1329,15 +1407,27 @@ bypass_run (vc_inputs_t * p_in)
                 case BYPASS_LEG_BACK:
                     if (p_in->b_motion_done)
                     {
-                        /* No line by the end of the leg: the VC's search
-                         * creeps on along the same heading, which still
-                         * points at the line.  "Ahead" latched while
-                         * passing the obstacle is stale now; Buddy 5
-                         * raises it again if needed. */
-                        obstacle_task_ack_ahead();
-                        g_bypass_step           = BYPASS_IDLE;
-                        p_in->b_obstacle_passed = true;
-                        tm_printf((UB *) "[vc] bypass done, no line yet\n");
+                        /* No line seen: by the turns the car is near it;
+                         * turn straight and let line following search. */
+                        tm_printf((UB *) "[vc] bypass: no line seen\n");
+                        queue_bypass_turn(g_plan.side, g_plan.back_deg);
+                        g_bypass_step = BYPASS_TURN_STRAIGHT;
+                    }
+                    break;
+
+                case BYPASS_SNAP:
+                    if (p_in->b_motion_done)
+                    {
+                        queue_bypass_turn(g_plan.side, g_plan.back_deg);
+                        g_bypass_step = BYPASS_TURN_STRAIGHT;
+                    }
+                    break;
+
+                case BYPASS_TURN_STRAIGHT:
+                    if (p_in->b_motion_done)
+                    {
+                        bypass_finish(p_in);
+                        tm_printf((UB *) "[vc] bypass done: line following\n");
                     }
                     break;
 

@@ -137,15 +137,21 @@ typedef struct
     uint32_t                count;        /* Outermost angle first.      */
 } obstacle_path_t;
 
-/* The "^" bypass: pivot turn_deg towards side, drive leg_mm, pivot back
- * 2 x turn_deg, drive leg_mm, pivot turn_deg to face along the line. */
+/* The out-along-back bypass: pivot turn_deg towards side, drive out_mm
+ * (the rear axle is then side_mm from the line), pivot back turn_deg to
+ * run parallel to the line, drive along_mm past the obstacle, then turn
+ * back_deg towards the line, drive back (back_mm, or until the line is
+ * seen) and turn straight.  Distances are rear-axle travel. */
 typedef struct
 {
     obstacle_action_t side;       /* TURN_LEFT or TURN_RIGHT.           */
     uint32_t          turn_deg;
-    uint32_t          leg_mm;     /* Rear-axle travel on each leg.      */
-    uint32_t          apex_mm;    /* Sideways offset at the apex.       */
-    uint32_t          check_mm;   /* Path check need before leg 1.      */
+    uint32_t          out_mm;     /* Diagonal leg out.                  */
+    uint32_t          side_mm;    /* Sideways offset while passing.     */
+    uint32_t          along_mm;   /* Parallel leg past the obstacle.    */
+    uint32_t          back_deg;   /* Turn towards the line.             */
+    uint32_t          back_mm;    /* Diagonal leg back to the line.     */
+    uint32_t          check_mm;   /* Path check need after the turn.    */
 } obstacle_bypass_plan_t;
 
 /* One ultrasonic measurement. */

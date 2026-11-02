@@ -21,8 +21,8 @@
  *       motion task, encoder-counted), then runs the path check
  *   u   turn back by the same angle (to repeat a test)
  *   b   the bypass by the plan, as vc_task.c runs it: turn, path check,
- *       leg, turn back 30 deg past straight, drive to where the line
- *       should be crossed (vc_task.c stops on the line instead)
+ *       out, turn parallel, along, back at twice the angle, turn straight
+ *       (vc_task.c also snaps onto the line when it sees it)
  *   x   stop the motors at once (also ends a bypass)
  *
  * The motors move only on t, u or b.  First runs: wheels off the floor.
@@ -72,14 +72,12 @@
 #define TEST_TURN_TIMEOUT_MS (3000U)
 #define TEST_MDEG_PER_DEG    (1000)
 
-/* Bypass legs and the return, as vc_task.c does (VC_BYPASS_SPEED_MM_S,
- * VC_BYPASS_GUARD_MM, VC_BYPASS_RETURN_DEG).  With no line sensing here,
- * the way back stops where it should cross the line at RETURN_DEG:
- * apex_mm / sin(30 deg) = 2 x apex_mm. */
+/* Bypass legs, as vc_task.c drives them (VC_BYPASS_SPEED_MM_S,
+ * VC_BYPASS_GUARD_MM).  The way back is at back_deg; with no line
+ * sensing here it is exactly back_mm, so the car should end on the line,
+ * then turns straight (vc_task.c snaps onto the line when it sees it). */
 #define TEST_LEG_SPEED_MM_S  (150)
 #define TEST_LEG_GUARD_MM    (150U)
-#define TEST_RETURN_DEG      (30U)
-#define TEST_RETURN_LEG_X    (2U)
 
 /* Where the b sequence is. */
 typedef enum
@@ -87,9 +85,12 @@ typedef enum
     TEST_BYPASS_IDLE = 0,
     TEST_BYPASS_TURN_OUT,        /* Turn towards the side, then check.     */
     TEST_BYPASS_CHECK,           /* Waiting for the path check.            */
-    TEST_BYPASS_LEG_OUT,
-    TEST_BYPASS_TURN_APEX,       /* Turn back turn_deg + TEST_RETURN_DEG.  */
-    TEST_BYPASS_LEG_BACK         /* Towards the line; stops on it.         */
+    TEST_BYPASS_LEG_OUT,         /* Diagonal out to side_mm.               */
+    TEST_BYPASS_TURN_ALONG,      /* Turn back turn_deg: parallel.          */
+    TEST_BYPASS_LEG_ALONG,       /* Parallel, past the obstacle.           */
+    TEST_BYPASS_TURN_BACK,       /* Turn back_deg towards the line.        */
+    TEST_BYPASS_LEG_BACK,        /* Back to the line: back_mm.             */
+    TEST_BYPASS_TURN_STRAIGHT    /* Turn back_deg to face along the line.  */
 } test_bypass_t;
 
 /* Console messages.  Declared as UB arrays because tm_printf() takes
@@ -128,7 +129,8 @@ static UB const msg_profile[] =
     "clear_right_mm=%u,clear_left_mm=%u,time_ms=%u\n";
 static UB const msg_action[] = "[ctrl] SCAN_DONE: recommendation %s\n";
 static UB const msg_plan[] =
-    "plan,side=%s,turn_deg=%u,leg_mm=%u,apex_mm=%u,check_mm=%u\n";
+    "plan,side=%s,turn_deg=%u,out_mm=%u,side_mm=%u,along_mm=%u,"
+    "back_deg=%u,back_mm=%u,check_mm=%u\n";
 static UB const msg_plan_hint[] =
     "[ctrl] now pivot the car %u deg to the %s by hand, then press c\n";
 static UB const msg_no_plan[] = "[ctrl] no bypass plan for this action\n";
@@ -149,7 +151,7 @@ static UB const msg_turn_done[] =
 static UB const msg_turn_failed[] = "move,failed,state=%d,fault=%d\n";
 static UB const msg_leg_req[] = "[ctrl] driving %u mm (motion seq %u)\n";
 static UB const msg_bypass_start[] =
-    "[ctrl] bypass %s: turn %u deg, legs %u mm, check %u mm\n";
+    "[ctrl] bypass %s: turn %u deg, out %u mm, along %u mm, check %u mm\n";
 static UB const msg_bypass_done[] =
     "[ctrl] bypass done: the car should be on the line now\n";
 static UB const msg_bypass_stop[] = "[ctrl] bypass stopped: %s\n";
@@ -400,8 +402,9 @@ test_print_plan(obstacle_profile_t const * p_profile)
                              &plan))
     {
         p_side = (OBSTACLE_ACTION_TURN_LEFT == plan.side) ? "LEFT" : "RIGHT";
-        (void)tm_printf(msg_plan, p_side, plan.turn_deg, plan.leg_mm,
-                        plan.apex_mm, plan.check_mm);
+        (void)tm_printf(msg_plan, p_side, plan.turn_deg, plan.out_mm,
+                        plan.side_mm, plan.along_mm, plan.back_deg,
+                        plan.back_mm, plan.check_mm);
         (void)tm_printf(msg_plan_hint, plan.turn_deg, p_side);
         check_need_mm = plan.check_mm;
         check_side = plan.side;
@@ -593,9 +596,12 @@ test_start_turn(obstacle_action_t side, uint32_t deg, bool b_check)
     motion_command_t cmd = { 0 };
     int32_t          angle_mdeg;
     bool             b_ok;
+    uint32_t const   pct = (OBSTACLE_ACTION_TURN_LEFT == side) ?
+                           OBSTACLE_TURN_LEFT_PCT : OBSTACLE_TURN_RIGHT_PCT;
 
-    /* Cast to int32_t: deg is at most 2 x OBSTACLE_PLAN_MAX_DEG. */
-    angle_mdeg = (int32_t)deg * TEST_MDEG_PER_DEG;
+    /* Calibrated per direction, as vc_task.c does.  Cast to int32_t: deg is
+     * at most 2 x OBSTACLE_PLAN_MAX_DEG. */
+    angle_mdeg = (int32_t)((deg * (uint32_t)TEST_MDEG_PER_DEG * pct) / 100U);
 
     if (OBSTACLE_ACTION_TURN_LEFT == side)
     {
@@ -676,13 +682,26 @@ test_bypass_begin(void)
     (void)tm_printf(msg_bypass_start,
                     (OBSTACLE_ACTION_TURN_LEFT == last_plan.side) ?
                     "LEFT" : "RIGHT",
-                    last_plan.turn_deg, last_plan.leg_mm, last_plan.check_mm);
+                    last_plan.turn_deg, last_plan.out_mm, last_plan.along_mm,
+                    last_plan.check_mm);
     bypass_step = TEST_BYPASS_TURN_OUT;
 
     if (!test_start_turn(last_plan.side, last_plan.turn_deg, true))
     {
         test_bypass_stop("first turn refused");
     }
+}
+
+/*!
+ * @brief The turn away from the bypass side (back towards the line).
+ *
+ * @return TURN_RIGHT for a left bypass, else TURN_LEFT.
+ */
+static obstacle_action_t
+test_other_side(void)
+{
+    return ((OBSTACLE_ACTION_TURN_LEFT == last_plan.side) ?
+            OBSTACLE_ACTION_TURN_RIGHT : OBSTACLE_ACTION_TURN_LEFT);
 }
 
 /*!
@@ -701,22 +720,33 @@ test_bypass_next(void)
             break;
 
         case TEST_BYPASS_LEG_OUT:
-            bypass_step = TEST_BYPASS_TURN_APEX;
-            b_ok = test_start_turn((OBSTACLE_ACTION_TURN_LEFT ==
-                                    last_plan.side) ?
-                                   OBSTACLE_ACTION_TURN_RIGHT :
-                                   OBSTACLE_ACTION_TURN_LEFT,
-                                   last_plan.turn_deg + TEST_RETURN_DEG,
+            bypass_step = TEST_BYPASS_TURN_ALONG;
+            b_ok = test_start_turn(test_other_side(), last_plan.turn_deg,
                                    false);
             break;
 
-        case TEST_BYPASS_TURN_APEX:
+        case TEST_BYPASS_TURN_ALONG:
+            bypass_step = TEST_BYPASS_LEG_ALONG;
+            b_ok = test_start_leg(last_plan.along_mm);
+            break;
+
+        case TEST_BYPASS_LEG_ALONG:
+            bypass_step = TEST_BYPASS_TURN_BACK;
+            b_ok = test_start_turn(test_other_side(), last_plan.back_deg,
+                                   false);
+            break;
+
+        case TEST_BYPASS_TURN_BACK:
             bypass_step = TEST_BYPASS_LEG_BACK;
-            b_ok = test_start_leg(TEST_RETURN_LEG_X * last_plan.apex_mm);
+            b_ok = test_start_leg(last_plan.back_mm);
             break;
 
         case TEST_BYPASS_LEG_BACK:
-            /* Where the car should be crossing the line. */
+            bypass_step = TEST_BYPASS_TURN_STRAIGHT;
+            b_ok = test_start_turn(last_plan.side, last_plan.back_deg, false);
+            break;
+
+        case TEST_BYPASS_TURN_STRAIGHT:
             bypass_step = TEST_BYPASS_IDLE;
             (void)tm_printf(msg_bypass_done);
             break;
@@ -750,7 +780,7 @@ test_bypass_checked(void)
         {
             bypass_step = TEST_BYPASS_LEG_OUT;
 
-            if (!test_start_leg(last_plan.leg_mm))
+            if (!test_start_leg(last_plan.out_mm))
             {
                 test_bypass_stop("leg refused");
             }
@@ -771,6 +801,7 @@ test_bypass_guard(void)
     obstacle_status_t status;
 
     if (((TEST_BYPASS_LEG_OUT == bypass_step) ||
+         (TEST_BYPASS_LEG_ALONG == bypass_step) ||
          (TEST_BYPASS_LEG_BACK == bypass_step)) &&
         obstacle_task_get_status(&status) &&
         (OBSTACLE_RANGE_OK == status.range_status) &&

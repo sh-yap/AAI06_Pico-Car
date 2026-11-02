@@ -20,10 +20,12 @@
  * 2026-11-01), so with the +-30 deg servo a side is often UNPROVEN.
  *
  * Decision order: sensor fault -> STOP; corridor clear -> CONTINUE;
- * nothing measured -> REVERSE_RETRY; a PROVEN side -> turn that way; an
- * UNPROVEN side -> turn that way, right first (after a right pivot the
- * path check sees past the obstacle 5 deg sooner).  Both BLOCKED ->
- * REVERSE_RETRY.
+ * nothing measured -> REVERSE_RETRY; then the side.  With
+ * OBSTACLE_PREFER_LEFT / _RIGHT: that side unless it is BLOCKED, then the
+ * other (the sensor cannot see the course edge, so the course decides).
+ * With OBSTACLE_PREFER_SCAN: a PROVEN side -> turn that way; an UNPROVEN
+ * side -> turn that way, right first (after a right pivot the path check
+ * sees past the obstacle 5 deg sooner).  Both BLOCKED -> REVERSE_RETRY.
  *
  * PATH CHECK, after the controller's first bypass pivot: readings at
  * OBSTACLE_PATH_MAX_POINTS angles from the bypass side back to straight
@@ -60,6 +62,9 @@ typedef enum
 #if (OBSTACLE_SCAN_COUNT > OBSTACLE_SCAN_MAX_POINTS)
 #error "Too many scan angles for obstacle_scan_result_t"
 #endif
+
+/* Which way to go round (OBSTACLE_PREFER_*); see obstacle_scan_set_prefer(). */
+static uint32_t scan_prefer = OBSTACLE_BYPASS_PREFER;
 
 /* sin(0, 5, ..., 90 deg) x 1000. */
 static int32_t const sin_milli[] =
@@ -244,6 +249,58 @@ scan_side_state(obstacle_scan_result_t const * p_result,
     }
 
     return (state);
+}
+
+/*!
+ * @brief The preferred side unless the scan sees it blocked.
+ *
+ * @param[in] first         What is known about the preferred side.
+ * @param[in] first_action  Turn towards the preferred side.
+ * @param[in] second        What is known about the other side.
+ * @param[in] second_action Turn towards the other side.
+ *
+ * @return first_action, else second_action, else REVERSE_RETRY.  An
+ *         unproven side counts as free: the path check verifies it after
+ *         the pivot.
+ */
+static obstacle_action_t
+scan_preferred(scan_side_t       first,
+               obstacle_action_t first_action,
+               scan_side_t       second,
+               obstacle_action_t second_action)
+{
+    obstacle_action_t action = OBSTACLE_ACTION_REVERSE_RETRY;
+
+    if (SCAN_SIDE_BLOCKED != first)
+    {
+        action = first_action;
+    }
+    else if (SCAN_SIDE_BLOCKED != second)
+    {
+        action = second_action;
+    }
+    else
+    {
+        /* Both blocked: back off and scan again. */
+    }
+
+    return (action);
+}
+
+/*!
+ * @brief Choose how the bypass side is picked.
+ *
+ * @param[in] prefer OBSTACLE_PREFER_SCAN, _LEFT or _RIGHT; anything else
+ *                   is ignored.
+ */
+void
+obstacle_scan_set_prefer(uint32_t prefer)
+{
+    if ((OBSTACLE_PREFER_SCAN == prefer) || (OBSTACLE_PREFER_LEFT == prefer)
+        || (OBSTACLE_PREFER_RIGHT == prefer))
+    {
+        scan_prefer = prefer;
+    }
 }
 
 /*!
@@ -461,7 +518,19 @@ obstacle_scan_analyse(obstacle_scan_result_t * p_result)
                      + scan_lateral_mm(p_result->points[high].angle_deg,
                                        closest_mm);
 
-            if ((SCAN_SIDE_PROVEN == left) && (SCAN_SIDE_PROVEN == right))
+            if (OBSTACLE_PREFER_LEFT == scan_prefer)
+            {
+                p_prof->action = scan_preferred(left, OBSTACLE_ACTION_TURN_LEFT,
+                                                right,
+                                                OBSTACLE_ACTION_TURN_RIGHT);
+            }
+            else if (OBSTACLE_PREFER_RIGHT == scan_prefer)
+            {
+                p_prof->action = scan_preferred(right,
+                                                OBSTACLE_ACTION_TURN_RIGHT,
+                                                left, OBSTACLE_ACTION_TURN_LEFT);
+            }
+            else if ((SCAN_SIDE_PROVEN == left) && (SCAN_SIDE_PROVEN == right))
             {
                 if (centre > 0)
                 {
