@@ -145,6 +145,7 @@
       <input class="port" id="port" value="9001" title="Websocket port">
       <button class="btn" id="connectBtn">Connect</button>
       <span class="status" id="status"><span class="dot"></span><span id="statusText">offline</span></span>
+      <button class="btn ghost" id="saveBtn" disabled title="Download everything received since the page opened, in the mqtt_log.ps1 format">Save log</button>
       <button class="btn ghost" id="themeBtn">Theme</button>
     </div>
   </div>
@@ -565,6 +566,15 @@ function updateCharts(M){
 
 /* ---------- state ---------- */
 let model=newModel(), mode='idle', client=null, dirty=true;
+/* Every live message, as mqtt_log.ps1 writes it (time topic json), so a
+ * saved file loads back here.  Kept across reconnects until the page closes. */
+const LOG_MAX=300000; let rawLog=[];
+const pad=(n,w)=>String(n).padStart(w||2,'0');
+function localIso(d){return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())+'.'+pad(d.getMilliseconds(),3)+'000000';}
+function recordRaw(ts,topic,j){rawLog.push(ts+' '+topic+' '+(j&&j._text!=null&&Object.keys(j).length===1?j._text:JSON.stringify(j)));if(rawLog.length>LOG_MAX)rawLog.splice(0,rawLog.length-LOG_MAX);}
+function updateSaveBtn(){const b=document.getElementById('saveBtn');b.disabled=!rawLog.length;b.textContent=rawLog.length?'Save log ('+rawLog.length+')':'Save log';}
+function saveLog(){if(!rawLog.length)return;const d=new Date(),name='dashboard_'+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())+'.log';
+  const url=URL.createObjectURL(new Blob([rawLog.join('\r\n')+'\r\n'],{type:'text/plain'}));const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function setModel(M,live){model=M;mode=live?'live':'file';scanSel=null;mapSel='latest';makeCharts(model);render(model,live);}
 
 /* ---------- MQTT live ---------- */
@@ -585,13 +595,13 @@ function connect(){
   client.on('message',(topic,payload)=>{
     let bytes;try{bytes=new Uint8Array(payload);}catch(e){return;}
     let j;try{j=decode(topic,bytes);}catch(e){return;}
-    const ts=new Date().toISOString();
-    handle(model,ts,topic,j);dirty=true;
+    const ts=localIso(new Date());
+    recordRaw(ts,topic,j);handle(model,ts,topic,j);dirty=true;
   });
 }
 function disconnect(){if(client){try{client.end(true);}catch(e){}client=null;}setStatus('','offline');setCmdEnabled(false);document.getElementById('connectBtn').textContent='Connect';}
 function pub(cmd){if(client&&client.connected){client.publish('robot/command',cmd);
-  model.events.push({ts:new Date().toISOString(),t:null,tag:'cmd',txt:'Sent → '+cmd});dirty=true;}}
+  model.events.push({ts:localIso(new Date()),t:null,tag:'cmd',txt:'Sent → '+cmd});dirty=true;}}
 
 document.getElementById('connectBtn').onclick=()=>{if(client){disconnect();}else{connect();}};
 document.getElementById('cmdStart').onclick=()=>pub('start');
@@ -605,8 +615,11 @@ document.getElementById('runSel').onchange=e=>{mapSel=e.target.value;makeCharts(
 ['showHits','showScans'].forEach(id=>document.getElementById(id).onchange=()=>drawMap(model));
 window.addEventListener('resize',()=>drawMap(model));
 
+document.getElementById('saveBtn').onclick=saveLog;
+window.addEventListener('beforeunload',e=>{if(rawLog.length){e.preventDefault();e.returnValue='';}});
+
 /* live refresh loop */
-setInterval(()=>{if(mode==='live'&&dirty){dirty=false;render(model,true);updateCharts(model);}},350);
+setInterval(()=>{if(mode==='live'&&dirty){dirty=false;render(model,true);updateCharts(model);updateSaveBtn();}},350);
 
 /* ---------- offline log loading ---------- */
 function loadText(t,label){setModel(parseLog(t),false);document.getElementById('meta').insertAdjacentHTML('afterbegin',`<div>File <b>${esc(label)}</b></div>`);}
