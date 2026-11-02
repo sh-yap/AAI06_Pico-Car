@@ -24,6 +24,10 @@ void obstacle_scan_reduce(uint32_t                 angle_deg,
  * profile, the obstacle span edges and the recommended action. */
 void obstacle_scan_analyse(obstacle_scan_result_t * p_result);
 
+/* How the bypass side is chosen: OBSTACLE_PREFER_SCAN, _LEFT or _RIGHT.
+ * Starts as OBSTACLE_BYPASS_PREFER (obstacle_config.h). */
+void obstacle_scan_set_prefer(uint32_t prefer);
+
 /* Path check after the first bypass pivot, one angle at a time:
  *   1. set need_mm, known_mm (the scan's closest distance) and count = 0;
  *   2. for idx = 0 .. OBSTACLE_PATH_MAX_POINTS - 1, take readings at

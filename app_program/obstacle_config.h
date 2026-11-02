@@ -165,6 +165,17 @@
 /* STOP (sensor fault) if this many angles had no echo at all. */
 #define OBSTACLE_SCAN_FAULT_ANGLES      (3U)
 
+/* Which way round the obstacle.  The ultrasonic sensor cannot see the
+ * edge of the course, so on a track with room on one side only, fix the
+ * side here.  SCAN: from the scan (a proven-clear side first, else
+ * right).  LEFT / RIGHT: that side unless the scan sees it blocked, then
+ * the other; the path check still verifies the leg.  Track test
+ * 2026-11-02: going right left the course and the car got stuck. */
+#define OBSTACLE_PREFER_SCAN            (0U)
+#define OBSTACLE_PREFER_LEFT            (1U)
+#define OBSTACLE_PREFER_RIGHT           (2U)
+#define OBSTACLE_BYPASS_PREFER          (OBSTACLE_PREFER_LEFT)
+
 /* ------------------------------------------------------------------------ *
  * Bypass ("^") planning and the path check
  * ------------------------------------------------------------------------ */
@@ -184,6 +195,33 @@
 
 /* Steepest first pivot the planner may ask for. */
 #define OBSTACLE_PLAN_MAX_DEG           (40U)
+
+/* The parallel leg runs this much further than a 20 cm deep obstacle
+ * needs, so obstacles up to 20 cm + this deep are passed (30 mm: about
+ * 23 cm; shortened 2026-11-02 to keep the bypass short on the course). */
+#define OBSTACLE_PLAN_ALONG_EXTRA_MM    (30U)
+
+/* Turn calibration for the bypass (vc_task.c and the b key): the angle
+ * commanded to Motion is this % of the planned one.  Left turns go a
+ * little further than right ones on this car (wheel counts 2026-11-01;
+ * track test 2026-11-02: after left then right by the same angle the
+ * parallel leg still pointed slightly left; at 90 % it drifted right, so
+ * 95).  Tune: still pointing left on
+ * the parallel leg -> lower LEFT; pointing right -> raise it. */
+#define OBSTACLE_TURN_LEFT_PCT          (95U)
+#define OBSTACLE_TURN_RIGHT_PCT         (100U)
+
+/* The way back is twice the first turn (at most BACK_MAX_DEG), so it is
+ * about half as long as the way out (track test 2026-11-02: the mirror
+ * return took the car too far down the course). */
+#define OBSTACLE_PLAN_BACK_MAX_DEG      (60U)
+
+/* A line seen on the parallel leg is only followed once the line sensors
+ * have stayed black for this far: the car is then running along it.  A
+ * line that goes white sooner was crossed, and the bypass carries on
+ * (track test 2026-11-02: a line crossed almost square was black for
+ * about 25 mm, and handing over there lost it). */
+#define OBSTACLE_PLAN_LINE_HELD_MM      (40)
 
 /* The path check before leg 1 needs this much more than the leg. */
 #define OBSTACLE_PLAN_CHECK_EXTRA_MM    (100U)

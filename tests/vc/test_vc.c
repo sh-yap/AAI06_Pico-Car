@@ -971,6 +971,42 @@ lose_line_after (int8_t side)
 }
 
 static void
+test_search_after_bypass (void)
+{
+    printf("just after a bypass the line search pivots at most 45 degrees\n");
+
+    go_to_bypass_reacquire();
+    g_in.line = VC_LINE_CENTRE;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    g_in.line       = VC_LINE_RIGHT;
+    g_in.line_error = 0;
+    step();
+    g_in.line = VC_LINE_LOST;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    CHECK(VC_MOTION_PIVOT == g_out.motion);
+    CHECK(VC_SEARCH_LIMIT_POST_BYPASS_MDEG == g_out.pivot_mdeg);
+
+    /* The other side, to the same bound from where the search began. */
+    g_in.cal_angle_mdeg += VC_SEARCH_LIMIT_POST_BYPASS_MDEG;
+    g_in.b_motion_done   = true;
+    step();
+    CHECK(-(2 * VC_SEARCH_LIMIT_POST_BYPASS_MDEG) == g_out.pivot_mdeg);
+
+    /* Once VC_POST_BYPASS_MS has passed, the full bound again. */
+    g_in.line = VC_LINE_CENTRE;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    wait_ms(VC_POST_BYPASS_MS);
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    g_in.line = VC_LINE_LOST;
+    step();
+    CHECK(VC_SEARCH_LIMIT_MDEG == g_out.pivot_mdeg);
+}
+
+static void
 test_search_towards_last_side (void)
 {
     printf("pivot search starts towards where the line was last seen\n");
@@ -1634,6 +1670,7 @@ main (void)
     test_obstacle_while_reacquiring();
     test_reacquire_on_junction();
     test_search_towards_last_side();
+    test_search_after_bypass();
     test_pivot_search_sequence();
     test_bypass_reacquire_creeps();
     test_invalid_inputs();

@@ -91,6 +91,14 @@
                                             the search stops on what the
                                             sensors see.  Both sides without
                                             the line is a failure.          */
+/* Just after a bypass the car may have crossed the line at an angle, so a
+ * "lost on the right" line may really be on the left, and a 90 degree
+ * pivot can find the line facing back the way the car came (track test
+ * 2026-11-02: it pivoted 73 degrees right and drove back to the obstacle).
+ * For POST_BYPASS_MS after a bypass the bound is this instead. */
+#define VC_SEARCH_LIMIT_POST_BYPASS_MDEG (45000)
+#define VC_POST_BYPASS_MS       (5000U)
+
 #define VC_SEARCH_TIMEOUT_MS    (9000U)  /* Backstop only; the angle bound
                                             ends a search first.  The two
                                             pivots turn 90 + 180 = 270
@@ -333,6 +341,9 @@ typedef struct
     vc_search_t search;            /* Pivot search in REACQUIRE_LINE.     */
     int32_t    search_dir;         /* Way it pivots now (+1 right).       */
     int32_t    search_origin_mdeg; /* Turned-angle input when it began.   */
+    int32_t    search_limit_mdeg;  /* Bound per side for this search.     */
+    bool       b_after_bypass;     /* A bypass ended at bypass_end_ms.    */
+    uint32_t   bypass_end_ms;
     vc_cal_phase_t cal_phase;      /* Valid in CALIBRATE.                 */
     uint32_t   cal_phase_ms;       /* When the phase began.               */
     int32_t    cal_out_mdeg;       /* Turned by the end of a successful

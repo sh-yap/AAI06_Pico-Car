@@ -52,6 +52,9 @@
 /* Request from obstacle_task_request_path_check(), consumed by the task. */
 #define TASK_REQ_PATH       (0x00000400U)
 
+/* Request from obstacle_task_forget(), consumed by the task. */
+#define TASK_REQ_FORGET     (0x00000800U)
+
 /* During a scan the status is republished at least this often, well
  * inside OBSTACLE_STALE_MS. */
 #define TASK_SCAN_PUBLISH_MS (100U)
@@ -321,6 +324,14 @@ task_entry(INT stacd, void * p_exinf)
             task_path_check(&seq);
         }
 
+        /* The car has moved on (a bypass ended): what MONITOR remembers
+         * about earlier readings would only raise false alarms. */
+        if (E_OK == tk_wai_flg(flag_id, TASK_REQ_FORGET,
+                               TWF_ORW | TWF_BITCLR, &pattern, TMO_POL))
+        {
+            obstacle_monitor_reset(&monitor);
+        }
+
         /* Sleeps about 60 ms per reading, so lower-priority tasks run. */
         obstacle_ultrasonic_measure(&range);
         obstacle_monitor_step(&monitor, &range, &report);
@@ -583,6 +594,19 @@ obstacle_task_ack_ahead(void)
     if (b_initialised)
     {
         (void)tk_set_flg(flag_id, TASK_REQ_ACK);
+    }
+}
+
+/*!
+ * @brief Make MONITOR start afresh, as after a scan: forget the readings
+ *        taken before (the near reading behind the lost-obstacle rule).
+ */
+void
+obstacle_task_forget(void)
+{
+    if (b_initialised)
+    {
+        (void)tk_set_flg(flag_id, TASK_REQ_FORGET);
     }
 }
 

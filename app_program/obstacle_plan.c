@@ -1,6 +1,6 @@
 /** @file obstacle_plan.c
  *
- * @brief Buddy 5 bypass planning: the "^" path around an obstacle.
+ * @brief Buddy 5 bypass planning: the out-along-back path round an obstacle.
  *
  * Coordinates: x forward along the line, y sideways towards the bypass
  * side, origin at the rear axle (the pivot point) where the car stopped.
@@ -9,20 +9,28 @@
  * sensor.  The lecturer's guidance allows planning with the maximum width
  * instead of measuring it exactly.
  *
- * Path: pivot theta, drive leg 1 to the apex, pivot -2 theta, drive leg 2
- * back to the line, pivot theta.
+ * Path: pivot theta, drive out until the rear axle is side_mm from the
+ * line, pivot back to run parallel to the line, drive along past the
+ * obstacle (with OBSTACLE_PLAN_ALONG_EXTRA_MM to spare), then (vc_task.c)
+ * turn back_deg = 2 theta (at most OBSTACLE_PLAN_BACK_MAX_DEG) towards the
+ * line, drive back until Buddy 3 sees it and turn straight.  The car never
+ * goes further sideways than it must, which
+ * matters on a course with walls (track test 2026-11-02: the "^" path went
+ * about 36 cm out and left the course).
+ *   - side_mm = half_obstacle + margin + half_car: on the parallel leg the
+ *     car's inner side is exactly the margin from the obstacle.
  *   - theta is the smallest angle at which the car's inner side clears the
  *     obstacle's near corner by OBSTACLE_PLAN_MARGIN_MM, measured square to
  *     the car's side:
  *         x_near * sin(theta) - half_obstacle * cos(theta) - half_width
  *                                                          >= margin
- *     The inner side is one straight line, so clearing the near corner
- *     clears the whole obstacle on leg 1; leg 2 is further out (it starts
- *     beyond the obstacle), so it clears too.
- *   - The apex is far enough past the obstacle's back face that the rear
- *     corners, which swing round the axle at the apex pivot, cannot reach
- *     it.  The front corners stay ahead of the axle for pivots up to 2 x
- *     OBSTACLE_PLAN_MAX_DEG, so they cannot either.
+ *     so the corner is cleared whether the car reaches it on the diagonal
+ *     or on the parallel leg.  Pivoting to parallel only moves the inner
+ *     front corner out to side_mm - half_car, never nearer.
+ *   - The parallel leg ends far enough past the obstacle's back face that
+ *     the rear corners, which swing round the axle in the turn towards the
+ *     line, cannot reach it.
+ *   - tests/obstacle drives the car's outline along the whole path.
  */
 
 #include <stddef.h>
@@ -36,6 +44,10 @@
 #define PLAN_UNIT           (10000U)  /* sin_tenk[] scale.             */
 #define PLAN_MIN_DEG        (5U)
 #define PLAN_HALF_CAR_MM    (OBSTACLE_CAR_HALF_WIDTH_MM)
+
+#if ((OBSTACLE_PLAN_BACK_MAX_DEG > 90U) || (OBSTACLE_PLAN_BACK_MAX_DEG < 5U))
+#error "OBSTACLE_PLAN_BACK_MAX_DEG must be 5..90 (sin_tenk[] range)"
+#endif
 
 #if (OBSTACLE_PLAN_MAX_DEG > 45U)
 #error "OBSTACLE_PLAN_MAX_DEG above 45 breaks the front-corner argument"
@@ -78,7 +90,7 @@ plan_sqrt_up(uint32_t value)
 }
 
 /*!
- * @brief Plan the "^" bypass.
+ * @brief Plan the out-along-back bypass.
  *
  * @param[in]  distance_mm Sensor to the obstacle's near face.
  * @param[in]  side        OBSTACLE_ACTION_TURN_LEFT or _TURN_RIGHT.
@@ -95,10 +107,14 @@ obstacle_plan_bypass(uint32_t                 distance_mm,
     bool     b_found = false;
     uint32_t x_near = distance_mm + OBSTACLE_AXLE_TO_SENSOR_MM;
     uint32_t half_obstacle = OBSTACLE_MAX_WIDTH_MM / 2U;
+    uint32_t side_mm = half_obstacle + OBSTACLE_PLAN_MARGIN_MM
+                       + PLAN_HALF_CAR_MM;
     uint32_t theta = PLAN_MIN_DEG;
     uint32_t sin_t = 0U;
     uint32_t cos_t = PLAN_UNIT;
-    uint32_t x_apex;
+    uint32_t x_out;
+    uint32_t x_end;
+    uint32_t back_deg;
 
     if ((NULL != p_plan) && (0U != distance_mm) &&
         ((OBSTACLE_ACTION_TURN_LEFT == side) ||
@@ -125,21 +141,77 @@ obstacle_plan_bypass(uint32_t                 distance_mm,
 
         if (b_found)
         {
-            /* Rear axle past the back face by the rear corners' swing. */
-            x_apex = x_near + OBSTACLE_MAX_WIDTH_MM + OBSTACLE_PLAN_MARGIN_MM
-                     + plan_sqrt_up((OBSTACLE_REAR_OVERHANG_MM
-                                     * OBSTACLE_REAR_OVERHANG_MM)
-                                    + (PLAN_HALF_CAR_MM * PLAN_HALF_CAR_MM));
+            /* Where the diagonal reaches side_mm (rounded down: the
+             * parallel leg starts no later than planned). */
+            x_out = (side_mm * cos_t) / sin_t;
+
+            /* Rear axle past the back face by the rear corners' swing,
+             * plus room for a deeper obstacle. */
+            x_end = x_near + OBSTACLE_MAX_WIDTH_MM + OBSTACLE_PLAN_MARGIN_MM
+                    + plan_sqrt_up((OBSTACLE_REAR_OVERHANG_MM
+                                    * OBSTACLE_REAR_OVERHANG_MM)
+                                   + (PLAN_HALF_CAR_MM * PLAN_HALF_CAR_MM))
+                    + OBSTACLE_PLAN_ALONG_EXTRA_MM;
+
+            back_deg = 2U * theta;
+
+            if (back_deg > OBSTACLE_PLAN_BACK_MAX_DEG)
+            {
+                back_deg = OBSTACLE_PLAN_BACK_MAX_DEG;
+            }
 
             p_plan->side     = side;
             p_plan->turn_deg = theta;
-            p_plan->leg_mm   = ((x_apex * PLAN_UNIT) + cos_t - 1U) / cos_t;
-            p_plan->apex_mm  = (x_apex * sin_t) / cos_t;
-            p_plan->check_mm = p_plan->leg_mm + OBSTACLE_PLAN_CHECK_EXTRA_MM;
+            p_plan->out_mm   = ((side_mm * PLAN_UNIT) + sin_t - 1U) / sin_t;
+            p_plan->side_mm  = side_mm;
+            p_plan->along_mm = (x_end > x_out) ? (x_end - x_out) : 0U;
+            p_plan->back_deg = back_deg;
+            p_plan->back_mm  = ((side_mm * PLAN_UNIT) + sin_tenk[back_deg] - 1U)
+                               / sin_tenk[back_deg];
+            p_plan->check_mm = p_plan->out_mm + OBSTACLE_PLAN_CHECK_EXTRA_MM;
         }
     }
 
     return (b_found);
+}
+
+void
+obstacle_plan_line_reset (obstacle_line_watch_t * p_watch)
+{
+    p_watch->b_black  = false;
+    p_watch->start_mm = 0;
+}
+
+obstacle_line_seen_t
+obstacle_plan_line_watch (obstacle_line_watch_t * p_watch, bool b_black,
+                          int32_t leg_mm)
+{
+    obstacle_line_seen_t seen = OBSTACLE_LINE_NONE;
+
+    if (b_black)
+    {
+        if (!p_watch->b_black)
+        {
+            p_watch->b_black  = true;
+            p_watch->start_mm = leg_mm;
+        }
+
+        if ((leg_mm - p_watch->start_mm) >= OBSTACLE_PLAN_LINE_HELD_MM)
+        {
+            seen = OBSTACLE_LINE_HELD;
+        }
+    }
+    else if (p_watch->b_black)
+    {
+        p_watch->b_black = false;
+        seen             = OBSTACLE_LINE_CROSSED;
+    }
+    else
+    {
+        /* White and was white: nothing seen. */
+    }
+
+    return (seen);
 }
 
 /*** end of file ***/
