@@ -306,6 +306,113 @@ test_follow_line_and_hump (void)
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
 }
 
+/* The ramp exception changes speed only, never line or safety decisions. */
+static void
+test_ramp_follow_speed (void)
+{
+    int16_t magnitude;
+    int8_t side;
+
+    printf("fresh active ramp: retain forward speed and steering\n");
+
+    for (side = -1; side <= 1; side += 2)
+    {
+        go_to_follow_line(0U);
+        g_in.b_hump = true;
+        g_in.b_ramp_active = true;
+        g_in.b_terrain_ready = false;   /* Active ramp is not level. */
+        step();
+        CHECK(VC_SPEED_HUMP_MM_S == g_out.speed_mm_s);
+        CHECK(0 == g_out.steer);
+
+        g_in.line = (0 > side) ? VC_LINE_LEFT : VC_LINE_RIGHT;
+        for (magnitude = VC_STEER_START; magnitude < 127;
+             magnitude += VC_STEER_STEP)
+        {
+            step();
+            CHECK_STATE(VC_STATE_FOLLOW_LINE);
+            CHECK(VC_MOTION_DRIVE == g_out.motion);
+            CHECK((side * magnitude) == g_out.steer);
+            CHECK(VC_SPEED_HUMP_MM_S == g_out.speed_mm_s);
+        }
+        step();
+        CHECK((side * 127) == g_out.steer);
+        CHECK(VC_SPEED_HUMP_MM_S == g_out.speed_mm_s);
+
+        /* A stale/not-ready report keeps b_hump, but loses the exception. */
+        g_in.b_ramp_active = false;
+        step();
+        CHECK(VC_SPEED_CURVE_MM_S == g_out.speed_mm_s);
+        CHECK((side * 127) == g_out.steer);
+
+        g_in.b_hump = false;
+        g_in.b_terrain_ready = true;
+        g_in.line = VC_LINE_CENTRE;
+        step();
+        CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
+
+        /* A ramp does not mask LOST, even if it remains active. */
+        g_in.b_hump = true;
+        g_in.b_ramp_active = true;
+        g_in.line = VC_LINE_LOST;
+        step();
+        CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+        CHECK(VC_MOTION_PIVOT == g_out.motion);
+        g_in.line = VC_LINE_CENTRE;
+        step();
+        CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    }
+}
+
+static void
+test_ramp_preemption (void)
+{
+    printf("active ramp: STOP, faults, finish, obstacle and junction win\n");
+
+    go_to_follow_line(0U);
+    g_in.b_hump = true;
+    g_in.b_ramp_active = true;
+    g_in.cmd = VC_CMD_STOP;
+    step();
+    CHECK_STATE(VC_STATE_READY);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+
+    go_to_follow_line(0U);
+    g_in.b_hump = true;
+    g_in.b_ramp_active = true;
+    g_in.serious_faults = 1U;
+    step();
+    CHECK_STATE(VC_STATE_EMERGENCY_STOP);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+
+    go_to_follow_line(0U);
+    g_in.b_hump = true;
+    g_in.b_ramp_active = true;
+    g_in.b_finish = true;
+    step();
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+
+    go_to_follow_line(0U);
+    g_in.b_hump = true;
+    g_in.b_ramp_active = true;
+    g_in.b_obstacle_ahead = true;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(VC_OBST_SCAN_REQUEST == g_out.obstacle);
+
+    go_to_follow_line(0U);
+    g_in.b_hump = true;
+    g_in.b_ramp_active = true;
+    g_in.barcode = VC_NAV_RIGHT;
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(VC_MOTION_TURN == g_out.motion);
+    CHECK(VC_NAV_RIGHT == g_out.turn);
+}
+
 static void
 test_barcode_turn (void)
 {
@@ -1503,6 +1610,8 @@ main (void)
 {
     test_start_up();
     test_follow_line_and_hump();
+    test_ramp_follow_speed();
+    test_ramp_preemption();
     test_barcode_turn();
     test_junction_straight_and_uturn();
     test_turn_failures();

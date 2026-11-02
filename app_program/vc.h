@@ -223,6 +223,8 @@ typedef struct
     bool       b_stationary;       /* Both wheels stopped.                */
     bool       b_hump;             /* Buddy 4: slow down (on a ramp, or
                                       Buddy 4 not ready or silent).      */
+    bool       b_ramp_active;      /* Buddy 4: fresh, healthy active ramp.
+                                      Keep forward speed while steering. */
     bool       b_terrain_ready;    /* Buddy 4: fresh, ready, level.  START
                                       is refused without it.             */
     bool       b_obstacle_ahead;   /* Event: Buddy 5 OBSTACLE_AHEAD.      */

@@ -623,6 +623,7 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     b_ramp  = b4_task_is_ramp_active(&s_terrain);
 
     p_in->b_hump          = (!b_ready) || b_ramp;
+    p_in->b_ramp_active   = b_ready && b_ramp;
     p_in->b_terrain_ready = b_ready && (!b_ramp);
     p_in->cal_b4          = (vc_cal_b4_t) b4_task_get_calibration(NULL);
                                                         /* Same order.     */
@@ -704,6 +705,7 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
 {
     (void) now;
     p_in->b_hump          = false;
+    p_in->b_ramp_active   = false;
     p_in->b_terrain_ready = true;
     p_in->cal_b4          = VC_CAL_B4_DONE;     /* Nothing to calibrate.   */
 

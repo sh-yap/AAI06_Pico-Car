@@ -364,7 +364,13 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         p_out->steer      = follow_steer(p_vc,
                                          p_vc->b_junction_hold
                                          ? VC_LINE_JUNCTION : line);
-        p_out->speed_mm_s = curve_speed(follow_speed(p_in), p_out->steer);
+        /* A healthy ramp report keeps the forward command at ramp speed:
+         * historical climbs stalled at 50 mm/s. Keep steering and LOST
+         * recovery, unlike the reverted straight hold. Missing terrain alone
+         * must not enable this exception. This is not a per-wheel floor. */
+        p_out->speed_mm_s = p_in->b_ramp_active
+                            ? VC_SPEED_HUMP_MM_S
+                            : curve_speed(follow_speed(p_in), p_out->steer);
     }
 }
 
