@@ -122,6 +122,9 @@
   .vtrack .thr{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--fg);opacity:.7}
   .vtrack .tgt{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--fg);opacity:.45}
   .vline{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .bigcode{font-family:var(--mono);font-size:34px;font-weight:700;line-height:1}
+  .barlist{margin-top:10px;display:flex;flex-direction:column;gap:3px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .barlist b{color:var(--fg)}
   .scannav{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:8px;font-family:var(--mono);font-size:12px;color:var(--muted)}
   .scannav .btn{padding:4px 12px}
   .maphead{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
@@ -188,6 +191,7 @@
     <div class="card"><h3>Line sensors</h3><div class="cap">Centre and right IR sensors, seen from above. Filled = black (on the tape). The bar tick is the threshold from the START calibration.</div><div class="viz" id="lineViz"></div></div>
     <div class="card"><h3>Ultrasonic scan</h3><div class="cap" id="scanCap">Servo sweep 60°–120° (90° = straight ahead, above 90° = left).</div><div class="viz" id="scanViz"></div>
       <div class="scannav"><button class="btn ghost" id="scanPrev" title="Earlier scan">‹</button><span id="scanIdx">no scans</span><button class="btn ghost" id="scanNext" title="Later scan">›</button></div></div>
+    <div class="card"><h3>Barcode sensor</h3><div class="cap">The last barcode Buddy 3 decoded and the turn it asked for, and the barcode sensor range seen in the START calibration. The car does not send the live barcode reading.</div><div class="viz" id="barViz"></div></div>
     <div class="card"><h3>Wheels</h3><div class="cap">Measured speed. The bar tick is the speed the controller asked for.</div><div class="viz" id="wheelViz"></div></div>
   </div>
 
@@ -294,10 +298,10 @@ const STATE_COL={LINE_FOLLOW:'--ok',LINE_RECOVERY:'--warn',OBSTACLE_SCAN:'--righ
 const stateCol=s=>css(STATE_COL[s]||'--muted');
 
 function newModel(){return{build:'',first:null,last:null,motion:[],line:[],states:[],events:[],drops:0,pos:{},faults:[],finalState:null,peakSpeed:0,distance:0,runs:0,humps:0,maxHump:0,tilt:null,t0:null,prevState:null,prevFault:-1,
-  paths:[],cur:null,pose:null,allowJoin:false,lastLine:null,lastMotion:null,cal:null,scans:[]};}
+  paths:[],cur:null,pose:null,allowJoin:false,lastLine:null,lastMotion:null,cal:null,calB:null,scans:[],barcodes:[]};}
 
 /* Path map: one path per run, dead-reckoned from the encoder counts. */
-function startPath(M,ts,label,t){const p={label,ts,pts:[{x:0,y:0,s:M.prevState,h:0,t:t==null?null:t}],hits:[],scans:[],states:[]};M.paths.push(p);M.cur=p;M.pose={x:0,y:0,h:0,pl:null,pr:null};}
+function startPath(M,ts,label,t){const p={label,ts,pts:[{x:0,y:0,s:M.prevState,h:0,t:t==null?null:t}],hits:[],scans:[],states:[],barcodes:[]};M.paths.push(p);M.cur=p;M.pose={x:0,y:0,h:0,pl:null,pr:null};}
 function wrapEnc(d){return ((d%ENC_SPAN)+ENC_SPAN+ENC_SPAN/2)%ENC_SPAN-ENC_SPAN/2;}
 // Point fwd mm ahead of and right mm to the right of the rear axle.
 function carPoint(P,fwd,right){const h=P.h*Math.PI/180;return{x:P.x+fwd*Math.sin(h)+right*Math.cos(h),y:P.y+fwd*Math.cos(h)-right*Math.sin(h)};}
@@ -331,13 +335,15 @@ function handle(M,ts,topic,j){
   else if(topic==='robot/state'){const s=j.state,f=+j.fault||0;if(s!==M.prevState||f!==M.prevFault){M.states.push({ts,t:tt,state:s,fault:f});if(M.cur&&s!==M.prevState)M.cur.states.push({t:tt,s});if(f){M.events.push({ts,t:tt,tag:'fault',txt:s+' — fault '+faultName(f)});M.faults.push({name:faultName(f)});}else M.events.push({ts,t:tt,tag:'state',txt:s});M.prevState=s;M.prevFault=f;trim(M);}M.finalState={state:s,fault:f};}
   else if(topic==='robot/event/command'){M.events.push({ts,t:tt,tag:'cmd',txt:'Command '+j.cmd+(j.ok?' ✓':' ✗')});if(j.cmd==='start')M.runs++;trim(M);}
   else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});if(j.run==='BEGIN'){const pl=M.pose?{pl:M.pose.pl,pr:M.pose.pr}:null;startPath(M,ts,'Run '+(M.paths.length+1)+' · '+shortTime(ts),tt);if(pl){M.pose.pl=pl.pl;M.pose.pr=pl.pr;}}trim(M);}
-  else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+(j.command==='UTURN'?'U-TURN':j.command)});trim(M);}
+  else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+(j.command==='UTURN'?'U-TURN':j.command)});
+    const b={ts,t:tt,code:j.code,command:j.command};if(M.cur&&M.pose){Object.assign(b,carPoint(M.pose,SENSOR_AHEAD_MM,0));M.cur.barcodes.push(b);}
+    M.barcodes.push(b);if(M.barcodes.length>CAP_EV)M.barcodes.splice(0,M.barcodes.length-CAP_EV);trim(M);}
   else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0,a=+j.angle_deg||90;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm at '+a+'°'+(+j.clear_l_mm?', left clear '+j.clear_l_mm+' mm':'')+(+j.clear_r_mm?', right clear '+j.clear_r_mm+' mm':'')+' → '+j.action+(d===0?' (no reading)':'')});
     const sc={ts,t:tt,dist:d,angle:a,width:+j.width_mm||0,cl:+j.clear_l_mm||0,cr:+j.clear_r_mm||0,action:j.action,run:M.cur?M.cur.label:''};
     if(M.cur&&M.pose){const s=carPoint(M.pose,US_AHEAD_MM,0),h2=(M.pose.h+(90-a))*Math.PI/180;sc.sx=s.x;sc.sy=s.y;sc.h=M.pose.h;if(d>0){sc.ox=s.x+d*Math.sin(h2);sc.oy=s.y+d*Math.cos(h2);}M.cur.scans.push(sc);}
     M.scans.push(sc);trim(M);}
   else if(topic==='robot/telemetry/terrain'){if(j.max_hump_dmm!=null)M.maxHump=Math.max(M.maxHump,+j.max_hump_dmm||0);if(j.tilt_mg!=null)M.tilt=+j.tilt_mg;trim(M);}
-  else if(topic==='robot/event/calibration'){if(j.result==='OK')M.cal={c:+j.centre_thr,r:+j.right_thr};M.events.push({ts,t:tt,tag:'state',txt:'Calibration '+j.result+' — centre thr '+j.centre_thr+' ('+j.centre_low+'-'+j.centre_high+'), right thr '+j.right_thr+' ('+j.right_low+'-'+j.right_high+'), barcode thr '+j.barcode_thr+(+j.barcode_learned?' learned':' fallback')+' ('+j.barcode_low+'-'+j.barcode_high+'), B4 floor '+j.b4_floor_mg+' mg ('+j.b4_samples+' samples), swept '+j.sweep_deg+'° ('+(+j.first_right?'right':'left')+' first), sensors '+(+j.overlap===-256?'overlap not measured':(+j.overlap<0?'gap '+(-j.overlap)+' samples':'overlap '+j.overlap+' samples'))});trim(M);}
+  else if(topic==='robot/event/calibration'){if(j.result==='OK')M.cal={c:+j.centre_thr,r:+j.right_thr};if(j.barcode_thr!=null)M.calB={low:+j.barcode_low,high:+j.barcode_high,thr:+j.barcode_thr,learned:!!+j.barcode_learned,ok:j.result==='OK'};M.events.push({ts,t:tt,tag:'state',txt:'Calibration '+j.result+' — centre thr '+j.centre_thr+' ('+j.centre_low+'-'+j.centre_high+'), right thr '+j.right_thr+' ('+j.right_low+'-'+j.right_high+'), barcode thr '+j.barcode_thr+(+j.barcode_learned?' learned':' fallback')+' ('+j.barcode_low+'-'+j.barcode_high+'), B4 floor '+j.b4_floor_mg+' mg ('+j.b4_samples+' samples), swept '+j.sweep_deg+'° ('+(+j.first_right?'right':'left')+' first), sensors '+(+j.overlap===-256?'overlap not measured':(+j.overlap<0?'gap '+(-j.overlap)+' samples':'overlap '+j.overlap+' samples'))});trim(M);}
   else if(topic==='robot/event/hump'){M.humps++;M.events.push({ts,t:tt,tag:'hump',txt:'Hump — peak '+(+j.peak_dmm||0)+' dmm (max '+(+j.max_dmm||0)+')'});trim(M);}
 }
 function trim(M){if(M.motion.length>CAP_PTS)M.motion.splice(0,M.motion.length-CAP_PTS);if(M.line.length>CAP_PTS)M.line.splice(0,M.line.length-CAP_PTS);if(M.events.length>CAP_EV)M.events.splice(0,M.events.length-CAP_EV);}
@@ -397,7 +403,7 @@ function render(M,live){
 
   document.getElementById('foot').textContent=`${M.motion.length} motion · ${M.line.length} line · ${M.states.length} state changes · ${M.events.length} events.`;
 
-  renderLineViz(M);renderScanViz(M);renderWheels(M);updateRunSel(M);drawMap(M);
+  renderLineViz(M);renderScanViz(M);renderBarViz(M);renderWheels(M);updateRunSel(M);drawMap(M);
 }
 
 /* ---------- live sensor panels ---------- */
@@ -454,6 +460,22 @@ function renderScanViz(M){
   document.getElementById('scanCap').textContent='Servo sweep 60°–120° (90° = straight ahead, above 90° = left). Red = closest point, green = side proven clear (length = distance seen), ? = not proven. The car sends this summary, not every angle.';
 }
 
+const navText=c=>c==='UTURN'?'U-TURN':(c||'—');
+function renderBarViz(M){
+  const el=document.getElementById('barViz'),B=M.barcodes,C=M.calB;
+  let h='';
+  if(B.length){const L=B[B.length-1],bad=L.code==='INVALID',nav=L.command&&L.command!=='NONE';
+    h+=`<div style="display:flex;gap:14px;align-items:center;margin-top:4px"><div class="bigcode" style="color:${bad?'var(--bad)':'var(--fg)'}">${esc(bad?'✕':(L.code||'?'))}</div>`+
+       `<div><span class="pill ${bad?'bad':nav?'ok':''}">${esc(bad?'not read':navText(L.command))}</span><div class="cap" style="margin:6px 0 0">${esc(shortTime(L.ts))} · ${B.length} read${B.length>1?'s':''}, ${B.filter(b=>b.code==='INVALID').length} invalid</div></div></div>`;
+    h+='<div class="barlist">'+B.slice(-6).reverse().map(b=>`<div>${esc(shortTime(b.ts))} <b>${esc(b.code||'?')}</b> → ${esc(navText(b.command))}</div>`).join('')+'</div>';}
+  else h+='<div class="cap">No barcode read yet.</div>';
+  if(C){const pc=v=>100*Math.max(0,Math.min(4095,v))/4095,lo=Math.min(C.low,C.high),hi=Math.max(C.low,C.high);
+    h+=`<div class="vrow" style="margin-top:12px"><div class="nm">Range</div><div class="vtrack"><div class="fill" style="position:absolute;left:${pc(lo)}%;width:${Math.max(1,pc(hi)-pc(lo))}%;background:var(--err)"></div><div class="thr" style="left:${pc(C.thr)}%" title="threshold ${C.thr}"></div></div><div class="num">${lo}–${hi}</div></div>`+
+       `<div class="vline"><span class="pill">thr ${C.thr}</span><span class="pill ${C.learned?'ok':'warn'}">${C.learned?'learned':'fallback'}</span></div>`+
+       (C.learned?'':`<div class="cap" style="margin-top:6px">The sensor saw ${lo}–${hi} during the sweep (no bars under it), so the fixed threshold is used.</div>`);}
+  else h+='<div class="cap" style="margin-top:10px">No START calibration in this data yet.</div>';
+  el.innerHTML=h;
+}
 function renderWheels(M){
   const o=M.lastMotion,el=document.getElementById('wheelViz');
   if(!o){el.innerHTML='<div class="cap">No motion data yet.</div>';return;}
@@ -524,7 +546,7 @@ function drawMap(M){
   const P=mapPath(M);
   const legend=Object.entries({LINE_FOLLOW:'line follow',LINE_RECOVERY:'line search',OBSTACLE_SCAN:'scan / reverse',BYPASS:'bypass',EXECUTE_NAV:'barcode turn',SAFE_STOP:'safe stop'})
     .map(([s,l])=>`<span><i style="background:${stateCol(s)}"></i>${l}</span>`).join('')+
-    `<span><i class="dot" style="background:${fg}"></i>centre sensor black</span><span><i class="dot" style="background:${css('--right')}"></i>right sensor black</span><span style="color:${bad}">✕ obstacle (see table)</span>`;
+    `<span><i class="dot" style="background:${fg}"></i>centre sensor black</span><span><i class="dot" style="background:${css('--right')}"></i>right sensor black</span><span style="color:${bad}">✕ obstacle (see table)</span><span style="color:${css('--err')}">◆ barcode</span>`;
   document.getElementById('mapLegend').innerHTML=legend;
   const groups=P?obstacleGroups(P):[];
   updateFocusSel(groups);renderScanTable(P,groups);
@@ -579,6 +601,12 @@ function drawMap(M){
       g.strokeStyle=bad;g.setLineDash([4,4]);g.lineWidth=1.5;g.beginPath();g.moveTo(X(s.sx),Y(s.sy));g.lineTo(X(s.ox),Y(s.oy));g.stroke();g.setLineDash([]);
       const ux=X(s.ox),uy=Y(s.oy);g.lineWidth=2.5;g.beginPath();g.moveTo(ux-6,uy-6);g.lineTo(ux+6,uy+6);g.moveTo(ux+6,uy-6);g.lineTo(ux-6,uy+6);g.stroke();
       g.fillStyle=bad;g.fillText(s.tag||'',ux+9,uy);}
+    g.globalAlpha=1;g.textBaseline='alphabetic';}
+  // Barcodes: diamond and the code letter.
+  {const bc=css('--err');g.font='700 11px '+css('--mono');g.textAlign='left';g.textBaseline='middle';
+    for(const b of (P.barcodes||[])){if(b.x==null||!done(b.t))continue;g.globalAlpha=inWin(b.t)?1:.25;const ux=X(b.x),uy=Y(b.y);
+      g.fillStyle=bc;g.beginPath();g.moveTo(ux,uy-7);g.lineTo(ux+7,uy);g.lineTo(ux,uy+7);g.lineTo(ux-7,uy);g.closePath();g.fill();
+      g.fillText((b.code==='INVALID'?'?':b.code)+(b.command&&b.command!=='NONE'?' '+navText(b.command):''),ux+10,uy);}
     g.globalAlpha=1;g.textBaseline='alphabetic';}
   // Start and the car at time T
   const s0=P.pts[0],h=(carPt.h||0)*Math.PI/180;
