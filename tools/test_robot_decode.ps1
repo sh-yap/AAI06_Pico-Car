@@ -55,10 +55,10 @@ $hb = $json | ConvertFrom-Json
 Check ($hb.fault -eq 516) "heartbeat fault is 10 bits (512 = sensor gap, 4 = motion cmd)"
 Check ($hb.seq -eq 199) "heartbeat readable by ConvertFrom-Json (mqtt_check.ps1)"
 
-Write-Host "barcode codes: A-D and the course's F, Z"
+Write-Host "barcode codes: the course's A, Y, X, F, Z"
 # Header (v 2, t 0) = 34 bits, then code (3) + command (3).  Bits 34-36 =
 # code, 37-39 = command, all in byte 4: code + (command << 3), shifted by 2.
-foreach ($c in @(@(1,'A'), @(4,'D'), @(5,'F'), @(6,'Z'), @(7,'INVALID'))) {
+foreach ($c in @(@(1,'A'), @(2,'Y'), @(3,'X'), @(5,'F'), @(6,'Z'), @(7,'INVALID'))) {
     $b4 = (($c[0] + (3 -shl 3)) -shl 2) -band 0xFF          # command 3 = STRAIGHT
     $bc = Read-RobotPayload 'robot/event/barcode' (ConvertFrom-RobotHex ('02000000' + $b4.ToString('x2')))
     Check (($bc.code -eq $c[1]) -and ($bc.command -eq 'STRAIGHT')) "barcode code $($c[0]) -> $($c[1])"

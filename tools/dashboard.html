@@ -145,6 +145,7 @@
       <input class="port" id="port" value="9001" title="Websocket port">
       <button class="btn" id="connectBtn">Connect</button>
       <span class="status" id="status"><span class="dot"></span><span id="statusText">offline</span></span>
+      <button class="btn ghost" id="saveBtn" disabled title="Download everything received since the page opened, in the mqtt_log.ps1 format">Save log</button>
       <button class="btn ghost" id="themeBtn">Theme</button>
     </div>
   </div>
@@ -218,7 +219,7 @@ const AVOID=['STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY'];
 const CMD=['unknown','start','stop','status'];
 const RUN=['END','BEGIN'];
 const CALRES=['OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP'];
-const BARCODE=['','A','B','C','D','F','Z','INVALID'];
+const BARCODE=['','A','Y','X','?','F','Z','INVALID'];
 const F=(k,kind,bits,names)=>({k,kind,bits,names});
 const FMT={
   'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16),F('tgt_l_mm_s','s',10),F('tgt_r_mm_s','s',10),F('slew_l_mm_s','s',10),F('slew_r_mm_s','s',10),F('pwm_l','s',11),F('pwm_r','s',11)],
@@ -314,7 +315,7 @@ function handle(M,ts,topic,j){
   else if(topic==='robot/state'){const s=j.state,f=+j.fault||0;if(s!==M.prevState||f!==M.prevFault){M.states.push({ts,t:tt,state:s,fault:f});if(f){M.events.push({ts,t:tt,tag:'fault',txt:s+' — fault '+faultName(f)});M.faults.push({name:faultName(f)});}else M.events.push({ts,t:tt,tag:'state',txt:s});M.prevState=s;M.prevFault=f;trim(M);}M.finalState={state:s,fault:f};}
   else if(topic==='robot/event/command'){M.events.push({ts,t:tt,tag:'cmd',txt:'Command '+j.cmd+(j.ok?' ✓':' ✗')});if(j.cmd==='start')M.runs++;trim(M);}
   else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});if(j.run==='BEGIN'){const pl=M.pose?{pl:M.pose.pl,pr:M.pose.pr}:null;startPath(M,ts,'Run '+(M.paths.length+1)+' · '+shortTime(ts));if(pl){M.pose.pl=pl.pl;M.pose.pr=pl.pr;}}trim(M);}
-  else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+j.command});trim(M);}
+  else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+(j.command==='UTURN'?'U-TURN':j.command)});trim(M);}
   else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0,a=+j.angle_deg||90;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm at '+a+'°'+(+j.clear_l_mm?', left clear '+j.clear_l_mm+' mm':'')+(+j.clear_r_mm?', right clear '+j.clear_r_mm+' mm':'')+' → '+j.action+(d===0?' (no reading)':'')});
     const sc={ts,t:tt,dist:d,angle:a,width:+j.width_mm||0,cl:+j.clear_l_mm||0,cr:+j.clear_r_mm||0,action:j.action,run:M.cur?M.cur.label:''};
     if(M.cur&&M.pose){const s=carPoint(M.pose,US_AHEAD_MM,0),h2=(M.pose.h+(90-a))*Math.PI/180;sc.sx=s.x;sc.sy=s.y;sc.h=M.pose.h;if(d>0){sc.ox=s.x+d*Math.sin(h2);sc.oy=s.y+d*Math.cos(h2);}M.cur.scans.push(sc);}
@@ -565,6 +566,15 @@ function updateCharts(M){
 
 /* ---------- state ---------- */
 let model=newModel(), mode='idle', client=null, dirty=true;
+/* Every live message, as mqtt_log.ps1 writes it (time topic json), so a
+ * saved file loads back here.  Kept across reconnects until the page closes. */
+const LOG_MAX=300000; let rawLog=[];
+const pad=(n,w)=>String(n).padStart(w||2,'0');
+function localIso(d){return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds())+'.'+pad(d.getMilliseconds(),3)+'000000';}
+function recordRaw(ts,topic,j){rawLog.push(ts+' '+topic+' '+(j&&j._text!=null&&Object.keys(j).length===1?j._text:JSON.stringify(j)));if(rawLog.length>LOG_MAX)rawLog.splice(0,rawLog.length-LOG_MAX);}
+function updateSaveBtn(){const b=document.getElementById('saveBtn');b.disabled=!rawLog.length;b.textContent=rawLog.length?'Save log ('+rawLog.length+')':'Save log';}
+function saveLog(){if(!rawLog.length)return;const d=new Date(),name='dashboard_'+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())+'.log';
+  const url=URL.createObjectURL(new Blob([rawLog.join('\r\n')+'\r\n'],{type:'text/plain'}));const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function setModel(M,live){model=M;mode=live?'live':'file';scanSel=null;mapSel='latest';makeCharts(model);render(model,live);}
 
 /* ---------- MQTT live ---------- */
@@ -585,13 +595,13 @@ function connect(){
   client.on('message',(topic,payload)=>{
     let bytes;try{bytes=new Uint8Array(payload);}catch(e){return;}
     let j;try{j=decode(topic,bytes);}catch(e){return;}
-    const ts=new Date().toISOString();
-    handle(model,ts,topic,j);dirty=true;
+    const ts=localIso(new Date());
+    recordRaw(ts,topic,j);handle(model,ts,topic,j);dirty=true;
   });
 }
 function disconnect(){if(client){try{client.end(true);}catch(e){}client=null;}setStatus('','offline');setCmdEnabled(false);document.getElementById('connectBtn').textContent='Connect';}
 function pub(cmd){if(client&&client.connected){client.publish('robot/command',cmd);
-  model.events.push({ts:new Date().toISOString(),t:null,tag:'cmd',txt:'Sent → '+cmd});dirty=true;}}
+  model.events.push({ts:localIso(new Date()),t:null,tag:'cmd',txt:'Sent → '+cmd});dirty=true;}}
 
 document.getElementById('connectBtn').onclick=()=>{if(client){disconnect();}else{connect();}};
 document.getElementById('cmdStart').onclick=()=>pub('start');
@@ -605,8 +615,11 @@ document.getElementById('runSel').onchange=e=>{mapSel=e.target.value;makeCharts(
 ['showHits','showScans'].forEach(id=>document.getElementById(id).onchange=()=>drawMap(model));
 window.addEventListener('resize',()=>drawMap(model));
 
+document.getElementById('saveBtn').onclick=saveLog;
+window.addEventListener('beforeunload',e=>{if(rawLog.length){e.preventDefault();e.returnValue='';}});
+
 /* live refresh loop */
-setInterval(()=>{if(mode==='live'&&dirty){dirty=false;render(model,true);updateCharts(model);}},350);
+setInterval(()=>{if(mode==='live'&&dirty){dirty=false;render(model,true);updateCharts(model);updateSaveBtn();}},350);
 
 /* ---------- offline log loading ---------- */
 function loadText(t,label){setModel(parseLog(t),false);document.getElementById('meta').insertAdjacentHTML('afterbegin',`<div>File <b>${esc(label)}</b></div>`);}

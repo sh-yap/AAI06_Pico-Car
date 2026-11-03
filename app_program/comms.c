@@ -590,13 +590,14 @@ non_negative (int32_t value)
 }
 
 
-/* Barcode character -> 3-bit code.  Covers both the design's A-D and the
- * course's A, F, Z until the team settles which set is used:
- * 0 NONE, 1 A, 2 B, 3 C, 4 D, 5 F, 6 Z, 7 INVALID. */
+/* Barcode character -> 3-bit code, the course set (Buddy 3's barcode.c):
+ * 0 NONE, 1 A, 2 Y, 3 X, 4 spare, 5 F, 6 Z, 7 INVALID.  Y and X took the
+ * design's unused B and C (3 Nov); A, F and Z keep their codes so older
+ * logs still decode them. */
 static uint32_t
 barcode_code (char code)
 {
-    static char const g_letters[] = "ABCDFZ";
+    static char const g_letters[] = { 'A', 'Y', 'X', '\0', 'F', 'Z' };
     uint32_t          result = 7U;
     uint32_t          i;
 
@@ -606,7 +607,7 @@ barcode_code (char code)
     }
     else
     {
-        for (i = 0U; (7U == result) && ('\0' != g_letters[i]); i++)
+        for (i = 0U; (7U == result) && (i < sizeof(g_letters)); i++)
         {
             if (g_letters[i] == code)
             {

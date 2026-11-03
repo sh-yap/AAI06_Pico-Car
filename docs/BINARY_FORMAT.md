@@ -92,7 +92,7 @@ header included.  JSON size = average from the CR1 baseline
 
 | Field | Bits | Range / meaning | Status |
 |---|---:|---|---|
-| `code` | 3 | 0 NONE, 1 A, 2 B, 3 C, 4 D, 5 F, 6 Z, 7 INVALID | Proposed: covers the design (A–D) and the course slide (A, F, Z) until settled |
+| `code` | 3 | 0 NONE, 1 A, 2 Y, 3 X, 4 spare, 5 F, 6 Z, 7 INVALID | Course set (3 Nov): Y and X replaced the unused B and C; A, F, Z kept their codes |
 | `command` | 3 | 0 NONE, 1 LEFT, 2 RIGHT, 3 STRAIGHT, 4 UTURN | Code + Tribunal |
 
 6 + 34 = 40 bits → **5 bytes** (JSON 49 B).

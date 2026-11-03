@@ -485,7 +485,7 @@ nav_from_buddy3 (nav_command_t nav)
 static char
 barcode_char (barcode_t code)
 {
-    static char const g_chars[] = "-AFZ?";     /* NONE, A, F, Z, INVALID */
+    static char const g_chars[] = "-AFZYX?";   /* NONE, A, F, Z, Y, X, INVALID */
     char              c         = '?';
 
     if ((uint32_t) code < (sizeof(g_chars) - 1U))
@@ -517,10 +517,9 @@ report_line (buddy3_status_t const * p_status, vc_nav_t nav)
 }
 
 
-/* Drain Buddy 3's packed words: cache the latest sample and keep the
- * first barcode command. During following/recovery, any valid JUNCTION
- * wins for this step so a later sample cannot erase the event. Invalid
- * words (reserved bits / codes) are ignored. */
+/* Drain Buddy 3's queue of packed 32-bit status words: the latest line
+ * wins, the first barcode command is kept.  A word that fails
+ * buddy3_status_unpack() (reserved bits / codes) is ignored. */
 static void
 read_line (vc_inputs_t * p_in, uint32_t now)
 {
@@ -535,7 +534,6 @@ read_line (vc_inputs_t * p_in, uint32_t now)
     vc_nav_t         nav;
     uint32_t         i;
     bool             b_more = true;
-    bool             b_junction = false;
 
     for (i = 0U; b_more && (i < VC_LINE_DRAIN_MAX); i++)
     {
@@ -545,10 +543,6 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         if (b_more && buddy3_status_unpack(packed, &status))
         {
             s_line    = line_from_buddy3(status.line_state);
-            if (VC_LINE_JUNCTION == s_line)
-            {
-                b_junction = true;
-            }
             s_sensors = status.line_sensors;
             s_error   = status.line_error;      /* Already -127..+127. */
             s_cal     = (vc_cal_b3_t) status.cal_state;     /* Same order. */
@@ -573,12 +567,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 
     if (s_b_seen && ((now - s_seen_ms) < VC_LINE_STALE_MS))
     {
-        /* Preserve calibration's latest-sample interpretation. The cache
-         * stays latest even when an event is selected for this run step. */
-        p_in->line = (b_junction
-                      && ((VC_STATE_FOLLOW_LINE == g_vc.state)
-                          || (VC_STATE_REACQUIRE_LINE == g_vc.state)))
-                       ? VC_LINE_JUNCTION : s_line;
+        p_in->line       = s_line;
         p_in->line_error = s_error;
         p_in->line_sensors = s_sensors;
     }

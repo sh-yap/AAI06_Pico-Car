@@ -120,7 +120,7 @@ static c39_symbol_t const c39_table[] =
 
 /*
  * Course characters and the barcode they report.
- * Course barcodes are *A*, *F* and *Z*.
+ * Course barcodes are *A*, *F*, *Z*, *Y* and *X*.
  * HARDCODED for now: update this table and barcode_get_command()
  * if the codes change on exam day.
  * Characters not listed are reported as INVALID.
@@ -136,6 +136,8 @@ static course_code_t const course_codes[] =
     { 'A', BARCODE_A },
     { 'F', BARCODE_F },
     { 'Z', BARCODE_Z },
+    { 'Y', BARCODE_Y },
+    { 'X', BARCODE_X },
 };
 
 /* Stored black/white transition data. */
@@ -615,6 +617,7 @@ nav_command_t barcode_get_command(void)
     switch (code)
     {
         case BARCODE_A:
+        case BARCODE_Y:
             command = NAV_LEFT;
             break;
 
@@ -624,6 +627,10 @@ nav_command_t barcode_get_command(void)
 
         case BARCODE_Z:
             command = NAV_STRAIGHT;
+            break;
+
+        case BARCODE_X:
+            command = NAV_UTURN;
             break;
 
         case BARCODE_NONE:
