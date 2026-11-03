@@ -358,9 +358,9 @@ test_monitor_stop(void)
 
     /* Still there after the ack: raised again after two readings. */
     obstacle_monitor_ack(&mon);
-    feed(&mon, OBSTACLE_RANGE_OK, 230U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 20U, &rep);
     check_u32("re-raise one", mon.b_ahead, false);
-    feed(&mon, OBSTACLE_RANGE_OK, 230U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_STOP_DISTANCE_MM - 20U, &rep);
     check_u32("re-raise two", mon.b_ahead, true);
 
     /* One stray far echo between close readings neither stops nor
@@ -390,10 +390,11 @@ test_monitor_lost_and_blind(void)
     obstacle_monitor_t mon;
     obstacle_status_t  rep;
 
-    /* D4: off-centre obstacle seen at 500 mm, then the wall at 2.16 m. */
+    /* D4: off-centre obstacle seen nearer than LOST_NEAR_MM, then the
+     * wall at 2.16 m. */
     obstacle_monitor_reset(&mon);
-    feed(&mon, OBSTACLE_RANGE_OK, 528U, &rep);
-    feed(&mon, OBSTACLE_RANGE_OK, 500U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_LOST_NEAR_MM - 10U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_LOST_NEAR_MM - 20U, &rep);
     feed(&mon, OBSTACLE_RANGE_OK, 2162U, &rep);
     check_u32("lost one far", mon.b_ahead, false);
     feed(&mon, OBSTACLE_RANGE_OK, 2161U, &rep);
@@ -401,13 +402,26 @@ test_monitor_lost_and_blind(void)
 
     /* Lost into TIMEOUT. */
     obstacle_monitor_reset(&mon);
-    feed(&mon, OBSTACLE_RANGE_OK, 500U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, OBSTACLE_LOST_NEAR_MM - 20U, &rep);
     feed(&mon, OBSTACLE_RANGE_TIMEOUT, 0U, &rep);
     check_u32("lost one timeout", mon.b_ahead, false);
     feed(&mon, OBSTACLE_RANGE_TIMEOUT, 0U, &rep);
     check_u32("lost two timeouts", mon.b_ahead, true);
 
-    /* Something far (> 600 mm) that disappears is not remembered. */
+    /* Track test 2026-11-03: in a turn the course wall passes 300 mm away
+     * and then leaves the beam.  Neither rule may stop the car. */
+    obstacle_monitor_reset(&mon);
+    feed(&mon, OBSTACLE_RANGE_OK, 340U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, 310U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, 300U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, 305U, &rep);
+    feed(&mon, OBSTACLE_RANGE_TIMEOUT, 0U, &rep);
+    feed(&mon, OBSTACLE_RANGE_TIMEOUT, 0U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, 1800U, &rep);
+    feed(&mon, OBSTACLE_RANGE_OK, 1790U, &rep);
+    check_u32("wall in a turn", mon.b_ahead, false);
+
+    /* Something far (> LOST_NEAR_MM) that disappears is not remembered. */
     obstacle_monitor_reset(&mon);
     feed(&mon, OBSTACLE_RANGE_OK, 900U, &rep);
     feed(&mon, OBSTACLE_RANGE_TIMEOUT, 0U, &rep);

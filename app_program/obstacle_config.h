@@ -95,10 +95,12 @@
  * ------------------------------------------------------------------------ */
 
 /* FR-B5-03: OBSTACLE_AHEAD after two consecutive readings under this.
- * Was 250 mm; raised 2026-11-01 so the car stops (about 350 mm) far
- * enough away for a "^" bypass of 25-30 deg: from 250 mm it stops nearer
- * than any allowed turn can clear (obstacle_plan.c) and must reverse. */
-#define OBSTACLE_STOP_DISTANCE_MM       (400U)
+ * Track test 2026-11-03: in a turn the course wall is 300 mm away, and at
+ * 400 mm the car stopped and bypassed the wall.  At 200 mm the wall is
+ * never reached.  The car stops within about 30 mm of the trigger (two
+ * pings, then 0-10 mm of roll in 40 logged stops), nearer than the plan's
+ * 210 mm minimum, so it reverses VC_REVERSE_MM once and rescans. */
+#define OBSTACLE_STOP_DISTANCE_MM       (200U)
 #define OBSTACLE_STOP_READINGS          (2U)
 
 /* Blind-zone latch.  Bench test 2026-10-25: a flat board at 1-2 cm reads
@@ -109,8 +111,10 @@
 /* Lost-obstacle rule.  Bench test 2026-10-25 (D4): an off-centre obstacle
  * seen at 500 mm was lost at 250 mm.  An obstacle seen nearer than
  * LOST_NEAR_MM that then reads TIMEOUT, or more than LOST_JUMP_MM further,
- * for LOST_READINGS readings in a row raises OBSTACLE_AHEAD. */
-#define OBSTACLE_LOST_NEAR_MM           (600U)
+ * for LOST_READINGS readings in a row raises OBSTACLE_AHEAD.
+ * Was 600 mm; lowered 2026-11-03 with the stop distance, below the 300 mm
+ * course wall: a wall leaving the beam as the car turns must not count. */
+#define OBSTACLE_LOST_NEAR_MM           (250U)
 #define OBSTACLE_LOST_JUMP_MM           (200U)
 #define OBSTACLE_LOST_READINGS          (2U)
 

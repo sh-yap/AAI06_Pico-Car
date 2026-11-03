@@ -129,7 +129,17 @@
   .maphead select{font-family:var(--mono);font-size:12.5px;background:var(--surface-2);color:var(--fg);border:1px solid var(--border);border-radius:7px;padding:5px 8px;max-width:100%}
   .maphead label{font-size:12.5px;color:var(--muted);display:flex;gap:5px;align-items:center}
   .mapwrap{position:relative;height:480px}
-  .mapwrap canvas{position:absolute;inset:0;width:100%;height:100%}
+  .mapwrap canvas{position:absolute;inset:0;width:100%;height:100%;cursor:grab;touch-action:none}
+  .mapwrap canvas:active{cursor:grabbing}
+  .replay{display:flex;gap:10px;align-items:center;margin-top:8px}
+  .replay input{flex:1;min-width:0;accent-color:var(--accent)}
+  .replay .btn{padding:4px 12px}
+  .replay span{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:180px;text-align:right;font-variant-numeric:tabular-nums}
+  .scantable{margin-top:10px;display:grid;grid-template-columns:44px 74px 1fr 1fr;font-size:12.5px;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .scantable div{padding:6px 10px;border-bottom:1px solid var(--border);font-family:var(--mono);min-width:0;overflow-wrap:anywhere}
+  .scantable .hd{font-family:var(--font);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);background:var(--surface-2)}
+  .scantable .row{cursor:pointer}
+  .scantable .row.on{background:var(--surface-2);font-weight:600}
   .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
   .legend i{display:inline-block;width:14px;height:4px;border-radius:2px;margin-right:5px;vertical-align:middle}
   .legend i.dot{width:7px;height:7px;border-radius:50%}
@@ -185,11 +195,16 @@
   <div class="card full">
     <div class="maphead"><h3>Where the car went</h3>
       <select id="runSel" title="Which run to draw"><option value="latest">Latest run</option></select>
+      <select id="focusSel" title="Zoom to one obstacle"><option value="all">Whole run</option></select>
       <label><input type="checkbox" id="showHits" checked> line hits</label>
       <label><input type="checkbox" id="showScans" checked> scans</label></div>
-    <div class="cap">Worked out from the wheel encoders, so it drifts a few cm per metre. Start ○, end ▲, forward is up at the start. Dots mark where a line sensor saw black, so they trace the tape the car found. ✕ marks the closest obstacle point from each scan.</div>
+    <div class="cap">Worked out from the wheel encoders, so it drifts a few cm per metre. Start ○, car ▲, forward is up at the start; chevrons show the direction, dashed = reversing. Dots mark where a line sensor saw black. Scroll to zoom, drag to move, double-click to reset. Pick an obstacle above, or a row below, to see just that bypass.</div>
     <div class="mapwrap"><canvas id="map"></canvas></div>
+    <div class="replay"><button class="btn ghost" id="playBtn" title="Replay the run">▶</button>
+      <input type="range" id="replay" min="0" max="1000" value="1000" title="Drag to replay">
+      <span id="replayLab"></span></div>
     <div class="legend" id="mapLegend"></div>
+    <div class="scantable" id="scanTable"></div>
   </div>
 
   <div class="section-title">Charts</div>
@@ -282,12 +297,13 @@ function newModel(){return{build:'',first:null,last:null,motion:[],line:[],state
   paths:[],cur:null,pose:null,allowJoin:false,lastLine:null,lastMotion:null,cal:null,scans:[]};}
 
 /* Path map: one path per run, dead-reckoned from the encoder counts. */
-function startPath(M,ts,label){const p={label,ts,pts:[{x:0,y:0,s:M.prevState}],hits:[],scans:[]};M.paths.push(p);M.cur=p;M.pose={x:0,y:0,h:0,pl:null,pr:null};}
+function startPath(M,ts,label,t){const p={label,ts,pts:[{x:0,y:0,s:M.prevState,h:0,t:t==null?null:t}],hits:[],scans:[],states:[]};M.paths.push(p);M.cur=p;M.pose={x:0,y:0,h:0,pl:null,pr:null};}
 function wrapEnc(d){return ((d%ENC_SPAN)+ENC_SPAN+ENC_SPAN/2)%ENC_SPAN-ENC_SPAN/2;}
 // Point fwd mm ahead of and right mm to the right of the rear axle.
 function carPoint(P,fwd,right){const h=P.h*Math.PI/180;return{x:P.x+fwd*Math.sin(h)+right*Math.cos(h),y:P.y+fwd*Math.cos(h)-right*Math.sin(h)};}
-function trackPose(M,ts,el,er){
-  if(!M.cur){if(!M.allowJoin)return;startPath(M,ts,'Joined '+shortTime(ts));}
+function trackPose(M,ts,el,er,t){
+  if(!M.cur){if(!M.allowJoin)return;startPath(M,ts,'Joined '+shortTime(ts),t);}
+  if(M.cur.pts[0].t==null)M.cur.pts[0].t=t;
   const P=M.pose;
   if(P.pl!=null){
     const dl=wrapEnc(el-P.pl),dr=wrapEnc(er-P.pr);
@@ -295,7 +311,7 @@ function trackPose(M,ts,el,er){
       const ds=(dl+dr)/2*MM_PER_COUNT,dh=(dl-dr)*DEG_PER_COUNT,hm=(P.h+dh/2)*Math.PI/180;
       P.x+=ds*Math.sin(hm);P.y+=ds*Math.cos(hm);P.h+=dh;
       const pts=M.cur.pts,lp=pts[pts.length-1];
-      if(lp.s!==M.prevState||Math.hypot(P.x-lp.x,P.y-lp.y)>=2||Math.abs(dh)>=1){pts.push({x:P.x,y:P.y,s:M.prevState,h:P.h});if(pts.length>CAP_PATH)pts.splice(1,pts.length-CAP_PATH);}
+      if(lp.s!==M.prevState||Math.hypot(P.x-lp.x,P.y-lp.y)>=2||Math.abs(dh)>=1){pts.push({x:P.x,y:P.y,s:M.prevState,h:P.h,t,rev:ds<-0.5});if(pts.length>CAP_PATH)pts.splice(1,pts.length-CAP_PATH);}
     }
   }
   P.pl=el;P.pr=er;
@@ -308,13 +324,13 @@ function handle(M,ts,topic,j){
   if(topic==='robot/info'){M.build=j._text||'';return;}
   if(topic==='robot/status'){const off=/offline/.test(j._text||'');if(off)M.drops++;M.events.push({ts,t:tt,tag:'conn',txt:'WiFi '+(off?'offline':'online')});trim(M);return;}
   if(topic==='robot/telemetry/motion'){const o={ts,t:tt,l:+j.spd_l_mm_s||0,r:+j.spd_r_mm_s||0,dist:+j.dist_mm||0,tl:+j.tgt_l_mm_s||0,tr:+j.tgt_r_mm_s||0};M.motion.push(o);M.lastMotion=o;M.peakSpeed=Math.max(M.peakSpeed,Math.abs(o.l),Math.abs(o.r));M.distance=Math.max(M.distance,o.dist);
-    if(j.enc_l!=null&&j.enc_r!=null)trackPose(M,ts,+j.enc_l,+j.enc_r);trim(M);}
+    if(j.enc_l!=null&&j.enc_r!=null)trackPose(M,ts,+j.enc_l,+j.enc_r,tt);trim(M);}
   else if(topic==='robot/telemetry/line'){const o={ts,t:tt,pos:j.pos,err:+j.err||0,sensors:+j.sensors||0,c:j.centre_adc!=null?+j.centre_adc:null,r:j.right_adc!=null?+j.right_adc:null};M.line.push(o);M.lastLine=o;if(j.pos)M.pos[j.pos]=(M.pos[j.pos]||0)+1;
-    if(M.cur&&M.pose&&o.sensors){const H=M.cur.hits;if(o.sensors&1)H.push({...carPoint(M.pose,SENSOR_AHEAD_MM,0),k:'c'});if(o.sensors&2)H.push({...carPoint(M.pose,SENSOR_AHEAD_MM,RIGHT_SENSOR_MM),k:'r'});if(H.length>CAP_HITS)H.splice(0,H.length-CAP_HITS);}
+    if(M.cur&&M.pose&&o.sensors){const H=M.cur.hits;if(o.sensors&1)H.push({...carPoint(M.pose,SENSOR_AHEAD_MM,0),k:'c',t:tt});if(o.sensors&2)H.push({...carPoint(M.pose,SENSOR_AHEAD_MM,RIGHT_SENSOR_MM),k:'r',t:tt});if(H.length>CAP_HITS)H.splice(0,H.length-CAP_HITS);}
     trim(M);}
-  else if(topic==='robot/state'){const s=j.state,f=+j.fault||0;if(s!==M.prevState||f!==M.prevFault){M.states.push({ts,t:tt,state:s,fault:f});if(f){M.events.push({ts,t:tt,tag:'fault',txt:s+' — fault '+faultName(f)});M.faults.push({name:faultName(f)});}else M.events.push({ts,t:tt,tag:'state',txt:s});M.prevState=s;M.prevFault=f;trim(M);}M.finalState={state:s,fault:f};}
+  else if(topic==='robot/state'){const s=j.state,f=+j.fault||0;if(s!==M.prevState||f!==M.prevFault){M.states.push({ts,t:tt,state:s,fault:f});if(M.cur&&s!==M.prevState)M.cur.states.push({t:tt,s});if(f){M.events.push({ts,t:tt,tag:'fault',txt:s+' — fault '+faultName(f)});M.faults.push({name:faultName(f)});}else M.events.push({ts,t:tt,tag:'state',txt:s});M.prevState=s;M.prevFault=f;trim(M);}M.finalState={state:s,fault:f};}
   else if(topic==='robot/event/command'){M.events.push({ts,t:tt,tag:'cmd',txt:'Command '+j.cmd+(j.ok?' ✓':' ✗')});if(j.cmd==='start')M.runs++;trim(M);}
-  else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});if(j.run==='BEGIN'){const pl=M.pose?{pl:M.pose.pl,pr:M.pose.pr}:null;startPath(M,ts,'Run '+(M.paths.length+1)+' · '+shortTime(ts));if(pl){M.pose.pl=pl.pl;M.pose.pr=pl.pr;}}trim(M);}
+  else if(topic==='robot/event/run'){M.events.push({ts,t:tt,tag:'cmd',txt:'Run '+j.run});if(j.run==='BEGIN'){const pl=M.pose?{pl:M.pose.pl,pr:M.pose.pr}:null;startPath(M,ts,'Run '+(M.paths.length+1)+' · '+shortTime(ts),tt);if(pl){M.pose.pl=pl.pl;M.pose.pr=pl.pr;}}trim(M);}
   else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+(j.command==='UTURN'?'U-TURN':j.command)});trim(M);}
   else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0,a=+j.angle_deg||90;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm at '+a+'°'+(+j.clear_l_mm?', left clear '+j.clear_l_mm+' mm':'')+(+j.clear_r_mm?', right clear '+j.clear_r_mm+' mm':'')+' → '+j.action+(d===0?' (no reading)':'')});
     const sc={ts,t:tt,dist:d,angle:a,width:+j.width_mm||0,cl:+j.clear_l_mm||0,cr:+j.clear_r_mm||0,action:j.action,run:M.cur?M.cur.label:''};
@@ -451,7 +467,7 @@ function renderWheels(M){
 }
 
 /* ---------- path map ---------- */
-let mapSel='latest';
+let mapSel='latest', focusSel='all', replayPos=1000, mapZoom=1, mapPan={x:0,y:0}, mapBase=null, playTimer=null;
 function updateRunSel(M){
   const sel=document.getElementById('runSel');
   if(sel.options.length!==M.paths.length+1){
@@ -460,49 +476,131 @@ function updateRunSel(M){
   }
   else if(sel.value!==mapSel){sel.value=mapSel;}
 }
+function mapPath(M){return mapSel==='latest'?M.paths[M.paths.length-1]:M.paths[+mapSel];}
+function resetMapView(){mapZoom=1;mapPan={x:0,y:0};}
+
+/* One obstacle = its scans in a row (a REVERSE_RETRY is followed by its
+ * rescan), from 1.5 s before the first scan until 2.5 s after the car is
+ * back to line following. */
+function obstacleGroups(P){
+  const groups=[];let cur=null;
+  P.scans.forEach(s=>{if(!cur||cur.last!=='REVERSE_RETRY'){cur={n:groups.length+1,scans:[]};groups.push(cur);}
+    cur.scans.push(s);cur.last=s.action;});
+  const end=P.pts.length?P.pts[P.pts.length-1].t:null;
+  for(const G of groups){
+    G.scans.forEach((s,i)=>{s.tag=G.n+(G.scans.length>1?'abcdefgh'[i]||'':'');});
+    const tl=G.scans[G.scans.length-1].t,back=P.states.find(x=>x.t>tl&&x.s==='LINE_FOLLOW');
+    G.from=G.scans[0].t-1500;G.to=back?back.t+2500:end;
+  }
+  return groups;
+}
+function updateFocusSel(groups){
+  const sel=document.getElementById('focusSel');
+  if(sel.options.length!==groups.length+1){
+    sel.innerHTML='<option value="all">Whole run</option>'+groups.map((G,i)=>{const L=G.scans[G.scans.length-1];
+      return `<option value="${i}">Obstacle ${G.n} · ${esc(shortTime(G.scans[0].ts))} · ${esc(L.action||'')}</option>`;}).join('');
+  }
+  if(focusSel!=='all'&&+focusSel>=groups.length)focusSel='all';
+  if(sel.value!==focusSel)sel.value=focusSel;
+}
+function renderScanTable(P,groups){
+  const el=document.getElementById('scanTable');
+  if(!P||!P.scans.length){el.innerHTML='';el.style.display='none';return;}
+  el.style.display='';
+  const t0=P.pts[0].t||0;
+  let h='<div class="hd">#</div><div class="hd">Time</div><div class="hd">Closest</div><div class="hd">Decision</div>';
+  groups.forEach((G,gi)=>G.scans.forEach(s=>{const on=String(gi)===focusSel?' on':'';
+    const a=`class="row${on}" data-g="${gi}"`;
+    h+=`<div ${a}>${esc(s.tag)}</div><div ${a}>${s.t!=null?((s.t-t0)/1000).toFixed(1)+' s':'—'}</div><div ${a}>${s.dist?s.dist+' mm @ '+s.angle+'°':'none'}</div><div ${a}>${esc(s.action||'')}</div>`;}));
+  el.innerHTML=h;
+  el.querySelectorAll('.row').forEach(d=>d.onclick=()=>{const g=d.getAttribute('data-g');focusSel=(focusSel===g)?'all':g;resetMapView();replayPos=1000;drawMap(model);});
+}
 function drawMap(M){
   const cv=document.getElementById('map'),box=cv.parentElement,dpr=window.devicePixelRatio||1;
   const W=box.clientWidth,H=box.clientHeight;if(!W||!H)return;
   if(cv.width!==Math.round(W*dpr)||cv.height!==Math.round(H*dpr)){cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);}
   const g=cv.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
-  const mu=css('--muted'),bd=css('--border'),fg=css('--fg');
-  const P=mapSel==='latest'?M.paths[M.paths.length-1]:M.paths[+mapSel];
-  const legend=Object.entries({LINE_FOLLOW:'line follow',LINE_RECOVERY:'line search',OBSTACLE_SCAN:'scan',BYPASS:'bypass',EXECUTE_NAV:'barcode turn',SAFE_STOP:'safe stop'})
+  const mu=css('--muted'),bd=css('--border'),fg=css('--fg'),bad=css('--bad');
+  const P=mapPath(M);
+  const legend=Object.entries({LINE_FOLLOW:'line follow',LINE_RECOVERY:'line search',OBSTACLE_SCAN:'scan / reverse',BYPASS:'bypass',EXECUTE_NAV:'barcode turn',SAFE_STOP:'safe stop'})
     .map(([s,l])=>`<span><i style="background:${stateCol(s)}"></i>${l}</span>`).join('')+
-    `<span><i class="dot" style="background:${fg}"></i>centre sensor black</span><span><i class="dot" style="background:${css('--right')}"></i>right sensor black</span><span style="color:${css('--bad')}">✕ obstacle</span>`;
+    `<span><i class="dot" style="background:${fg}"></i>centre sensor black</span><span><i class="dot" style="background:${css('--right')}"></i>right sensor black</span><span style="color:${bad}">✕ obstacle (see table)</span>`;
   document.getElementById('mapLegend').innerHTML=legend;
-  if(!P||P.pts.length<2){g.fillStyle=mu;g.font='13px '+css('--font');g.textAlign='center';g.fillText('No path yet. A path starts when a run begins (needs enc_l / enc_r in robot/telemetry/motion).',W/2,H/2);return;}
+  const groups=P?obstacleGroups(P):[];
+  updateFocusSel(groups);renderScanTable(P,groups);
+  const lab=document.getElementById('replayLab');
+  if(!P||P.pts.length<2){lab.textContent='';mapBase=null;g.fillStyle=mu;g.font='13px '+css('--font');g.textAlign='center';g.fillText('No path yet. A path starts when a run begins (needs enc_l / enc_r in robot/telemetry/motion).',W/2,H/2);return;}
+
+  // Time window (whole run or one obstacle) and the replay time T in it.
+  const tFirst=P.pts[0].t!=null?P.pts[0].t:0,tLast=P.pts[P.pts.length-1].t!=null?P.pts[P.pts.length-1].t:tFirst;
+  const G=focusSel==='all'?null:groups[+focusSel];
+  const A=G?Math.max(tFirst,G.from):tFirst,B=G?Math.min(tLast,G.to):tLast;
+  const T=A+(B-A)*replayPos/1000;
+  const inWin=t=>t==null||(t>=A&&t<=B),done=t=>t==null||t<=T;
   const showHits=document.getElementById('showHits').checked,showScans=document.getElementById('showScans').checked;
+
+  // Fit the window's points; zoom and pan on top.
   let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
   const grow=(x,y)=>{if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;};
-  P.pts.forEach(p=>grow(p.x,p.y));
-  if(showHits)P.hits.forEach(p=>grow(p.x,p.y));
-  if(showScans)P.scans.forEach(s=>{if(s.ox!=null)grow(s.ox,s.oy);});
-  const pad=36,sx=(W-2*pad)/Math.max(200,x1-x0),sy=(H-2*pad)/Math.max(200,y1-y0),k=Math.min(sx,sy);
-  const cx=(x0+x1)/2,cy=(y0+y1)/2,X=x=>W/2+(x-cx)*k,Y=y=>H/2-(y-cy)*k;
+  P.pts.forEach(p=>{if(inWin(p.t))grow(p.x,p.y);});
+  if(showHits)P.hits.forEach(p=>{if(inWin(p.t))grow(p.x,p.y);});
+  if(showScans)P.scans.forEach(s=>{if(s.ox!=null&&inWin(s.t))grow(s.ox,s.oy);});
+  if(!isFinite(x0)){P.pts.forEach(p=>grow(p.x,p.y));}
+  const pad=36,k=Math.min((W-2*pad)/Math.max(200,x1-x0),(H-2*pad)/Math.max(200,y1-y0)),kz=k*mapZoom;
+  const cx=(x0+x1)/2,cy=(y0+y1)/2;
+  mapBase={W,H};
+  const X=x=>W/2+(x-cx)*kz+mapPan.x,Y=y=>H/2-(y-cy)*kz+mapPan.y;
   // Grid
-  const step=[100,250,500,1000,2000].find(s=>s*k>=40)||5000;
+  const step=[50,100,250,500,1000,2000].find(s=>s*kz>=40)||5000;
+  const wx0=cx+(-W/2-mapPan.x)/kz,wx1=cx+(W/2-mapPan.x)/kz,wy0=cy-(H/2-mapPan.y)/kz,wy1=cy-(-H/2-mapPan.y)/kz;
   g.strokeStyle=bd;g.lineWidth=1;g.beginPath();
-  for(let gx=Math.floor((cx-W/2/k)/step)*step;gx<=cx+W/2/k;gx+=step){g.moveTo(X(gx),0);g.lineTo(X(gx),H);}
-  for(let gy=Math.floor((cy-H/2/k)/step)*step;gy<=cy+H/2/k;gy+=step){g.moveTo(0,Y(gy));g.lineTo(W,Y(gy));}
+  for(let gx=Math.floor(wx0/step)*step;gx<=wx1;gx+=step){g.moveTo(X(gx),0);g.lineTo(X(gx),H);}
+  for(let gy=Math.floor(wy0/step)*step;gy<=wy1;gy+=step){g.moveTo(0,Y(gy));g.lineTo(W,Y(gy));}
   g.stroke();
-  // Line hits
-  if(showHits){const cC=fg,cR=css('--right');g.globalAlpha=.55;for(const h of P.hits){g.fillStyle=h.k==='c'?cC:cR;g.beginPath();g.arc(X(h.x),Y(h.y),2.2,0,7);g.fill();}g.globalAlpha=1;}
-  // Path, coloured by state
-  g.lineWidth=3;g.lineCap='round';g.lineJoin='round';
-  for(let i=1;i<P.pts.length;i++){const a=P.pts[i-1],b=P.pts[i];g.strokeStyle=stateCol(b.s);g.beginPath();g.moveTo(X(a.x),Y(a.y));g.lineTo(X(b.x),Y(b.y));g.stroke();}
-  // Scans
-  if(showScans){g.font='600 11px '+css('--mono');g.textAlign='left';
-    for(const s of P.scans){if(s.ox==null)continue;const bad=css('--bad');g.strokeStyle=bad;g.setLineDash([4,4]);g.lineWidth=1.5;g.beginPath();g.moveTo(X(s.sx),Y(s.sy));g.lineTo(X(s.ox),Y(s.oy));g.stroke();g.setLineDash([]);
+  // Line hits: only those already seen in the window.
+  if(showHits){const cR=css('--right');g.globalAlpha=.6;for(const h of P.hits){if(!inWin(h.t)||!done(h.t))continue;g.fillStyle=h.k==='c'?fg:cR;g.beginPath();g.arc(X(h.x),Y(h.y),2.2,0,7);g.fill();}g.globalAlpha=1;}
+  // Path: faint outside the window or after T; dashed when reversing.
+  g.lineCap='round';g.lineJoin='round';
+  let carPt=P.pts[0],dist=0;
+  for(let i=1;i<P.pts.length;i++){
+    const a=P.pts[i-1],b=P.pts[i],live=inWin(b.t)&&done(b.t);
+    if(live)carPt=b;
+    g.globalAlpha=live?1:.12;g.strokeStyle=stateCol(b.s);g.lineWidth=live?3:2;g.setLineDash(b.rev?[5,5]:[]);
+    g.beginPath();g.moveTo(X(a.x),Y(a.y));g.lineTo(X(b.x),Y(b.y));g.stroke();
+    // Direction chevrons about every 60 px of drawn path.
+    if(live&&!b.rev){dist+=Math.hypot(X(b.x)-X(a.x),Y(b.y)-Y(a.y));
+      if(dist>=60){dist=0;const ang=Math.atan2(Y(b.y)-Y(a.y),X(b.x)-X(a.x)),mx=X(b.x),my=Y(b.y);
+        g.setLineDash([]);g.lineWidth=2;g.beginPath();g.moveTo(mx-7*Math.cos(ang-.5),my-7*Math.sin(ang-.5));g.lineTo(mx,my);g.lineTo(mx-7*Math.cos(ang+.5),my-7*Math.sin(ang+.5));g.stroke();}}
+  }
+  g.setLineDash([]);g.globalAlpha=1;
+  // Scans: numbered marks; the table below has the details.
+  if(showScans){g.font='700 11px '+css('--mono');g.textAlign='left';g.textBaseline='middle';
+    for(const s of P.scans){if(s.ox==null||!done(s.t))continue;const on=inWin(s.t);g.globalAlpha=on?1:.25;
+      g.strokeStyle=bad;g.setLineDash([4,4]);g.lineWidth=1.5;g.beginPath();g.moveTo(X(s.sx),Y(s.sy));g.lineTo(X(s.ox),Y(s.oy));g.stroke();g.setLineDash([]);
       const ux=X(s.ox),uy=Y(s.oy);g.lineWidth=2.5;g.beginPath();g.moveTo(ux-6,uy-6);g.lineTo(ux+6,uy+6);g.moveTo(ux+6,uy-6);g.lineTo(ux-6,uy+6);g.stroke();
-      g.fillStyle=bad;g.fillText(s.dist+' mm → '+(s.action||''),ux+9,uy-6);}}
-  // Start and end
-  const s0=P.pts[0],e=P.pts[P.pts.length-1],h=(e.h||0)*Math.PI/180;
+      g.fillStyle=bad;g.fillText(s.tag||'',ux+9,uy);}
+    g.globalAlpha=1;g.textBaseline='alphabetic';}
+  // Start and the car at time T
+  const s0=P.pts[0],h=(carPt.h||0)*Math.PI/180;
   g.strokeStyle=fg;g.lineWidth=2;g.beginPath();g.arc(X(s0.x),Y(s0.y),6,0,7);g.stroke();
-  const ex=X(e.x),ey=Y(e.y),fx=Math.sin(h),fy=-Math.cos(h);
-  g.fillStyle=fg;g.beginPath();g.moveTo(ex+fx*11,ey+fy*11);g.lineTo(ex-fx*6-fy*7,ey-fy*6+fx*7);g.lineTo(ex-fx*6+fy*7,ey-fy*6-fx*7);g.closePath();g.fill();
+  const ex=X(carPt.x),ey=Y(carPt.y),fx=Math.sin(h),fy=-Math.cos(h);
+  g.fillStyle=fg;g.beginPath();g.moveTo(ex+fx*12,ey+fy*12);g.lineTo(ex-fx*7-fy*8,ey-fy*7+fx*8);g.lineTo(ex-fx*7+fy*8,ey-fy*7-fx*8);g.closePath();g.fill();
   // Scale bar
-  g.strokeStyle=mu;g.fillStyle=mu;g.lineWidth=2;g.beginPath();g.moveTo(14,H-14);g.lineTo(14+step*k,H-14);g.stroke();g.font='11px '+css('--mono');g.textAlign='left';g.fillText(step+' mm',14,H-20);
+  g.strokeStyle=mu;g.fillStyle=mu;g.lineWidth=2;g.beginPath();g.moveTo(14,H-14);g.lineTo(14+step*kz,H-14);g.stroke();g.font='11px '+css('--mono');g.textAlign='left';g.fillText(step+' mm',14,H-20);
+  lab.textContent=`t ${((T-tFirst)/1000).toFixed(1)} s / ${((tLast-tFirst)/1000).toFixed(1)} s · ${carPt.s||'—'}`;
+  document.getElementById('replay').value=replayPos;
+}
+function stopPlay(){if(playTimer){clearInterval(playTimer);playTimer=null;}document.getElementById('playBtn').textContent='▶';}
+function togglePlay(){
+  if(playTimer){stopPlay();return;}
+  if(replayPos>=1000)replayPos=0;
+  document.getElementById('playBtn').textContent='❚❚';
+  playTimer=setInterval(()=>{const P=mapPath(model);if(!P||P.pts.length<2){stopPlay();return;}
+    const groups=obstacleGroups(P),G=focusSel==='all'?null:groups[+focusSel];
+    const span=G?(G.to-G.from):((P.pts[P.pts.length-1].t||0)-(P.pts[0].t||0));
+    // Twice real time, at least 4 s for the whole replay.
+    replayPos=Math.min(1000,replayPos+1000*Math.max(100/Math.max(1,span),50/4000));
+    drawMap(model);if(replayPos>=1000)stopPlay();},50);
 }
 
 /* ---------- charts ---------- */
@@ -575,7 +673,7 @@ function recordRaw(ts,topic,j){rawLog.push(ts+' '+topic+' '+(j&&j._text!=null&&O
 function updateSaveBtn(){const b=document.getElementById('saveBtn');b.disabled=!rawLog.length;b.textContent=rawLog.length?'Save log ('+rawLog.length+')':'Save log';}
 function saveLog(){if(!rawLog.length)return;const d=new Date(),name='dashboard_'+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())+'.log';
   const url=URL.createObjectURL(new Blob([rawLog.join('\r\n')+'\r\n'],{type:'text/plain'}));const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function setModel(M,live){model=M;mode=live?'live':'file';scanSel=null;mapSel='latest';makeCharts(model);render(model,live);}
+function setModel(M,live){model=M;mode=live?'live':'file';scanSel=null;mapSel='latest';focusSel='all';replayPos=1000;resetMapView();if(playTimer){clearInterval(playTimer);playTimer=null;}makeCharts(model);render(model,live);}
 
 /* ---------- MQTT live ---------- */
 function setStatus(cls,txt){const s=document.getElementById('status');s.className='status '+cls;document.getElementById('statusText').textContent=txt;}
@@ -611,7 +709,19 @@ document.getElementById('cmdRestart').onclick=()=>{pub('stop');setTimeout(()=>pu
 /* scan browser, path map controls */
 document.getElementById('scanPrev').onclick=()=>{const n=model.scans.length;if(!n)return;scanSel=Math.max(0,(scanSel==null?n-1:scanSel)-1);renderScanViz(model);};
 document.getElementById('scanNext').onclick=()=>{const n=model.scans.length;if(scanSel==null)return;scanSel=(scanSel+1>=n-1)?null:scanSel+1;renderScanViz(model);};
-document.getElementById('runSel').onchange=e=>{mapSel=e.target.value;makeCharts(model);drawMap(model);};
+document.getElementById('runSel').onchange=e=>{mapSel=e.target.value;focusSel='all';replayPos=1000;resetMapView();stopPlay();makeCharts(model);drawMap(model);};
+document.getElementById('focusSel').onchange=e=>{focusSel=e.target.value;replayPos=1000;resetMapView();stopPlay();drawMap(model);};
+document.getElementById('replay').oninput=e=>{stopPlay();replayPos=+e.target.value;drawMap(model);};
+document.getElementById('playBtn').onclick=togglePlay;
+/* Map zoom (wheel, about the cursor), drag to pan, double-click to reset. */
+(function(){const cv=document.getElementById('map');let drag=null;
+  cv.addEventListener('wheel',e=>{if(!mapBase)return;e.preventDefault();const r=cv.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+    const z2=Math.max(.5,Math.min(40,mapZoom*(e.deltaY<0?1.2:1/1.2))),f=z2/mapZoom;
+    mapPan.x=mx-mapBase.W/2-(mx-mapBase.W/2-mapPan.x)*f;mapPan.y=my-mapBase.H/2-(my-mapBase.H/2-mapPan.y)*f;mapZoom=z2;drawMap(model);},{passive:false});
+  cv.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY};cv.setPointerCapture(e.pointerId);});
+  cv.addEventListener('pointermove',e=>{if(!drag)return;mapPan.x+=e.clientX-drag.x;mapPan.y+=e.clientY-drag.y;drag={x:e.clientX,y:e.clientY};drawMap(model);});
+  ['pointerup','pointercancel'].forEach(n=>cv.addEventListener(n,()=>{drag=null;}));
+  cv.addEventListener('dblclick',()=>{resetMapView();drawMap(model);});})();
 ['showHits','showScans'].forEach(id=>document.getElementById(id).onchange=()=>drawMap(model));
 window.addEventListener('resize',()=>drawMap(model));
 
