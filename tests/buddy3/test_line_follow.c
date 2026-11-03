@@ -136,6 +136,38 @@ test_lost(void)
 }
 
 
+static void
+test_junction(void)
+{
+    line_state_t state = LINE_CENTRE;
+    uint32_t i;
+
+    line_follow_init();
+    (void)step(CENTRE_ON, WHITE, &state);
+
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    check("both black, 2 cycles: not yet a junction",
+          state != LINE_JUNCTION);
+
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    check("both black, 3 cycles: JUNCTION", state == LINE_JUNCTION);
+
+    /* Every cycle while over it, so the VC never misses it. */
+    for (i = 0U; i < 10U; i++)
+    {
+        (void)step(CENTRE_ON, RIGHT_ON, &state);
+    }
+    check("still both black: still JUNCTION", state == LINE_JUNCTION);
+
+    (void)step(CENTRE_ON, WHITE, &state);
+    check("right off the crossing: CENTRE", state == LINE_CENTRE);
+
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    check("both black again: debounced afresh", state != LINE_JUNCTION);
+}
+
+
 /*
  * START calibration gap check. A synthetic sweep: both sensors read WHITE,
  * except BLACK_LEVEL inside their own stretch of samples. The sweep starts
@@ -379,6 +411,7 @@ main(void)
     test_centred_and_left_drift();
     test_right_drift();
     test_lost();
+    test_junction();
     test_calibration_gap();
     test_calibration_not_measured();
     test_calibration_moving_only();

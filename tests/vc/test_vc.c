@@ -110,6 +110,26 @@ run_calibration (void)
     step();                                   /* Floor set: run.          */
 }
 
+/* While following the line: onto a junction, and along it far enough for
+ * the VC to accept it (it is handled in the second step). */
+static void
+cross_onto_junction (void)
+{
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
+    step();
+}
+
+/* LEFT or RIGHT stored and the junction just handled: drive on until the
+ * axle is on the crossing line, where the turn starts. */
+static void
+advance_to_turn (void)
+{
+    g_in.travel_mm += VC_JUNCTION_ADVANCE_MM;
+    step();
+}
+
 /* INITIALISE -> READY -> CALIBRATE -> FOLLOW_LINE. */
 static void
 go_to_follow_line (uint32_t start_ms)
@@ -319,14 +339,18 @@ test_barcode_turn (void)
     step();                                   /* Keep driving. */
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
 
-    g_in.line = VC_LINE_JUNCTION;
-    step();
-    CHECK_STATE(VC_STATE_TURNING);            /* Decided in the same step. */
+    cross_onto_junction();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* Drive on to the axle first. */
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
+    CHECK(0 == g_out.steer);
+
+    g_in.line = VC_LINE_CENTRE;
+    advance_to_turn();
+    CHECK_STATE(VC_STATE_TURNING);
     CHECK(g_out.b_state_changed);
     CHECK(VC_MOTION_TURN == g_out.motion);
     CHECK(VC_NAV_LEFT == g_out.turn);
 
-    g_in.line = VC_LINE_CENTRE;
     step();
     CHECK_STATE(VC_STATE_TURNING);            /* Turn still running. */
     CHECK(VC_MOTION_NONE == g_out.motion);    /* Command sent only once. */
@@ -336,8 +360,7 @@ test_barcode_turn (void)
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
 
     /* The stored command was used up: the next junction goes straight. */
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(g_out.b_state_changed);             /* Via HANDLE_JUNCTION. */
     CHECK(VC_MOTION_DRIVE == g_out.motion);
@@ -352,8 +375,7 @@ test_junction_straight_and_uturn (void)
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_STRAIGHT;
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* Straight is not a turn. */
     CHECK(VC_MOTION_DRIVE == g_out.motion);
     g_in.line = VC_LINE_CENTRE;
@@ -362,8 +384,7 @@ test_junction_straight_and_uturn (void)
 
     g_in.barcode = VC_NAV_UTURN;
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_NAV_UTURN == g_out.turn);
 }
@@ -376,10 +397,10 @@ test_turn_failures (void)
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_RIGHT;
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
-    CHECK_STATE(VC_STATE_TURNING);
+    cross_onto_junction();
     g_in.line = VC_LINE_CENTRE;
+    advance_to_turn();
+    CHECK_STATE(VC_STATE_TURNING);
 
     wait_ms(VC_TURN_TIMEOUT_MS - 100U);
     CHECK_STATE(VC_STATE_TURNING);            /* Not yet timed out. */
@@ -393,9 +414,9 @@ test_turn_failures (void)
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_LEFT;
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     g_in.line = VC_LINE_CENTRE;
+    advance_to_turn();
     g_in.b_motion_failed = true;
     step();
     CHECK_STATE(VC_STATE_EMERGENCY_STOP);
@@ -627,8 +648,7 @@ test_stop_command (void)
     g_in.cmd = VC_CMD_START;
     step();
     run_calibration();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* No old turn executed. */
     CHECK(VC_MOTION_TURN != g_out.motion);
 }
@@ -741,8 +761,7 @@ test_junction_edge (void)
     printf("junction handled once, however long it is seen\n");
 
     go_to_follow_line(0U);
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* No barcode: straight on. */
 
     g_in.barcode = VC_NAV_LEFT;               /* Next junction's barcode. */
@@ -756,8 +775,8 @@ test_junction_edge (void)
     g_in.line = VC_LINE_CENTRE;               /* Leave junction 1. */
     g_in.travel_mm += VC_JUNCTION_HOLD_MM;
     step();
-    g_in.line = VC_LINE_JUNCTION;             /* Junction 2. */
-    step();
+    cross_onto_junction();                    /* Junction 2. */
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_NAV_LEFT == g_out.turn);         /* Barcode kept for it. */
 }
@@ -770,9 +789,9 @@ test_timeout_vs_success (void)
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_LEFT;
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();                                   /* Turn starts here. */
+    cross_onto_junction();
     g_in.line = VC_LINE_CENTRE;
+    advance_to_turn();                        /* Turn starts here. */
     wait_ms(VC_TURN_TIMEOUT_MS - VC_PERIOD_MS);
     CHECK_STATE(VC_STATE_TURNING);
     g_in.b_motion_done = true;                /* Exactly at the deadline. */
@@ -828,8 +847,8 @@ test_obstacle_while_reacquiring (void)
     step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(VC_OBST_ABORT == g_out.obstacle);   /* Released once. */
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);            /* Barcode was kept. */
     CHECK(VC_NAV_RIGHT == g_out.turn);
 }
@@ -1011,6 +1030,7 @@ test_pivot_search_sequence (void)
     step();
     g_in.line = VC_LINE_JUNCTION;
     step();
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
 }
 
@@ -1043,10 +1063,11 @@ test_reacquire_on_junction (void)
     CHECK_STATE(VC_STATE_REACQUIRE_LINE);
     g_in.line = VC_LINE_JUNCTION;
     step();
+    CHECK(VC_OBST_ABORT != g_out.obstacle);   /* Buddy 5 not involved. */
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_MOTION_TURN == g_out.motion);
     CHECK(VC_NAV_LEFT == g_out.turn);
-    CHECK(VC_OBST_ABORT != g_out.obstacle);   /* Buddy 5 not involved. */
 
     /* No stored barcode: straight across, and only once. */
     go_to_follow_line(0U);
@@ -1074,9 +1095,10 @@ test_reacquire_on_junction (void)
     step();
     g_in.line = VC_LINE_JUNCTION;
     step();
+    CHECK(VC_OBST_ABORT == g_out.obstacle);
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_NAV_RIGHT == g_out.turn);
-    CHECK(VC_OBST_ABORT == g_out.obstacle);
 }
 
 static void
@@ -1413,8 +1435,7 @@ cross_junction (void)
     go_to_follow_line(0U);
     g_in.travel_mm = 1000;                    /* Running total: any origin. */
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
 }
 
@@ -1465,8 +1486,8 @@ test_junction_hold_barcode_turn (void)
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_RIGHT;
     step();
-    g_in.line = VC_LINE_JUNCTION;
-    step();
+    cross_onto_junction();
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_NAV_RIGHT == g_out.turn);
 
@@ -1477,6 +1498,92 @@ test_junction_hold_barcode_turn (void)
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     step();
     CHECK(64 == g_out.steer);                 /* No hold after a turn. */
+}
+
+static void
+test_junction_advance (void)
+{
+    printf("junction turn: drive %d mm to the axle first\n",
+           VC_JUNCTION_ADVANCE_MM);
+
+    go_to_follow_line(0U);
+    g_in.travel_mm = 1000;
+    g_in.barcode   = VC_NAV_LEFT;
+    step();
+    cross_onto_junction();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+
+    /* Past the straight-across hold: still straight, LOST ignored. */
+    g_in.line      = VC_LINE_LOST;
+    g_in.travel_mm = 1000 + VC_JUNCTION_HOLD_MM;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
+    CHECK(0 == g_out.steer);
+
+    g_in.line      = VC_LINE_RIGHT;
+    g_in.travel_mm = 1000 + VC_JUNCTION_ADVANCE_MM - 1;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);        /* Not there yet. */
+    CHECK(0 == g_out.steer);
+
+    g_in.travel_mm = 1000 + VC_JUNCTION_ADVANCE_MM;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(VC_MOTION_TURN == g_out.motion);
+    CHECK(VC_NAV_LEFT == g_out.turn);
+
+    /* An obstacle while advancing wins, and the turn is dropped. */
+    go_to_follow_line(0U);
+    g_in.barcode = VC_NAV_RIGHT;
+    step();
+    cross_onto_junction();
+    g_in.line             = VC_LINE_CENTRE;
+    g_in.b_obstacle_ahead = true;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(VC_NAV_NONE == g_vc.pending_turn);
+}
+
+static void
+test_junction_confirm (void)
+{
+    printf("junction: only after %d mm of both-black\n",
+           VC_JUNCTION_CONFIRM_MM);
+
+    /* A moment of both-black on a curve: no turn, barcode kept. */
+    go_to_follow_line(0U);
+    g_in.travel_mm = 1000;
+    g_in.barcode   = VC_NAV_RIGHT;
+    step();
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    g_in.travel_mm = 1000 + VC_JUNCTION_CONFIRM_MM - 1;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_state_changed);            /* Not accepted yet. */
+    CHECK(0 == g_out.steer);                  /* Straight while over it. */
+    g_in.line = VC_LINE_LEFT;                 /* Curve goes on to the left. */
+    g_in.travel_mm = 1000 + VC_JUNCTION_CONFIRM_MM + 50;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_NAV_NONE == g_vc.pending_turn);
+    CHECK(VC_NAV_RIGHT == g_vc.stored_nav);   /* Kept for the real one. */
+    CHECK(0 > g_out.steer);                   /* Steering along the curve. */
+
+    /* The real junction: long enough, turn measured from where it began. */
+    g_in.line = VC_LINE_JUNCTION;
+    g_in.travel_mm = 2000;
+    step();
+    g_in.travel_mm = 2000 + VC_JUNCTION_CONFIRM_MM;
+    step();
+    CHECK(VC_NAV_RIGHT == g_vc.pending_turn);
+    CHECK(2000 == g_vc.junction_origin_mm);
+    g_in.line = VC_LINE_CENTRE;
+    g_in.travel_mm = 2000 + VC_JUNCTION_ADVANCE_MM;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(VC_NAV_RIGHT == g_out.turn);
 }
 
 static void
@@ -1504,8 +1611,8 @@ test_junction_hold_second_junction (void)
     step();
     CHECK(64 == g_out.steer);
 
-    g_in.line = VC_LINE_JUNCTION;             /* A new junction: acted on. */
-    step();
+    cross_onto_junction();                    /* A new junction: acted on. */
+    advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_NAV_LEFT == g_out.turn);
 }
@@ -1567,6 +1674,8 @@ main (void)
     test_invalid_inputs();
     test_junction_hold_straight();
     test_junction_hold_barcode_turn();
+    test_junction_advance();
+    test_junction_confirm();
     test_junction_hold_second_junction();
     test_junction_hold_preempted();
 

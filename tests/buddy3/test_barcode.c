@@ -46,6 +46,8 @@ static uint16_t const PAT_B    = 0x049U;   /* valid Code 39, not used */
 static uint16_t const PAT_E    = 0x118U;   /* valid Code 39, not used */
 static uint16_t const PAT_F    = 0x058U;
 static uint16_t const PAT_Z    = 0x0D0U;   /* sample *Z* from Barcode Sample.pdf */
+static uint16_t const PAT_Y    = 0x190U;
+static uint16_t const PAT_X    = 0x091U;
 
 /* Element widths used by build(); half size for the small PDF print. */
 static int32_t narrow_um = NARROW_UM;
@@ -191,6 +193,8 @@ test_decodes_each_code(void)
         { PAT_A, BARCODE_A, NAV_LEFT },
         { PAT_F, BARCODE_F, NAV_RIGHT },
         { PAT_Z, BARCODE_Z, NAV_STRAIGHT },
+        { PAT_Y, BARCODE_Y, NAV_LEFT },
+        { PAT_X, BARCODE_X, NAV_UTURN },
     };
     uint32_t i;
     uint32_t p;

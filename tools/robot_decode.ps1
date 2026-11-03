@@ -25,7 +25,7 @@ $script:Avoid   = @('STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY')
 $script:Cmd     = @('unknown','start','stop','status')
 $script:Run     = @('END','BEGIN')
 $script:CalResult = @('OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP')
-$script:Barcode = @('','A','B','C','D','F','Z','INVALID')
+$script:Barcode = @('','A','Y','X','?','F','Z','INVALID')
 
 $script:VersionBits = 2          # binary header: 2-bit version (2), 32-bit time
 $script:BinaryVersion = 2

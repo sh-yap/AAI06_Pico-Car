@@ -77,7 +77,6 @@ static uint16_t centre_full_black = IR_CENTRE_FULL_BLACK_DEFAULT;
 #define LINE_LOST_COUNT            30U
 
 static uint8_t junction_count = 0U;
-static bool junction_latched = false;
 
 static uint8_t white_count = 0U;
 
@@ -129,7 +128,6 @@ static bool cal_sweeping;               /* The pivot has started.          */
 static void clear_line_state(void)
 {
     junction_count = 0U;
-    junction_latched = false;
     white_count = 0U;
     last_seen = LINE_CENTRE;
 }
@@ -146,11 +144,15 @@ void line_follow_init(void)
 
 
 /*
- * Debounced junction detection. Reports each junction once.
+ * Debounced junction detection: true for as long as both sensors stay
+ * black, once they have been for JUNCTION_DEBOUNCE_COUNT cycles.
+ * Reported every cycle, not once: the VC reads only the newest of the
+ * two statuses sent per 20 ms step, so a one-cycle JUNCTION could be
+ * overwritten and missed.  The VC acts on each junction once, and only
+ * when it lasts long enough (a drift across the line on a curve also
+ * puts both sensors on black, briefly) - see VC_JUNCTION_CONFIRM_MM.
  * Internal only - called from line_get_position() so junction
  * state advances exactly once per cycle.
- * May be refined after track testing (a slow drift across the
- * line also briefly puts both sensors on black).
  */
 static bool line_detect_junction(bool centre_black, bool right_black)
 {
@@ -161,19 +163,10 @@ static bool line_detect_junction(bool centre_black, bool right_black)
             junction_count++;
         }
 
-        if ((junction_count >= JUNCTION_DEBOUNCE_COUNT) &&
-            (junction_latched == false))
-        {
-            junction_latched = true;
-            return true;
-        }
-    }
-    else
-    {
-        junction_count = 0U;
-        junction_latched = false;
+        return (junction_count >= JUNCTION_DEBOUNCE_COUNT);
     }
 
+    junction_count = 0U;
     return false;
 }
 

@@ -7,13 +7,15 @@
 #include "navigation.h"
 
 
-/* Barcode identifiers. Course codes *A*, *F*, *Z*; anything else is INVALID. */
+/* Barcode identifiers. Course codes *A*, *F*, *Z*, *Y*, *X*; anything else is INVALID. */
 typedef enum
 {
     BARCODE_NONE = 0,
     BARCODE_A,
     BARCODE_F,
     BARCODE_Z,
+    BARCODE_Y,
+    BARCODE_X,
     BARCODE_INVALID
 } barcode_t;
 

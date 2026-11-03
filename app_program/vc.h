@@ -76,6 +76,25 @@
  * twice as wide) is fully passed before normal steering resumes. */
 #define VC_JUNCTION_HOLD_MM     (36)
 
+/* While following the line, a JUNCTION counts only once both sensors have
+ * stayed black for this far.  A crossing line is 18 mm wide (course Barcode
+ * and Line Specification), so it passes; cutting across the line on a
+ * curve puts both sensors on black for a moment and does not.  3 Nov: a
+ * left curve after an F barcode was taken as a junction and the car turned
+ * right off the track.  10 mm then missed a real crossing (11:32, after an
+ * X barcode: both black in one 100 ms sample only), so 4: with Buddy 3's
+ * 30 ms debounce, about 8 mm of both-black at cruise speed. */
+#define VC_JUNCTION_CONFIRM_MM  (4)
+
+/* A LEFT or RIGHT turn at a junction starts this far past the point where
+ * the line sensors reached the crossing line: the distance from the line
+ * sensors back to the rear axle, which the car pivots about.  The axle is
+ * then on the crossing line, so the 90 degree pivot swings the sensors onto
+ * it instead of leaving them this far short of it.  PROVISIONAL (3 Nov):
+ * from Buddy 5's 120 mm rear axle to front; measure axle centre to the
+ * line sensors and set it. */
+#define VC_JUNCTION_ADVANCE_MM  (100)
+
 /* Line lost while following: stop, then pivot in place to find it again,
  * towards the side it was last seen on first, then the other side.  The
  * pivot is the same TURN_ANGLE as the calibration sweep, at 80 mm/s. */
@@ -355,6 +374,12 @@ typedef struct
     bool       b_junction_hold;    /* FOLLOW_LINE: driving straight across
                                       a junction (steer 0, LOST ignored). */
     int32_t    junction_origin_mm; /* travel_mm when the hold began.      */
+    bool       b_junction_seen;    /* FOLLOW_LINE: on a JUNCTION not yet
+                                      VC_JUNCTION_CONFIRM_MM long.         */
+    int32_t    junction_seen_mm;   /* travel_mm where that JUNCTION began. */
+    vc_nav_t   pending_turn;       /* FOLLOW_LINE: LEFT or RIGHT to make
+                                      VC_JUNCTION_ADVANCE_MM past the
+                                      junction; NONE otherwise.            */
     int8_t     steer_side;         /* FOLLOW_LINE steer ramp: -1 left,
                                       +1 right, 0 centred.                 */
     int16_t    steer_mag;          /* Ramp magnitude 0 .. 127.            */

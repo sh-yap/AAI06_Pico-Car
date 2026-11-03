@@ -132,6 +132,8 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
     p_vc->search           = VC_SEARCH_NONE;
     p_vc->b_reversing      = false;
     p_vc->b_junction_hold  = false;
+    p_vc->b_junction_seen  = false;
+    p_vc->pending_turn     = VC_NAV_NONE;
     p_out->b_state_changed = true;
 
     switch (next)
@@ -238,25 +240,30 @@ store_barcode (vc_t * p_vc, vc_inputs_t const * p_in)
 
 
 /* HANDLE_JUNCTION: use the stored barcode command, then clear it.
- * Runs in the same step the junction is reached, so no cycle is lost. */
+ * Runs in the same step the junction is accepted, so no cycle is lost.
+ * origin_mm is the travel_mm where the sensors reached the crossing line:
+ * the hold and the advance to the axle are measured from there. */
 static void
-handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
+handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out,
+                 int32_t origin_mm)
 {
     vc_nav_t const nav = p_vc->stored_nav;
 
     enter_state(p_vc, VC_STATE_HANDLE_JUNCTION, p_in->now_ms, p_out);
     p_vc->stored_nav = VC_NAV_NONE;
 
-    if ((VC_NAV_LEFT == nav) || (VC_NAV_RIGHT == nav)
-        || (VC_NAV_UTURN == nav))
+    if (VC_NAV_UTURN == nav)
     {
+        /* Turning back along the same line: no need to advance first. */
         enter_state(p_vc, VC_STATE_TURNING, p_in->now_ms, p_out);
         p_out->motion = VC_MOTION_TURN;
         p_out->turn   = nav;
     }
     else
     {
-        /* STRAIGHT, no stored command or invalid barcode: carry on. */
+        /* STRAIGHT, no stored command or invalid barcode: carry on.  LEFT
+         * or RIGHT: drive on until the axle is on the crossing line, then
+         * turn (step_follow_line). */
         enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
         p_out->motion     = VC_MOTION_DRIVE;
         p_out->speed_mm_s = follow_speed(p_in);
@@ -264,7 +271,12 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 
         /* Keep going straight until clear of the crossing line. */
         p_vc->b_junction_hold    = true;
-        p_vc->junction_origin_mm = p_in->travel_mm;
+        p_vc->junction_origin_mm = origin_mm;
+
+        if ((VC_NAV_LEFT == nav) || (VC_NAV_RIGHT == nav))
+        {
+            p_vc->pending_turn = nav;
+        }
     }
 }
 
@@ -329,12 +341,32 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     /* A barcode is only remembered here; it is acted on at the junction. */
     store_barcode(p_vc, p_in);
 
-    /* Wrap-safe: the origin is a running total, so compare the difference. */
+    /* Wrap-safe: the origin is a running total, so compare the difference.
+     * A pending turn keeps the hold until the turn starts. */
     if (p_vc->b_junction_hold
+        && (VC_NAV_NONE == p_vc->pending_turn)
         && (VC_JUNCTION_HOLD_MM
             <= (p_in->travel_mm - p_vc->junction_origin_mm)))
     {
         p_vc->b_junction_hold = false;
+    }
+
+    /* A JUNCTION starting (not while crossing one): note where.  It is
+     * acted on only if it lasts VC_JUNCTION_CONFIRM_MM, so one decision per
+     * junction however long the sensors stay over it, and none for a
+     * moment of both-black on a curve. */
+    if (VC_LINE_JUNCTION != line)
+    {
+        p_vc->b_junction_seen = false;
+    }
+    else if ((VC_LINE_JUNCTION != p_vc->prev_line) && !p_vc->b_junction_hold)
+    {
+        p_vc->b_junction_seen  = true;
+        p_vc->junction_seen_mm = p_in->travel_mm;
+    }
+    else
+    {
+        /* Still on the same JUNCTION. */
     }
 
     if (p_in->b_finish)
@@ -345,13 +377,22 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     {
         enter_state(p_vc, VC_STATE_OBSTACLE_SCAN, p_in->now_ms, p_out);
     }
-    else if ((VC_LINE_JUNCTION == line)
-             && (VC_LINE_JUNCTION != p_vc->prev_line)
-             && !p_vc->b_junction_hold)
+    else if ((VC_NAV_NONE != p_vc->pending_turn)
+             && (VC_JUNCTION_ADVANCE_MM
+                 <= (p_in->travel_mm - p_vc->junction_origin_mm)))
     {
-        /* Edge-triggered: one decision per junction, however long the
-         * sensors stay over it.  Not while already crossing one. */
-        handle_junction(p_vc, p_in, p_out);
+        /* The axle is on the crossing line: turn onto it. */
+        vc_nav_t const turn = p_vc->pending_turn;
+
+        enter_state(p_vc, VC_STATE_TURNING, p_in->now_ms, p_out);
+        p_out->motion = VC_MOTION_TURN;
+        p_out->turn   = turn;
+    }
+    else if (p_vc->b_junction_seen
+             && (VC_JUNCTION_CONFIRM_MM
+                 <= (p_in->travel_mm - p_vc->junction_seen_mm)))
+    {
+        handle_junction(p_vc, p_in, p_out, p_vc->junction_seen_mm);
     }
     else if ((VC_LINE_LOST == line) && !p_vc->b_junction_hold)
     {
@@ -806,7 +847,7 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
             p_out->motion = VC_MOTION_STOP;     /* Stop the pivot first. */
         }
 
-        handle_junction(p_vc, p_in, p_out);
+        handle_junction(p_vc, p_in, p_out, p_in->travel_mm);
     }
     else if (VC_LINE_LOST != line)
     {
@@ -949,6 +990,9 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->cal_dir           = 0;
         p_vc->b_junction_hold   = false;
         p_vc->junction_origin_mm = 0;
+        p_vc->b_junction_seen   = false;
+        p_vc->junction_seen_mm  = 0;
+        p_vc->pending_turn      = VC_NAV_NONE;
     }
 }
 
