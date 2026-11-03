@@ -94,10 +94,10 @@ void run_rec_freeze(void);
 #define BC_REC_FLAG_DONE    (0x02U)         /* A capture finished this cycle.*/
 #define BC_REC_FLAG_ACTIVE  (0x04U)         /* Edges stored, not finished.  */
 
-/* One Buddy 3 cycle, 20 bytes, no padding. */
+/* One Buddy 3 cycle, 36 bytes, no padding. Legacy records were 20 bytes. */
 typedef struct
 {
-    uint32_t ms;                /* Kernel time of the cycle.                */
+    uint32_t ms;                /* Monotonic time BEFORE ADC acquisition.   */
     int32_t  enc;               /* Average wheel encoder position.          */
     uint16_t barcode_adc;       /* Raw barcode sensor, 0..4095.             */
     uint16_t threshold;         /* Black threshold in use.                  */
@@ -107,6 +107,11 @@ typedef struct
     uint8_t  edges;             /* Edges stored in the current capture.     */
     uint8_t  code;              /* barcode_t when a capture finished.       */
     uint8_t  ch;                /* Decoded character, else 0.               */
+    int32_t  left_enc;          /* Individual sequence-validated snapshot.  */
+    int32_t  right_enc;
+    uint32_t encoder_us;        /* Snapshot hardware clock, low 32 bits.    */
+    uint32_t sample_end_ms;     /* Monotonic time AFTER snapshot, same
+                                   clock as ms and the VC recorder.         */
 } bc_rec_record_t;
 
 /* Same header shape as run_rec_t.  magic is 0 until the first BEGIN. */

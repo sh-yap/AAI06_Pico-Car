@@ -34,7 +34,11 @@
 # on the cycle a capture finished; capture_active = edges stored but not
 # finished; edges = edges stored; code = decoded character (empty when none);
 # code_id = barcode_t value; centre_adc / right_adc = line sensors.
-# With -File, pass the barcode dump as -BcFile.
+# Extended 36-byte barcode records use the VC monotonic clock for ms, and
+# append left_enc/right_enc, encoder_us (hardware low 32 bits), sample_end_ms
+# and acquisition_ms. The ADC channels are sequential, bracketed by ms/end.
+# Legacy 20-byte records retain their historical system clock and blank
+# appended fields. With -File, pass the barcode dump as -BcFile.
 # A warning is printed if the ring was not frozen (run still going, or the
 # image was reset before it ended).
 
@@ -58,7 +62,7 @@ $stamp  = Get-Date -Format "yyyyMMdd_HHmmss"
 
 $headerBytes = 20
 $recordBytes = 44
-$bcRecBytes  = 20
+$bcRecBytes  = @(20, 36)
 $bcMagic     = 0x31524342
 $magic       = 0x31434552
 $lineNames   = @("LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION")
@@ -206,7 +210,7 @@ if ($bcBin -ne "") {
     if ($cMagic -ne $bcMagic) {
         Write-Warning ("No barcode data: magic 0x{0:x8}" -f $cMagic)
     }
-    elseif ($cRecSz -ne $bcRecBytes) {
+    elseif ($cRecSz -notin $bcRecBytes) {
         Write-Error "Barcode record size $cRecSz, decoder expects $bcRecBytes"; exit 1
     }
     elseif ($c.Length -lt ($headerBytes + $cCap * $cRecSz)) {
@@ -217,7 +221,7 @@ if ($bcBin -ne "") {
         $cn     = [Math]::Min([uint32]$cCap, $cTotal)
         $cFirst = ([int]$cWr - [int]$cn + $cCap) % $cCap
         $cb = New-Object System.Text.StringBuilder
-        [void]$cb.AppendLine("row,ms,dt_ms,barcode_adc,threshold,black,enc,enc_delta,capture_done,capture_active,edges,code,code_id,centre_adc,right_adc")
+        [void]$cb.AppendLine("row,ms,dt_ms,barcode_adc,threshold,black,enc,enc_delta,capture_done,capture_active,edges,code,code_id,centre_adc,right_adc,left_enc,right_enc,encoder_us,sample_end_ms,acquisition_ms")
         $cPrev    = $null
         $cPrevEnc = $null
         $cMaxDt   = 0
@@ -241,13 +245,22 @@ if ($bcBin -ne "") {
             $ch = ""
             if ($c[$o + 19] -ge 32 -and $c[$o + 19] -le 126) { $ch = [string][char]$c[$o + 19] }
             if ($flags -band 2) { $cDone++ }
-            [void]$cb.AppendLine(("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14}" -f `
+            $extra = ",,,,,"
+            if ($cRecSz -eq 36) {
+                $end = [BitConverter]::ToUInt32($c, $o + 32)
+                $duration = [int64]$end - [int64]$ms
+                if ($duration -lt 0) { $duration += 4294967296 }
+                $extra = ",{0},{1},{2},{3},{4}" -f `
+                    [BitConverter]::ToInt32($c, $o + 20), [BitConverter]::ToInt32($c, $o + 24), `
+                    [BitConverter]::ToUInt32($c, $o + 28), $end, $duration
+            }
+            [void]$cb.AppendLine((("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14}" -f `
                 $i, $ms, $dt,
                 [BitConverter]::ToUInt16($c, $o + 8), [BitConverter]::ToUInt16($c, $o + 10),
                 ($flags -band 1), $enc, $de,
                 (($flags -shr 1) -band 1), (($flags -shr 2) -band 1),
                 $c[$o + 17], $ch, $c[$o + 18],
-                [BitConverter]::ToUInt16($c, $o + 12), [BitConverter]::ToUInt16($c, $o + 14)))
+                [BitConverter]::ToUInt16($c, $o + 12), [BitConverter]::ToUInt16($c, $o + 14)) + $extra))
         }
         [System.IO.File]::WriteAllText($bcCsv, $cb.ToString(), [System.Text.Encoding]::ASCII)
         Write-Host ("{0} barcode rows (total {1}, frozen {2}), captures finished {3}, longest step {4} ms" -f $cn, $cTotal, $cFrozen, $cDone, $cMaxDt)

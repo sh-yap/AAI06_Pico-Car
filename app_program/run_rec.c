@@ -19,7 +19,7 @@ typedef char run_rec_record_size_check[
 
 /* Likewise for the barcode ring. */
 typedef char bc_rec_record_size_check[
-    (20U == sizeof(bc_rec_record_t)) ? 1 : -1];
+    (36U == sizeof(bc_rec_record_t)) ? 1 : -1];
 
 run_rec_t g_run_rec;                    /* Zero until the first BEGIN.      */
 bc_rec_t  g_bc_rec;                     /* Zero until the first BEGIN.      */

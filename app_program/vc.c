@@ -132,6 +132,7 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
     p_vc->search           = VC_SEARCH_NONE;
     p_vc->b_reversing      = false;
     p_vc->b_junction_hold  = false;
+    p_vc->b_junction_track = false;
     p_out->b_state_changed = true;
 
     switch (next)
@@ -262,8 +263,10 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         p_out->speed_mm_s = follow_speed(p_in);
         p_out->steer      = 0;                  /* Straight across. */
 
-        /* Keep going straight until clear of the crossing line. */
+        /* Suppress duplicate crossing events for the distance window.
+         * Neutral steering lasts only while the centre sensor sees line. */
         p_vc->b_junction_hold    = true;
+        p_vc->b_junction_track   = false;
         p_vc->junction_origin_mm = p_in->travel_mm;
     }
 }
@@ -337,6 +340,17 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         p_vc->b_junction_hold = false;
     }
 
+    /* Latch the first loss of calibrated centre evidence. A later centre
+     * return cannot re-arm neutral steering within this crossing window.
+     * Stale status arrives as LOST with zero sensor bits. */
+    if (p_vc->b_junction_hold
+        && ((VC_CAL_B3_OK != p_in->cal_b3)
+            || (VC_LINE_LOST == line)
+            || (0U == (p_in->line_sensors & VC_LINE_SENSOR_CENTRE))))
+    {
+        p_vc->b_junction_track = true;
+    }
+
     if (p_in->b_finish)
     {
         enter_state(p_vc, VC_STATE_FINISHED, p_in->now_ms, p_out);
@@ -353,7 +367,8 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
          * sensors stay over it.  Not while already crossing one. */
         handle_junction(p_vc, p_in, p_out);
     }
-    else if ((VC_LINE_LOST == line) && !p_vc->b_junction_hold)
+    else if ((VC_LINE_LOST == line)
+             && ((!p_vc->b_junction_hold) || p_vc->b_junction_track))
     {
         enter_state(p_vc, VC_STATE_REACQUIRE_LINE, p_in->now_ms, p_out);
 
@@ -373,10 +388,11 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     else
     {
         p_out->motion     = VC_MOTION_DRIVE;
-        /* Over a junction already handled, or still holding straight
-         * across one: steer 0. */
+        /* Cross straight while centre evidence remains, then track even
+         * while duplicate crossing events are still suppressed. */
         p_out->steer      = follow_steer(p_vc,
-                                         p_vc->b_junction_hold
+                                         (p_vc->b_junction_hold
+                                          && !p_vc->b_junction_track)
                                          ? VC_LINE_JUNCTION : line);
         /* A healthy ramp report keeps the forward command at ramp speed:
          * historical climbs stalled at 50 mm/s. Keep steering and LOST
@@ -954,6 +970,7 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->cal_first_dir     = 0;
         p_vc->cal_dir           = 0;
         p_vc->b_junction_hold   = false;
+        p_vc->b_junction_track  = false;
         p_vc->junction_origin_mm = 0;
     }
 }

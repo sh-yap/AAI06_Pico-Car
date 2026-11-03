@@ -294,7 +294,23 @@ void buddy3_task(INT stacd, void *exinf)
 
     while (1)
     {
+#if VC_RECORDER
+        /* Bracket the sequential ADC reads and existing encoder snapshot
+         * before calibration/debug output can delay them. OTM is the VC
+         * clock; barcode decoding retains its existing system clock. */
+        (void)tk_get_otm(&sys_time);
+        bc_rec.ms = (uint32_t)sys_time.lo; /* Low 32 bits, wraps by design. */
+#endif
         readings = ir_sensor_read();
+#if VC_RECORDER
+        motion_encoder_get_snapshot(&enc_snapshot);
+        (void)tk_get_otm(&sys_time);
+        bc_rec.sample_end_ms = (uint32_t)sys_time.lo; /* Same wrapping clock. */
+        bc_rec.left_enc = enc_snapshot.left_counts;
+        bc_rec.right_enc = enc_snapshot.right_counts;
+        /* Hardware microseconds wrap at 2^32, retain exact short-run deltas. */
+        bc_rec.encoder_us = (uint32_t)enc_snapshot.sampled_at_us;
+#endif
         buddy3_reading_word = ((uint32_t)(readings.centre & 0xFFFU))
                               | ((uint32_t)(readings.right & 0xFFFU) << 12);
         service_calibration(readings);
@@ -312,7 +328,9 @@ void buddy3_task(INT stacd, void *exinf)
          * Average of both wheels - reasonable for a robot driving
          * roughly straight over a barcode. 
          */
+#if !VC_RECORDER
         motion_encoder_get_snapshot(&enc_snapshot);
+#endif
         encoder_position =
             (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
 
@@ -339,7 +357,6 @@ void buddy3_task(INT stacd, void *exinf)
         /* Sample the capture state before barcode_get_command() clears it.
          * Nothing here changes what Buddy 3 sends. */
         bc_edges           = barcode_get_edge_count();
-        bc_rec.ms          = timestamp_ms;
         bc_rec.enc         = encoder_position;
         bc_rec.barcode_adc = readings.barcode;
         bc_rec.threshold   = buddy3_barcode_threshold();

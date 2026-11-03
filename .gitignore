@@ -56,3 +56,4 @@ evidence/buddy1/
 evidence/recorder/
 tests/motion/*.exe
 tests/recorder/*.exe
+tools/line_control_replay.py

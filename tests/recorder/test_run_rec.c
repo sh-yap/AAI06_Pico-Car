@@ -170,7 +170,7 @@ test_bc_ring(void)
     uint32_t const n = BC_REC_CAPACITY + 5U;    /* Five past full.           */
     uint32_t total;
 
-    check_u32("bc layout: record", (uint32_t)sizeof(bc_rec_record_t), 20U);
+    check_u32("bc layout: record", (uint32_t)sizeof(bc_rec_record_t), 36U);
     check_u32("bc layout: header",
               (uint32_t)offsetof(bc_rec_t, records), 20U);
     check_u32("bc layout: flags",
@@ -180,7 +180,7 @@ test_bc_ring(void)
     /* A reset of the run ring resets this one too. */
     run_rec_begin();
     check_u32("bc begin: magic", g_bc_rec.magic, BC_REC_MAGIC);
-    check_u32("bc begin: record_size", g_bc_rec.record_size, 20U);
+    check_u32("bc begin: record_size", g_bc_rec.record_size, 36U);
     check_u32("bc begin: capacity", g_bc_rec.capacity, BC_REC_CAPACITY);
     check_u32("bc begin: total", g_bc_rec.total, 0U);
     check_u32("bc begin: frozen", g_bc_rec.frozen, 0U);
@@ -274,6 +274,10 @@ write_sample(char const * p_path)
 
             bc.ms = 200000U + (i * 10U) + ((i >= 1000U) ? 30U : 0U);
             bc.enc = (int32_t)i * 3 - 100;
+            bc.left_enc = bc.enc + 17;
+            bc.right_enc = bc.enc - 17;
+            bc.encoder_us = bc.ms * 1000U + 500U;
+            bc.sample_end_ms = bc.ms + 1U;
             bc.threshold = 1600U;
             bc.centre_adc = 3000U;
             bc.right_adc = 150U;

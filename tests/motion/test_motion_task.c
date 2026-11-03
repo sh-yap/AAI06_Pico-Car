@@ -165,6 +165,14 @@ static void forward_brake_checks(void)
     v.sequence_id = 20U;
     v.value.velocity.linear_mm_s = 150;
     check(motion_submit(&v) == MOTION_RESULT_OK, "cruise command accepted");
+    run_periods(1U, 0, 0);
+    check(test_duty[0] >= motion_config.startup_pwm_permille &&
+          test_duty[1] >= motion_config.startup_pwm_permille,
+          "stationary forward start preserves the configured boost floor");
+    run_periods(1U, 28, 28);
+    check(test_duty[0] < motion_config.startup_pwm_permille &&
+          test_duty[1] < motion_config.startup_pwm_permille,
+          "encoder movement releases the startup floor");
     run_periods(30U, 42, 42);
     check(motion_status.left_slewed_target_mm_s >= 148 &&
           motion_status.right_slewed_target_mm_s >= 148,
@@ -195,6 +203,17 @@ static void forward_brake_checks(void)
               "speeding up 50 to 150 rises by at most 6 mm/s per period");
     }
 
+    (void)motion_stop();
+    motion_loop();
+    check(test_duty[0] == 0U && test_duty[1] == 0U,
+          "STOP still brakes immediately after a forward start");
+    v.sequence_id = 24U;
+    check(motion_submit(&v) == MOTION_RESULT_OK,
+          "forward restart accepted after STOP");
+    run_periods(1U, 0, 0);
+    check(test_duty[0] >= motion_config.startup_pwm_permille &&
+          test_duty[1] >= motion_config.startup_pwm_permille,
+          "stopped forward restart preserves the configured boost floor");
     (void)motion_stop();
     motion_loop();
     reset_velocity_control();

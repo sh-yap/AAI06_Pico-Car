@@ -61,6 +61,7 @@ reset (uint32_t start_ms)
     memset(&g_out, 0, sizeof(g_out));
     g_in.now_ms       = start_ms;
     g_in.line         = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
     g_in.b_terrain_ready = true;
     g_in.b_stationary = true;
 }
@@ -1528,40 +1529,55 @@ cross_junction (void)
 static void
 test_junction_hold_straight (void)
 {
-    printf("junction straight: hold steer 0 for %d mm\n",
-           VC_JUNCTION_HOLD_MM);
+    printf("junction straight: release neutral on centre loss\n");
 
     cross_junction();
-
-    /* Sensors drift onto the crossing arm: still no steering, no search. */
-    g_in.line       = VC_LINE_LEFT;
-    g_in.line_error = -127;
-    g_in.travel_mm  = 1000 + VC_JUNCTION_HOLD_MM - 1;
-    step();
-    CHECK_STATE(VC_STATE_FOLLOW_LINE);
-    CHECK(VC_MOTION_DRIVE == g_out.motion);
-    CHECK(0 == g_out.steer);
-    CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
-
-    g_in.line       = VC_LINE_RIGHT;
-    g_in.line_error = 127;
+    g_in.line = VC_LINE_RIGHT;                /* Crossing still covers centre. */
+    g_in.travel_mm = 1010;
     step();
     CHECK(0 == g_out.steer);
+    CHECK(g_vc.b_junction_hold);
+    CHECK(!g_vc.b_junction_track);
 
-    g_in.line = VC_LINE_LOST;                 /* Line still under the car. */
+    g_in.line_sensors = 2U;                   /* Right-only: track immediately. */
     step();
-    CHECK_STATE(VC_STATE_FOLLOW_LINE);
-    CHECK(VC_MOTION_DRIVE == g_out.motion);
-    CHECK(0 == g_out.steer);
+    CHECK(64 == g_out.steer);
+    CHECK(g_vc.b_junction_hold);              /* Still suppress duplicate events. */
+    CHECK(g_vc.b_junction_track);
 
-    g_in.line       = VC_LINE_RIGHT;
-    g_in.travel_mm  = 1000 + VC_JUNCTION_HOLD_MM;
+    g_in.line_sensors = 3U;                   /* Centre return cannot re-arm. */
     step();
-    CHECK(64 == g_out.steer);                 /* Hold over: ramp restarts. */
-
-    g_in.line = VC_LINE_LOST;                 /* Lost now: search starts. */
+    CHECK(68 == g_out.steer);
+    g_in.line_sensors = 0U;                   /* Both white before LOST. */
+    step();
+    CHECK(72 == g_out.steer);
+    g_in.line = VC_LINE_LOST;                 /* LOST is no longer suppressed. */
     step();
     CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+
+    cross_junction();
+    g_in.line = VC_LINE_LOST;                 /* Stale status clears the bits. */
+    g_in.line_sensors = 0U;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+
+    cross_junction();
+    g_in.line = VC_LINE_RIGHT;
+    g_in.cal_b3 = VC_CAL_B3_IDLE;             /* No calibrated centre evidence. */
+    step();
+    CHECK(g_vc.b_junction_track);
+    CHECK(64 == g_out.steer);
+
+    cross_junction();
+    g_in.line = VC_LINE_RIGHT;
+    g_in.line_sensors = 3U;
+    g_in.travel_mm = 1000 + VC_JUNCTION_HOLD_MM - 1;
+    step();
+    CHECK(0 == g_out.steer);                  /* Genuine crossing remains neutral. */
+    g_in.travel_mm++;
+    step();
+    CHECK(64 == g_out.steer);                 /* Distance window still expires. */
+
 }
 
 static void

@@ -749,6 +749,30 @@ static void motion_loop(void)
                               pwm_slew_delta,
                               (float)motion_config.max_pwm_permille,
                               &left_output.output, &right_output.output);
+            /* A stopped straight start needs the existing breakaway floor.
+             * Do not ramp that floor through the non-moving power range.
+             * Encoder movement or the existing boost deadline removes it.
+             * Moving corrections, pivots and reversals keep their limits.
+             * The validated PWM value is <= 1000, exact in float. */
+            if (straight_command && left_boost && right_boost
+                && (left_applied_output >= 0.0f)
+                && (right_applied_output >= 0.0f))
+            {
+                if ((left_output.output > 0.0f)
+                    && (left_output.output
+                        < (float)motion_config.startup_pwm_permille))
+                {
+                    left_output.output =
+                        (float)motion_config.startup_pwm_permille;
+                }
+                if ((right_output.output > 0.0f)
+                    && (right_output.output
+                        < (float)motion_config.startup_pwm_permille))
+                {
+                    right_output.output =
+                        (float)motion_config.startup_pwm_permille;
+                }
+            }
         } else {
             left_output.output = motion_slew_target(left_applied_output,
                                                     left_output.output,

@@ -25,6 +25,8 @@
  * Tunable values.  All are PROPOSED; see the VC design rules table.
  * ------------------------------------------------------------------------ */
 
+#define VC_LINE_SENSOR_CENTRE   (0x01U) /* Packed Buddy 3 centre-black bit. */
+
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
 #define VC_SPEED_NORMAL_MM_S    (150)    /* On the flat line.  Set to 150 by
@@ -225,6 +227,7 @@ typedef struct
     vc_line_t  line;               /* Latest line position.               */
     int8_t     line_error;         /* -127 (left) .. +127 (right).
                                       Telemetry only: not used to steer.   */
+    uint8_t    line_sensors;       /* Same packed sample as line/cal_b3.   */
     vc_nav_t   barcode;            /* Event: barcode decoded.             */
     bool       b_motion_done;      /* Event: turn / distance complete.    */
     bool       b_motion_failed;    /* Motion fault or command rejected.   */
@@ -355,7 +358,8 @@ typedef struct
     int32_t    cal_dir;            /* Way the car pivots now (+1 right,
                                       -1 left); the way back in BACK.     */
     bool       b_junction_hold;    /* FOLLOW_LINE: driving straight across
-                                      a junction (steer 0, LOST ignored). */
+                                      a junction: suppress duplicate events. */
+    bool       b_junction_track;   /* Centre cleared: track until window ends. */
     int32_t    junction_origin_mm; /* travel_mm when the hold began.      */
     int8_t     steer_side;         /* FOLLOW_LINE steer ramp: -1 left,
                                       +1 right, 0 centred.                 */

@@ -517,14 +517,16 @@ report_line (buddy3_status_t const * p_status, vc_nav_t nav)
 }
 
 
-/* Drain Buddy 3's queue of packed 32-bit status words: the latest line
- * wins, the first barcode command is kept.  A word that fails
- * buddy3_status_unpack() (reserved bits / codes) is ignored. */
+/* Drain Buddy 3's packed words: cache the latest sample and keep the
+ * first barcode command. During following/recovery, any valid JUNCTION
+ * wins for this step so a later sample cannot erase the event. Invalid
+ * words (reserved bits / codes) are ignored. */
 static void
 read_line (vc_inputs_t * p_in, uint32_t now)
 {
     static vc_line_t s_line    = VC_LINE_LOST;
     static int8_t    s_error   = 0;
+    static uint8_t   s_sensors = 0U;
     static vc_cal_b3_t s_cal   = VC_CAL_B3_IDLE;
     static uint32_t  s_seen_ms = 0U;
     static bool      s_b_seen  = false;
@@ -533,6 +535,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
     vc_nav_t         nav;
     uint32_t         i;
     bool             b_more = true;
+    bool             b_junction = false;
 
     for (i = 0U; b_more && (i < VC_LINE_DRAIN_MAX); i++)
     {
@@ -542,6 +545,11 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         if (b_more && buddy3_status_unpack(packed, &status))
         {
             s_line    = line_from_buddy3(status.line_state);
+            if (VC_LINE_JUNCTION == s_line)
+            {
+                b_junction = true;
+            }
+            s_sensors = status.line_sensors;
             s_error   = status.line_error;      /* Already -127..+127. */
             s_cal     = (vc_cal_b3_t) status.cal_state;     /* Same order. */
             s_seen_ms = now;
@@ -565,14 +573,21 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 
     if (s_b_seen && ((now - s_seen_ms) < VC_LINE_STALE_MS))
     {
-        p_in->line       = s_line;
+        /* Preserve calibration's latest-sample interpretation. The cache
+         * stays latest even when an event is selected for this run step. */
+        p_in->line = (b_junction
+                      && ((VC_STATE_FOLLOW_LINE == g_vc.state)
+                          || (VC_STATE_REACQUIRE_LINE == g_vc.state)))
+                       ? VC_LINE_JUNCTION : s_line;
         p_in->line_error = s_error;
+        p_in->line_sensors = s_sensors;
     }
     else
     {
         /* Buddy 3 silent: never steer on old data. */
         p_in->line       = VC_LINE_LOST;
         p_in->line_error = 0;
+        p_in->line_sensors = 0U;
         g_b_line_black   = false;
 #if VC_RECORDER
         g_rec_sensors    = 0U;
@@ -587,6 +602,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 {
     p_in->line       = VC_LINE_CENTRE;
     p_in->line_error = 0;
+    p_in->line_sensors = VC_LINE_SENSOR_CENTRE;
     p_in->cal_b3     = VC_CAL_B3_OK;        /* Nothing to calibrate.       */
     g_b_line_black   = true;
 
