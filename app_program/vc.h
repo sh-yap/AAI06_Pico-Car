@@ -25,6 +25,8 @@
  * Tunable values.  All are PROPOSED; see the VC design rules table.
  * ------------------------------------------------------------------------ */
 
+#define VC_LINE_SENSOR_CENTRE   (0x01U) /* Packed Buddy 3 centre-black bit. */
+
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
 #define VC_SPEED_NORMAL_MM_S    (150)    /* On the flat line.  Set to 150 by
@@ -244,12 +246,15 @@ typedef struct
     vc_line_t  line;               /* Latest line position.               */
     int8_t     line_error;         /* -127 (left) .. +127 (right).
                                       Telemetry only: not used to steer.   */
+    uint8_t    line_sensors;       /* Same packed sample as line/cal_b3.   */
     vc_nav_t   barcode;            /* Event: barcode decoded.             */
     bool       b_motion_done;      /* Event: turn / distance complete.    */
     bool       b_motion_failed;    /* Motion fault or command rejected.   */
     bool       b_stationary;       /* Both wheels stopped.                */
     bool       b_hump;             /* Buddy 4: slow down (on a ramp, or
                                       Buddy 4 not ready or silent).      */
+    bool       b_ramp_active;      /* Buddy 4: fresh, healthy active ramp.
+                                      Keep forward speed while steering. */
     bool       b_terrain_ready;    /* Buddy 4: fresh, ready, level.  START
                                       is refused without it.             */
     bool       b_obstacle_ahead;   /* Event: Buddy 5 OBSTACLE_AHEAD.      */
@@ -372,7 +377,8 @@ typedef struct
     int32_t    cal_dir;            /* Way the car pivots now (+1 right,
                                       -1 left); the way back in BACK.     */
     bool       b_junction_hold;    /* FOLLOW_LINE: driving straight across
-                                      a junction (steer 0, LOST ignored). */
+                                      a junction: suppress duplicate events. */
+    bool       b_junction_track;   /* Centre cleared: track until window ends. */
     int32_t    junction_origin_mm; /* travel_mm when the hold began.      */
     bool       b_junction_seen;    /* FOLLOW_LINE: on a JUNCTION not yet
                                       VC_JUNCTION_CONFIRM_MM long.         */

@@ -17,9 +17,31 @@
 
 #include <tm/tmonitor.h>
 
+#ifndef VC_RECORDER
+#define VC_RECORDER              (0)    /* Test-only recorder, run_rec.h.   */
+#endif
 
-/* Polling period - may need adjusting once barcode timing is tested. */
+#if VC_RECORDER
+#include <stdint.h>
+#include "run_rec.h"
+#endif
+
+
+/* Polling period.  A cyclic handler sets it, because a 10 ms delay runs
+ * 20 ms on the 10 ms kernel tick (a relative wait adds one extra tick). */
 #define BUDDY3_TASK_PERIOD_MS    10U
+
+static ID g_buddy3_tid;
+
+
+/* Wakes the Buddy 3 task once per period. */
+static void
+buddy3_tick_handler(void *p_exinf)
+{
+    (void)p_exinf;
+
+    (void)tk_wup_tsk(g_buddy3_tid);
+}
 
 /*
  * Fallback threshold for the dedicated barcode IR sensor (GP28 / ADC2),
@@ -238,9 +260,17 @@ void buddy3_task(INT stacd, void *exinf)
     buddy3_status_t status;
     buddy3_packed_t packed;
 
+    T_CCYC ccyc = {0};
+    bool b_tick_ok;
+
 #if BUDDY3_DEBUG
     uint32_t debug_cycle = 0U;
     bool barcode_was_ready;
+#endif
+
+#if VC_RECORDER
+    bc_rec_record_t bc_rec;
+    uint8_t bc_edges;
 #endif
 
     (void)stacd;
@@ -250,9 +280,37 @@ void buddy3_task(INT stacd, void *exinf)
     line_follow_init();
     barcode_init();
 
+    g_buddy3_tid = tk_get_tid();
+    ccyc.cycatr  = TA_HLNG | TA_STA | TA_PHS;
+    ccyc.cychdr  = (FP)buddy3_tick_handler;
+    ccyc.cyctim  = BUDDY3_TASK_PERIOD_MS;
+    ccyc.cycphs  = BUDDY3_TASK_PERIOD_MS;
+    b_tick_ok    = (0 < tk_cre_cyc(&ccyc));
+
+    if (false == b_tick_ok)
+    {
+        tm_printf((UB*)"buddy3: cyclic handler failed, using tk_dly_tsk (20 ms loop)\n");
+    }
+
     while (1)
     {
+#if VC_RECORDER
+        /* Bracket the sequential ADC reads and existing encoder snapshot
+         * before calibration/debug output can delay them. OTM is the VC
+         * clock; barcode decoding retains its existing system clock. */
+        (void)tk_get_otm(&sys_time);
+        bc_rec.ms = (uint32_t)sys_time.lo; /* Low 32 bits, wraps by design. */
+#endif
         readings = ir_sensor_read();
+#if VC_RECORDER
+        motion_encoder_get_snapshot(&enc_snapshot);
+        (void)tk_get_otm(&sys_time);
+        bc_rec.sample_end_ms = (uint32_t)sys_time.lo; /* Same wrapping clock. */
+        bc_rec.left_enc = enc_snapshot.left_counts;
+        bc_rec.right_enc = enc_snapshot.right_counts;
+        /* Hardware microseconds wrap at 2^32, retain exact short-run deltas. */
+        bc_rec.encoder_us = (uint32_t)enc_snapshot.sampled_at_us;
+#endif
         buddy3_reading_word = ((uint32_t)(readings.centre & 0xFFFU))
                               | ((uint32_t)(readings.right & 0xFFFU) << 12);
         service_calibration(readings);
@@ -270,7 +328,9 @@ void buddy3_task(INT stacd, void *exinf)
          * Average of both wheels - reasonable for a robot driving
          * roughly straight over a barcode. 
          */
+#if !VC_RECORDER
         motion_encoder_get_snapshot(&enc_snapshot);
+#endif
         encoder_position =
             (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
 
@@ -292,7 +352,36 @@ void buddy3_task(INT stacd, void *exinf)
          * Both safely return NONE if nothing is ready.
          */
         barcode_code = barcode_get_code();
+
+#if VC_RECORDER
+        /* Sample the capture state before barcode_get_command() clears it.
+         * Nothing here changes what Buddy 3 sends. */
+        bc_edges           = barcode_get_edge_count();
+        bc_rec.enc         = encoder_position;
+        bc_rec.barcode_adc = readings.barcode;
+        bc_rec.threshold   = buddy3_barcode_threshold();
+        bc_rec.centre_adc  = readings.centre;
+        bc_rec.right_adc   = readings.right;
+        bc_rec.edges       = bc_edges;
+        bc_rec.code        = (uint8_t)barcode_code;
+        bc_rec.ch          = (uint8_t)barcode_get_char();
+        bc_rec.flags       = barcode_is_black ? BC_REC_FLAG_BLACK : 0U;
+
+        if (barcode_available())
+        {
+            bc_rec.flags |= BC_REC_FLAG_DONE;
+        }
+        else if (0U != bc_edges)
+        {
+            bc_rec.flags |= BC_REC_FLAG_ACTIVE;
+        }
+#endif
+
         nav_command = barcode_get_command();
+
+#if VC_RECORDER
+        bc_rec_add(&bc_rec);
+#endif
 
 #if BUDDY3_DEBUG
         if (barcode_was_ready)
@@ -325,6 +414,13 @@ void buddy3_task(INT stacd, void *exinf)
         (void)tk_snd_mbf(buddy3_output_mbfid, &packed,
                           (INT)sizeof(packed), TMO_POL);
 
-        tk_dly_tsk(BUDDY3_TASK_PERIOD_MS);
+        if (b_tick_ok)
+        {
+            (void)tk_slp_tsk(TMO_FEVR);
+        }
+        else
+        {
+            tk_dly_tsk(BUDDY3_TASK_PERIOD_MS);
+        }
     }
 }

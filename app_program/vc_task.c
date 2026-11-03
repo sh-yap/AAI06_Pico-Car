@@ -65,6 +65,14 @@
 #include "obstacle_plan.h"
 #endif
 
+#ifndef VC_RECORDER
+#define VC_RECORDER              (0)    /* Test-only run recorder, run_rec.h.*/
+#endif
+
+#if VC_RECORDER
+#include "run_rec.h"
+#endif
+
 /* ------------------------------------------------------------------------ *
  * Tunables.  All TBC: tune on the track.
  * ------------------------------------------------------------------------ */
@@ -193,6 +201,14 @@ static int32_t  g_manoeuvre_mm;        /* Motion's distance in its current
                                           command (bypass leg progress).  */
 static bool     g_b_line_black;        /* A line sensor sees black now
                                           (not Buddy 3's last-seen side). */
+#if VC_RECORDER
+static bool     g_b_rec_active;        /* Recording: CALIBRATE to run end. */
+static uint8_t  g_rec_sensors;        /* Line sensor bits, for the recorder.*/
+static int32_t  g_rec_target_left;     /* Motion wheel targets, likewise.  */
+static int32_t  g_rec_target_right;
+static int32_t  g_rec_pwm_left;        /* Signed PWM applied, permille.    */
+static int32_t  g_rec_pwm_right;
+#endif
 
 /* VC state -> the state codes comms publishes today (tracker item C5). */
 static comms_state_t const g_comms_state[VC_STATE_COUNT] =
@@ -326,6 +342,12 @@ read_motion (vc_inputs_t * p_in)
 
         g_left_mm_s             = status.left_speed_mm_s;
         g_right_mm_s            = status.right_speed_mm_s;
+#if VC_RECORDER
+        g_rec_target_left       = status.left_target_mm_s;
+        g_rec_target_right      = status.right_target_mm_s;
+        g_rec_pwm_left          = status.left_drive_permille;
+        g_rec_pwm_right         = status.right_drive_permille;
+#endif
         g_manoeuvre_mm          = status.travelled_mm;
         g_diff_counts           = status.left_encoder_counts
                                   - status.right_encoder_counts;
@@ -503,6 +525,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 {
     static vc_line_t s_line    = VC_LINE_LOST;
     static int8_t    s_error   = 0;
+    static uint8_t   s_sensors = 0U;
     static vc_cal_b3_t s_cal   = VC_CAL_B3_IDLE;
     static uint32_t  s_seen_ms = 0U;
     static bool      s_b_seen  = false;
@@ -520,11 +543,15 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         if (b_more && buddy3_status_unpack(packed, &status))
         {
             s_line    = line_from_buddy3(status.line_state);
+            s_sensors = status.line_sensors;
             s_error   = status.line_error;      /* Already -127..+127. */
             s_cal     = (vc_cal_b3_t) status.cal_state;     /* Same order. */
             s_seen_ms = now;
             s_b_seen  = true;
             g_b_line_black = (0U != status.line_sensors);
+#if VC_RECORDER
+            g_rec_sensors  = status.line_sensors;
+#endif
             nav       = nav_from_buddy3(status.nav_command);
 
             if ((VC_NAV_NONE == p_in->barcode) && (VC_NAV_NONE != nav))
@@ -542,13 +569,18 @@ read_line (vc_inputs_t * p_in, uint32_t now)
     {
         p_in->line       = s_line;
         p_in->line_error = s_error;
+        p_in->line_sensors = s_sensors;
     }
     else
     {
         /* Buddy 3 silent: never steer on old data. */
         p_in->line       = VC_LINE_LOST;
         p_in->line_error = 0;
+        p_in->line_sensors = 0U;
         g_b_line_black   = false;
+#if VC_RECORDER
+        g_rec_sensors    = 0U;
+#endif
     }
 }
 
@@ -559,6 +591,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 {
     p_in->line       = VC_LINE_CENTRE;
     p_in->line_error = 0;
+    p_in->line_sensors = VC_LINE_SENSOR_CENTRE;
     p_in->cal_b3     = VC_CAL_B3_OK;        /* Nothing to calibrate.       */
     g_b_line_black   = true;
 
@@ -639,6 +672,7 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     b_ramp  = b4_task_is_ramp_active(&s_terrain);
 
     p_in->b_hump          = (!b_ready) || b_ramp;
+    p_in->b_ramp_active   = b_ready && b_ramp;
     p_in->b_terrain_ready = b_ready && (!b_ramp);
     p_in->cal_b4          = (vc_cal_b4_t) b4_task_get_calibration(NULL);
                                                         /* Same order.     */
@@ -720,6 +754,7 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
 {
     (void) now;
     p_in->b_hump          = false;
+    p_in->b_ramp_active   = false;
     p_in->b_terrain_ready = true;
     p_in->cal_b4          = VC_CAL_B4_DONE;     /* Nothing to calibrate.   */
 
@@ -1771,6 +1806,27 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
             comms_set_state(g_comms_state[to]);
         }
 
+#if VC_RECORDER
+        /* Recording starts with the calibration and ends with the run.  A
+         * run entered without a calibration is still recorded. */
+        if ((VC_STATE_CALIBRATE == to)
+            || ((VC_STATE_FOLLOW_LINE == to) && (!g_b_rec_active)))
+        {
+            run_rec_begin();
+            g_b_rec_active = true;
+        }
+        else if ((VC_STATE_READY == to)
+                 || (VC_STATE_EMERGENCY_STOP == to)
+                 || (VC_STATE_FINISHED == to))
+        {
+            g_b_rec_active = false;
+        }
+        else
+        {
+            /* Recording continues. */
+        }
+#endif
+
         if ((VC_STATE_FOLLOW_LINE == to) && (!g_b_run_active))
         {
             g_b_run_active = true;
@@ -1817,6 +1873,73 @@ report_trace (vc_inputs_t const * p_in)
                   (INT) p_in->b_terrain_ready, (UINT) g_overruns);
     }
 }
+
+#if VC_RECORDER
+
+/* Test-only: limit a signed value to the int16_t range. */
+static int16_t
+clamp_i16 (int32_t value)
+{
+    int16_t result = (int16_t) value;
+
+    if (value > INT16_MAX)
+    {
+        result = INT16_MAX;
+    }
+    else if (value < INT16_MIN)
+    {
+        result = INT16_MIN;
+    }
+    else
+    {
+        /* In range. */
+    }
+
+    return result;
+}
+
+
+/* Test-only: copy this cycle's values into the run recorder.  Called after
+ * report_state(), so the cycle that enters CALIBRATE is the first record and
+ * the cycle that ends the run (or a failed calibration) is the last, then the
+ * ring freezes.  Idle cycles are ignored by the frozen ring.  Reads only
+ * values the step already has. */
+static void
+record_cycle (vc_inputs_t const * p_in, vc_outputs_t const * p_out)
+{
+    run_rec_record_t rec = {0};
+
+    rec.ms                = p_in->now_ms;
+#if VC_HAVE_BUDDY3
+    buddy3_get_readings(&rec.centre_adc, &rec.right_adc);
+#endif
+    rec.line_state        = (uint8_t) p_in->line;
+    rec.line_error        = p_in->line_error;
+    rec.sensors           = g_rec_sensors;
+    rec.vc_state          = (uint8_t) p_out->state;
+    rec.steer             = p_out->steer;
+    rec.flags             = p_in->b_ramp_active ? RUN_REC_FLAG_RAMP : 0U;
+    rec.speed_mm_s        = p_out->speed_mm_s;
+    rec.target_left_mm_s  = (int16_t) g_rec_target_left;
+    rec.target_right_mm_s = (int16_t) g_rec_target_right;
+    rec.left_mm_s         = (int16_t) g_left_mm_s;
+    rec.right_mm_s        = (int16_t) g_right_mm_s;
+    rec.overruns          = (uint16_t) g_overruns;
+    rec.left_pwm_permille  = clamp_i16(g_rec_pwm_left);
+    rec.right_pwm_permille = clamp_i16(g_rec_pwm_right);
+    motion_get_pid_integral_permille(&rec.left_i_permille,
+                                     &rec.right_i_permille);
+    motion_get_learned(&rec.learn_fwd_gain, &rec.learn_fwd_offset,
+                       &rec.learn_turn_gain, &rec.learn_state);
+    run_rec_add(&rec);
+
+    if (!g_b_rec_active)
+    {
+        run_rec_freeze();
+    }
+}
+
+#endif /* VC_RECORDER */
 
 /* ------------------------------------------------------------------------ *
  * The task
@@ -1929,6 +2052,9 @@ vc_task_entry (INT stacd, void * p_exinf)
 
         report_state(before, &out, now);
         report_trace(&in);
+#if VC_RECORDER
+        record_cycle(&in, &out);
+#endif
 
         /* Fixed 20 ms rate from absolute time, so work time doesn't drift
          * the period; a late step is counted and the schedule resyncs. */

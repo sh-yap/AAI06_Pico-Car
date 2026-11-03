@@ -97,6 +97,8 @@ static bool encoder_sample_valid;
 static uint32_t previous_irq_count;
 static float left_applied_output;
 static float right_applied_output;
+/* Learns how the wheels respond to power, for the velocity feedforward. */
+static motion_learn_t learner;
 
 static int32_t motion_abs_i32(int32_t value)
 {
@@ -121,6 +123,7 @@ static void reset_velocity_control(void)
     right_stall_ms = 0U;
     left_applied_output = 0.0f;
     right_applied_output = 0.0f;
+    motion_learn_flush(&learner);
 }
 
 static uint64_t motion_timestamp_us(void)
@@ -385,6 +388,13 @@ static void motion_loop(void)
     bool straight_command;
     bool left_delta_plausible;
     bool right_delta_plausible;
+    bool left_boost;
+    bool right_boost;
+    float left_feedforward;
+    float right_feedforward;
+    int32_t left_drive;
+    int32_t right_drive;
+    motion_learn_mode_t learn_mode;
 
     if (status_mtx <= E_OK
         || tk_loc_mtx(status_mtx, TMO_FEVR) != E_OK) {
@@ -547,6 +557,7 @@ static void motion_loop(void)
     motion_status.left_drive_permille = 0;
     motion_status.right_drive_permille = 0;
 
+    motion_learn_observe(&learner, left_speed, right_speed);
     motion_update_travelled(&enc, left_mm_per_count_q16,
                             right_mm_per_count_q16);
     if (active_command && motion_status.state == MOTION_STATE_RUNNING) {
@@ -635,7 +646,7 @@ static void motion_loop(void)
         right_output = motion_pid_step(&right_pid, slewed_right_target,
                                        (float)right_speed,
                                        (float)elapsed_ms / 1000.0f);
-        left_output.output += (float)motion_feedforward_permille(
+        left_feedforward = (float)motion_feedforward_permille(
             (int32_t)slewed_left_target,
             motion_config.left_feedforward_offset_permille,
             motion_config.left_feedforward_slope_q10,
@@ -644,7 +655,7 @@ static void motion_loop(void)
             motion_config.left_reverse_boost_permille,
             motion_config.deadband_permille,
             motion_config.max_pwm_permille);
-        right_output.output += (float)motion_feedforward_permille(
+        right_feedforward = (float)motion_feedforward_permille(
             (int32_t)slewed_right_target,
             motion_config.right_feedforward_offset_permille,
             motion_config.right_feedforward_slope_q10,
@@ -653,6 +664,17 @@ static void motion_loop(void)
             motion_config.right_reverse_boost_permille,
             motion_config.deadband_permille,
             motion_config.max_pwm_permille);
+        if (active_type == MOTION_COMMAND_SET_VELOCITY) {
+            /* Forward driving: the learned mean and difference responses
+               replace the fixed line for each forward wheel. */
+            motion_learn_feedforward(&learner, slewed_left_target,
+                                     slewed_right_target,
+                                     (float)motion_config.deadband_permille,
+                                     (float)motion_config.max_pwm_permille,
+                                     &left_feedforward, &right_feedforward);
+        }
+        left_output.output += left_feedforward;
+        right_output.output += right_feedforward;
         if (slewed_left_target > 0.0f && left_output.output < 0.0f) left_output.output = 0.0f;
         if (slewed_left_target < 0.0f && left_output.output > 0.0f) left_output.output = 0.0f;
         if (slewed_right_target > 0.0f && right_output.output < 0.0f) right_output.output = 0.0f;
@@ -683,9 +705,12 @@ static void motion_loop(void)
         /* Apply a short, bounded boost only while a wheel is stationary.
            This overcomes static friction without becoming a permanent PWM
            offset once encoder feedback is present. */
+        left_boost = false;
+        right_boost = false;
         if (motion_abs_i32(left_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
             motion_abs_i32(left_speed) < MOTION_ZERO_SPEED_MM_S &&
             left_startup_ms < MOTION_STARTUP_BOOST_MS) {
+            left_boost = true;
             if (motion_abs_i32((int32_t)left_output.output) < motion_config.startup_pwm_permille) {
                 left_output.output = left_target_speed < 0 ?
                     -(float)motion_config.startup_pwm_permille :
@@ -700,6 +725,7 @@ static void motion_loop(void)
         if (motion_abs_i32(right_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
             motion_abs_i32(right_speed) < MOTION_ZERO_SPEED_MM_S &&
             right_startup_ms < MOTION_STARTUP_BOOST_MS) {
+            right_boost = true;
             if (motion_abs_i32((int32_t)right_output.output) < motion_config.startup_pwm_permille) {
                 right_output.output = right_target_speed < 0 ?
                     -(float)motion_config.startup_pwm_permille :
@@ -714,12 +740,47 @@ static void motion_loop(void)
            changes; a power-related cause of the encoder fault is unproven. */
         pwm_slew_delta = MOTION_PWM_SLEW_PER_PERIOD
                          * ((float)elapsed_ms / (float)MOTION_PERIOD_MS);
-        left_output.output = motion_slew_target(left_applied_output,
-                                                left_output.output,
-                                                pwm_slew_delta);
-        right_output.output = motion_slew_target(right_applied_output,
-                                                 right_output.output,
-                                                 pwm_slew_delta);
+        if (active_type == MOTION_COMMAND_SET_VELOCITY
+            && (left_target_speed + right_target_speed) > 0) {
+            /* Forward driving: only the mean power is limited, so a steer
+               change reaches the wheels within one cycle. */
+            motion_slew_split(left_applied_output, right_applied_output,
+                              left_output.output, right_output.output,
+                              pwm_slew_delta,
+                              (float)motion_config.max_pwm_permille,
+                              &left_output.output, &right_output.output);
+            /* A stopped straight start needs the existing breakaway floor.
+             * Do not ramp that floor through the non-moving power range.
+             * Encoder movement or the existing boost deadline removes it.
+             * Moving corrections, pivots and reversals keep their limits.
+             * The validated PWM value is <= 1000, exact in float. */
+            if (straight_command && left_boost && right_boost
+                && (left_applied_output >= 0.0f)
+                && (right_applied_output >= 0.0f))
+            {
+                if ((left_output.output > 0.0f)
+                    && (left_output.output
+                        < (float)motion_config.startup_pwm_permille))
+                {
+                    left_output.output =
+                        (float)motion_config.startup_pwm_permille;
+                }
+                if ((right_output.output > 0.0f)
+                    && (right_output.output
+                        < (float)motion_config.startup_pwm_permille))
+                {
+                    right_output.output =
+                        (float)motion_config.startup_pwm_permille;
+                }
+            }
+        } else {
+            left_output.output = motion_slew_target(left_applied_output,
+                                                    left_output.output,
+                                                    pwm_slew_delta);
+            right_output.output = motion_slew_target(right_applied_output,
+                                                     right_output.output,
+                                                     pwm_slew_delta);
+        }
         if (motion_apply_output(0U, left_output.output) != MOTION_RESULT_OK) {
             motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
         } else {
@@ -739,6 +800,34 @@ static void motion_loop(void)
         motion_status.right_drive_permille = right_output.output < 0.0f
             ? -(int32_t)motion_motor_last_duty(1U)
             : (int32_t)motion_motor_last_duty(1U);
+        /* What this cycle teaches the learner: power inside the range where
+           the motor responds (above the deadband lift, below the limit), no
+           startup boost, no steered brake, no stopped command. */
+        left_drive = motion_status.left_drive_permille;
+        right_drive = motion_status.right_drive_permille;
+        learn_mode = MOTION_LEARN_NONE;
+        if (motion_status.state == MOTION_STATE_RUNNING
+            && !left_boost && !right_boost
+            && motion_abs_i32(left_drive) > (int32_t)motion_config.deadband_permille
+            && motion_abs_i32(left_drive) < (int32_t)motion_config.max_pwm_permille
+            && motion_abs_i32(right_drive) > (int32_t)motion_config.deadband_permille
+            && motion_abs_i32(right_drive) < (int32_t)motion_config.max_pwm_permille) {
+            if (active_type == MOTION_COMMAND_SET_VELOCITY
+                && motion_status.target_speed_mm_s > 0
+                && left_drive > 0 && right_drive > 0
+                && motion_abs_i32((int32_t)slewed_left_target)
+                   >= MOTION_STEERED_MIN_WHEEL_MM_S
+                && motion_abs_i32((int32_t)slewed_right_target)
+                   >= MOTION_STEERED_MIN_WHEEL_MM_S) {
+                learn_mode = MOTION_LEARN_DRIVE;
+            } else if (active_type == MOTION_COMMAND_TURN_ANGLE
+                       && (left_drive > 0) != (right_drive > 0)
+                       && motion_abs_i32(left_speed) >= MOTION_ZERO_SPEED_MM_S
+                       && motion_abs_i32(right_speed) >= MOTION_ZERO_SPEED_MM_S) {
+                learn_mode = MOTION_LEARN_PIVOT;
+            }
+        }
+        motion_learn_record(&learner, learn_mode, left_drive, right_drive);
         active_elapsed += elapsed_ms;
         if (motion_target_reached(
                 motion_status.target_mm,
@@ -776,6 +865,7 @@ static void motion_loop(void)
             }
         }
     } else {
+        motion_learn_record(&learner, MOTION_LEARN_NONE, 0, 0);
         if (motion_motor_brake_all() != MOTION_RESULT_OK) {
             motion_fault(MOTION_FAULT_HARDWARE_CONFIG);
         }
@@ -815,6 +905,26 @@ static void motion_task_entry(INT stacd, void *exinf)
     }
 }
 
+/* The learner starts from the fixed feedforward line, power = offset +
+   slope x speed, turned round: speed = gain x power + offset. */
+static float seed_forward_gain(const motion_config_t *config)
+{
+    float slope_permille_per_mm_s =
+        ((float)config->left_feedforward_slope_q10
+         + (float)config->right_feedforward_slope_q10) * 0.5f / 1024.0f;
+
+    return 1.0f / slope_permille_per_mm_s;
+}
+
+static float seed_forward_offset(const motion_config_t *config)
+{
+    float offset_permille = ((float)config->left_feedforward_offset_permille
+                             + (float)config->right_feedforward_offset_permille)
+                            * 0.5f;
+
+    return -offset_permille * seed_forward_gain(config);
+}
+
 motion_result_t motion_init(void)
 {
     T_CMBF mbf = {0};
@@ -824,6 +934,10 @@ motion_result_t motion_init(void)
     motion_config_default(&motion_config);
     if (!motion_config_validate(&motion_config)) return MOTION_RESULT_HARDWARE;
     motion_status = (motion_status_t){0};
+    motion_learn_init(&learner, MOTION_LEARN_DELAY_CYCLES,
+                      seed_forward_gain(&motion_config),
+                      seed_forward_offset(&motion_config),
+                      seed_forward_gain(&motion_config));
     motion_status.state = MOTION_STATE_UNINITIALISED;
     motion_status.state_timestamp_us = motion_timestamp_us();
     if (motion_motor_init(&motion_config) != MOTION_RESULT_OK ||
@@ -930,6 +1044,62 @@ motion_result_t motion_stop(void)
     (void)tk_unl_mtx(command_mtx);
     return MOTION_RESULT_OK;
 }
+
+#if VC_RECORDER
+static int16_t pid_integral_permille(const motion_pid_t *pid)
+{
+    float term = pid->ki * pid->integral;   /* One read of the integral. */
+
+    if (term >= 32767.0f) {
+        return (int16_t)32767;
+    }
+    if (term <= -32768.0f) {
+        return (int16_t)-32768;
+    }
+    return (int16_t)((term >= 0.0f) ? (term + 0.5f) : (term - 0.5f));
+}
+
+void motion_get_pid_integral_permille(int16_t *left, int16_t *right)
+{
+    if (left != NULL) {
+        *left = pid_integral_permille(&left_pid);
+    }
+    if (right != NULL) {
+        *right = pid_integral_permille(&right_pid);
+    }
+}
+
+static int16_t scaled_i16(float value, float scale)
+{
+    float scaled = value * scale;
+
+    if (scaled >= 32767.0f) {
+        return (int16_t)32767;
+    }
+    if (scaled <= -32768.0f) {
+        return (int16_t)-32768;
+    }
+    return (int16_t)((scaled >= 0.0f) ? (scaled + 0.5f) : (scaled - 0.5f));
+}
+
+void motion_get_learned(int16_t *fwd_gain_milli, int16_t *fwd_offset_dmm_s,
+                        int16_t *turn_gain_milli, uint16_t *state)
+{
+    if (fwd_gain_milli != NULL) {
+        *fwd_gain_milli = scaled_i16(learner.fwd_gain, 1000.0f);
+    }
+    if (fwd_offset_dmm_s != NULL) {
+        *fwd_offset_dmm_s = scaled_i16(learner.fwd_offset, 10.0f);
+    }
+    if (turn_gain_milli != NULL) {
+        *turn_gain_milli = scaled_i16(learner.turn_gain, 1000.0f);
+    }
+    if (state != NULL) {
+        *state = (uint16_t)((uint16_t)learner.turn_source
+                            | (learner.b_fwd_from_driving ? 4U : 0U));
+    }
+}
+#endif
 
 motion_result_t motion_get_status(motion_status_t *status)
 {

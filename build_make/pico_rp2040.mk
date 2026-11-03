@@ -272,6 +272,19 @@ ifeq ($(VC_TERRAIN),0)
 VC_TERRAIN_SUFFIX := _noterr
 endif
 
+# VC_RECORDER=1 adds the test-only run recorder (app_program/run_rec.c): a RAM
+# ring of the last 30 s of 20 ms VC cycles, read out with the debug probe
+# (tools/run_rec_read.ps1).  Costs about 39 kB of BSS.  Never use this image
+# for RAM measurements or the final car.  Image is named ..._rec.
+VC_RECORDER ?= 0
+ifneq ($(filter $(VC_RECORDER),0 1),$(VC_RECORDER))
+$(error Unknown VC_RECORDER '$(VC_RECORDER)'; use 0 or 1)
+endif
+VC_RECORDER_SUFFIX :=
+ifeq ($(VC_RECORDER),1)
+VC_RECORDER_SUFFIX := _rec
+endif
+
 ifeq ($(WIFI_NETIF),1)
 ifneq ($(WIFI_JOIN),1)
 $(error WIFI_NETIF=1 requires WIFI_JOIN=1)
@@ -323,7 +336,7 @@ endif
 # a live hazard: an SMP=1 build was once flashed in place of an SMP=0 one and
 # only the banner in the log revealed it.
 #
-EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)$(VC_OBSTACLE_SUFFIX)$(VC_TERRAIN_SUFFIX)_$(APP)_$(BOARD)
+EXE_FILE := mtk3pico_smp$(SMP)_$(CONSOLE)$(WIFI_SUFFIX)$(COMMS_DEMO_SUFFIX)$(COMMS_FORMAT_SUFFIX)$(VC_OBSTACLE_SUFFIX)$(VC_TERRAIN_SUFFIX)$(VC_RECORDER_SUFFIX)_$(APP)_$(BOARD)
 
 GCC := arm-none-eabi-gcc
 AS := arm-none-eabi-gcc
@@ -374,7 +387,7 @@ ASFLAGS += -DCNF_SMP=1
 endif
 
 # Fake-data driver for the comms API (app_program/comms_demo.c).
-CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE) -DVC_HAVE_BUDDY4=$(VC_TERRAIN)
+CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE) -DVC_HAVE_BUDDY4=$(VC_TERRAIN) -DVC_RECORDER=$(VC_RECORDER)
 
 # Rebuild the build stamp every time, so the date/time printed at boot and
 # published on robot/info always identifies the image actually flashed.
@@ -420,7 +433,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)-terr$(VC_TERRAIN)
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)-terr$(VC_TERRAIN)-rec$(VC_RECORDER)
 PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))
