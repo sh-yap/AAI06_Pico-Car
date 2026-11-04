@@ -269,8 +269,15 @@ test_follow_line_and_hump (void)
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
     CHECK(!g_out.b_state_changed);
 
-    /* The error value never steers: centre with an error gives 0. */
-    g_in.line_error = 90;
+    /* Centred: steer in proportion to the error, START at the edge. */
+    g_in.line_error = -127;
+    step();
+    CHECK(-VC_STEER_START == g_out.steer);
+    g_in.line_error = -64;
+    step();
+    CHECK(-32 == g_out.steer);
+    CHECK(VC_SPEED_NORMAL_MM_S > g_out.speed_mm_s);
+    g_in.line_error = 0;
     step();
     CHECK(0 == g_out.steer);
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
@@ -305,8 +312,50 @@ test_follow_line_and_hump (void)
     step();
     CHECK(68 == g_out.steer);
 
-    /* Centre drops it at once, and the next off-centre restarts. */
+    /* Centre on the line gives 0; the ramp has faded below START, so the
+     * next off-centre restarts. */
     g_in.line = VC_LINE_CENTRE;
+    step();
+    CHECK(0 == g_out.steer);
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    CHECK(64 == g_out.steer);
+
+    /* A short centre spell on a bend: the ramp carries on.  At full,
+     * one centre step fades 127 to 111, so it resumes at 115. */
+    {
+        int32_t n;
+
+        for (n = 0; 20 > n; n++)
+        {
+            step();
+        }
+    }
+    CHECK(127 == g_out.steer);
+    g_in.line = VC_LINE_CENTRE;
+    step();
+    CHECK(0 == g_out.steer);
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    CHECK(115 == g_out.steer);
+
+    /* A long centre spell: faded below START, it restarts. */
+    g_in.line = VC_LINE_CENTRE;
+    {
+        int32_t n;
+
+        for (n = 0; 6 > n; n++)
+        {
+            step();
+        }
+    }
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    CHECK(64 == g_out.steer);
+
+    /* Lost or junction clears the ramp at once. */
+    step();
+    g_in.line = VC_LINE_JUNCTION;
     step();
     CHECK(0 == g_out.steer);
     g_in.line = VC_LINE_RIGHT;

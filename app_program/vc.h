@@ -48,6 +48,13 @@
                                             centre: full steer after about
                                             320 ms, only if the line stays
                                             off centre.                      */
+#define VC_STEER_DECAY_NUM      (7)      /* While centred the off-centre ramp
+                                            shrinks to 7/8 each 20 ms step
+                                            instead of dropping to 0: back off
+                                            centre on the same side within
+                                            about 100 ms (a bend) it carries
+                                            on from there, not from START.   */
+#define VC_STEER_DECAY_DEN      (8)
 #define VC_SPEED_HUMP_MM_S      (100)    /* Ramp speed.  All ramp evidence is
                                             at 100 and 50 stalled on the
                                             slope, so the car slows from

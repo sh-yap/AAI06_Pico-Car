@@ -285,19 +285,29 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out,
 
 
 /**
- * @brief  Graduated steer from the line state (the error value is unused).
+ * @brief  Steer from the line state and, while centred, the line error.
+ *
+ * Centred: steer in proportion to the error, 0 when fully on the line up
+ * to VC_STEER_START at the edge (-127), so the steer meets the off-centre
+ * ramp without a jump.  Without this the car drove straight while
+ * centred and swung back and forth across the line edge.
  *
  * Off centre the steer starts at VC_STEER_START and grows by VC_STEER_STEP
- * each step up to full.  A change of side restarts it; centre drops it to 0.
+ * each step up to full.  A change of side restarts it.  While centred the
+ * ramp shrinks by VC_STEER_DECAY_NUM / VC_STEER_DECAY_DEN each step; back
+ * off centre on the same side before it falls below VC_STEER_START, it
+ * carries on from there.  Junction or lost drops it to 0.
  *
- * @param  p_vc  VC state holding the ramp.
- * @param  line  Line state this step (JUNCTION is treated as centre).
+ * @param  p_vc   VC state holding the ramp.
+ * @param  line   Line state this step (JUNCTION means steer straight).
+ * @param  error  Line error -127 (left) .. +127 (right), used only centred.
  * @return Steer -127 (left) .. +127 (right).
  */
 static int8_t
-follow_steer (vc_t * p_vc, vc_line_t line)
+follow_steer (vc_t * p_vc, vc_line_t line, int8_t error)
 {
-    int8_t side = 0;
+    int32_t steer = 0;
+    int8_t  side  = 0;
 
     if (VC_LINE_RIGHT == line)
     {
@@ -309,29 +319,42 @@ follow_steer (vc_t * p_vc, vc_line_t line)
     }
     else
     {
-        /* Centre, junction or lost: no steer. */
+        /* Centre, junction or lost: no ramp this step. */
     }
 
-    if (0 == side)
+    if (VC_LINE_CENTRE == line)
     {
-        p_vc->steer_mag = 0;
+        /* Keep the ramp's side; let its size fade. */
+        p_vc->steer_mag = (int16_t) (((int32_t) p_vc->steer_mag
+                                      * VC_STEER_DECAY_NUM)
+                                     / VC_STEER_DECAY_DEN);
+        steer = ((int32_t) error * VC_STEER_START) / 127;
     }
-    else if (side != p_vc->steer_side)
+    else if (0 == side)
     {
-        p_vc->steer_mag = VC_STEER_START;
+        p_vc->steer_mag  = 0;
+        p_vc->steer_side = 0;
     }
     else
     {
-        p_vc->steer_mag += VC_STEER_STEP;
-        if (127 < p_vc->steer_mag)
+        if ((side != p_vc->steer_side) || (VC_STEER_START > p_vc->steer_mag))
         {
-            p_vc->steer_mag = 127;
+            p_vc->steer_mag = VC_STEER_START;
         }
+        else
+        {
+            p_vc->steer_mag += VC_STEER_STEP;
+            if (127 < p_vc->steer_mag)
+            {
+                p_vc->steer_mag = 127;
+            }
+        }
+        p_vc->steer_side = side;
+        steer = (int32_t) side * (int32_t) p_vc->steer_mag;
     }
-    p_vc->steer_side = side;
 
-    /* Cast: steer_mag is at most 127, so side * steer_mag fits int8_t. */
-    return (int8_t) (side * p_vc->steer_mag);
+    /* Cast: |error| and steer_mag are at most 127, so steer fits int8_t. */
+    return (int8_t) steer;
 }
 
 
@@ -436,7 +459,8 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
         p_out->steer      = follow_steer(p_vc,
                                          (p_vc->b_junction_hold
                                           && !p_vc->b_junction_track)
-                                         ? VC_LINE_JUNCTION : line);
+                                         ? VC_LINE_JUNCTION : line,
+                                         p_in->line_error);
         /* A healthy ramp report keeps the forward command at ramp speed:
          * historical climbs stalled at 50 mm/s. Keep steering and LOST
          * recovery, unlike the reverted straight hold. Missing terrain alone
