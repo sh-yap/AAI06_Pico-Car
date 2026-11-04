@@ -29,7 +29,7 @@
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
-#define VC_SPEED_NORMAL_MM_S    (150)    /* On the flat line.  Set to 150 by
+#define VC_SPEED_NORMAL_MM_S    (100)    /* On the flat line.  Set to 150 by
                                             the user on 30 Oct 2026 to cover
                                             the course faster.  Was 70 (team-
                                             mate, fewer lost left bends) before

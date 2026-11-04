@@ -82,12 +82,17 @@
 #define BARCODE_MIN_EDGES        6U
 
 /*
- * Duplicate guard: after a valid barcode, ignore the sensor so one
- * barcode gives at most one command (Tribunal 1). The guard covers
- * the barcode's length plus BARCODE_GUARD_GAP_FACTOR end gaps, so a
- * U-turn (back over the end gap, then the whole barcode) is covered
- * for any print size, and is never less than
- * BARCODE_GUARD_MIN_COUNTS (~200 mm).
+ * Duplicate guard: after a valid barcode, a capture that begins within
+ * the guard and reads the same character (or is unreadable) is
+ * dropped, so one barcode
+ * gives at most one command (Tribunal 1). The guard covers the
+ * barcode's length plus BARCODE_GUARD_GAP_FACTOR end gaps, so a U-turn
+ * (back over the end gap, then the whole barcode) is covered for any
+ * print size, and is never less than BARCODE_GUARD_MIN_COUNTS
+ * (~200 mm). The sensor is still read during the guard: with a large
+ * print the guard reaches past a different barcode close behind (4 Nov
+ * track: *Z* ~330 mm after *A* lost its first five bars), and that one
+ * must still be read.
  */
 #define BARCODE_GUARD_MIN_COUNTS     2460
 #define BARCODE_GUARD_GAP_FACTOR     3
@@ -247,6 +252,10 @@ static char decoded_char = C39_CHAR_NONE;
 static bool guard_active = false;
 static int32_t guard_position = 0;
 static int32_t guard_counts = BARCODE_GUARD_MIN_COUNTS;
+static char guard_char = C39_CHAR_NONE;
+
+/* The current capture began within the duplicate guard. */
+static bool capture_in_guard = false;
 
 
 /* How a glitch element is merged in one decode variant. */
@@ -480,6 +489,70 @@ static uint32_t barcode_median_width(uint8_t count)
 
 
 /*
+ * Median of every second raw width from first (one colour), count
+ * widths in all. Sorts a copy in variant_widths, as
+ * barcode_median_width() does.
+ */
+static uint32_t barcode_median_colour(uint8_t count, uint8_t first)
+{
+    uint32_t width;
+    uint8_t n = 0U;
+    uint8_t i;
+    uint8_t slot;
+
+    for (i = first; i < count; i = (uint8_t)(i + 2U))
+    {
+        width = raw_widths[i];
+        slot = n;
+
+        while ((slot > 0U) && (variant_widths[slot - 1U] > width))
+        {
+            variant_widths[slot] = variant_widths[slot - 1U];
+            slot--;
+        }
+
+        variant_widths[slot] = width;
+        n++;
+    }
+
+    return (n > 0U) ? variant_widths[n / 2U] : 0U;
+}
+
+
+/*
+ * Bars read narrower and spaces wider than printed: the sensor spot
+ * and the fixed threshold move every edge by about the same distance.
+ * On a small print that shift is a large part of each width (4 Nov
+ * small *A*: narrow bars 12-25 counts, narrow spaces 47-61, wide bars
+ * from 73), so a narrow space came within 20% of a wide bar and the
+ * read failed C39_MIN_WIDE_PERCENT. Most bars and most spaces of *X*
+ * are narrow, so the median bar and the median space are both narrow
+ * and half their difference is the shift. It is measured on each
+ * capture, so any print size, sensor height or threshold is handled.
+ * The shift is added back to every bar and taken off every space;
+ * widths stay at least 1 so a short glitch stays a glitch.
+ */
+static void barcode_correct_edge_shift(uint8_t count, bool b_black0)
+{
+    uint8_t const first_bar = b_black0 ? 0U : 1U;
+    uint8_t const first_space = b_black0 ? 1U : 0U;
+    int32_t shift;
+    int32_t width;
+    uint8_t i;
+
+    shift = ((int32_t)barcode_median_colour(count, first_space)
+             - (int32_t)barcode_median_colour(count, first_bar)) / 2;
+
+    for (i = 0U; i < count; i++)
+    {
+        width = (int32_t)raw_widths[i];
+        width = ((i % 2U) == first_bar) ? (width + shift) : (width - shift);
+        raw_widths[i] = (width < 1) ? 1U : (uint32_t)width;
+    }
+}
+
+
+/*
  * Build decode variant number variant of the raw widths into
  * variant_widths: digit g (base BARCODE_GLITCH_CHOICES) of variant says
  * how glitch g is merged. Merging always removes two elements, so
@@ -645,26 +718,19 @@ static void barcode_match_variant(uint8_t count, bool b_black0,
  * Specks or flicker before/after the barcode add extra elements, so
  * every run of elements is tried; glitches are tried every way they
  * can merge. The read counts only if every match gives the same
- * character.
+ * character. corrected selects the widths with the bar/space shift
+ * removed (barcode_correct_edge_shift()).
  */
-static char barcode_decode_char(void)
+static char barcode_decode_widths(uint8_t raw_count, bool b_corrected)
 {
     uint8_t glitch_index[BARCODE_MAX_GLITCHES];
     uint32_t variants = 1U;
     uint32_t variant;
     uint32_t median;
-    uint8_t raw_count;
     uint8_t glitches = 0U;
     uint8_t i;
     bool b_conflict = false;
     char character = C39_CHAR_NONE;
-
-    if (barcode_overflow || (edge_count < (C39_MIN_ELEMENTS + 1U)))
-    {
-        return C39_CHAR_NONE;
-    }
-
-    raw_count = (uint8_t)(edge_count - 1U);
 
     /* Absolute width, so reversing wheels still gives positive widths. */
     for (i = 0U; i < raw_count; i++)
@@ -672,6 +738,11 @@ static char barcode_decode_char(void)
         raw_widths[i] = (uint32_t)abs_counts(
             barcode_edges[i + 1U].encoder_position
             - barcode_edges[i].encoder_position);
+    }
+
+    if (b_corrected)
+    {
+        barcode_correct_edge_shift(raw_count, barcode_edges[0].is_black);
     }
 
     median = barcode_median_width(raw_count);
@@ -697,6 +768,34 @@ static char barcode_decode_char(void)
     }
 
     return b_conflict ? C39_CHAR_NONE : character;
+}
+
+
+/*
+ * Decode the captured edges into the data character, or C39_CHAR_NONE.
+ * The widths are tried as measured first, so a read that decodes as it
+ * is never changes; only if that fails are they tried again with the
+ * bar/space shift removed, which is what rescues small prints.
+ */
+static char barcode_decode_char(void)
+{
+    uint8_t raw_count;
+    char character;
+
+    if (barcode_overflow || (edge_count < (C39_MIN_ELEMENTS + 1U)))
+    {
+        return C39_CHAR_NONE;
+    }
+
+    raw_count = (uint8_t)(edge_count - 1U);
+    character = barcode_decode_widths(raw_count, false);
+
+    if (character == C39_CHAR_NONE)
+    {
+        character = barcode_decode_widths(raw_count, true);
+    }
+
+    return character;
 }
 
 
@@ -734,6 +833,7 @@ void barcode_reset(void)
     barcode_ready = false;
     barcode_overflow = false;
     widest_counts = 0;
+    capture_in_guard = false;
     decoded_code = BARCODE_NONE;
     decoded_char = C39_CHAR_NONE;
 }
@@ -756,19 +856,14 @@ void barcode_update(
 
 
     /*
-     * Duplicate guard: ignore the sensor until the car has
-     * moved guard_counts past the last valid barcode.
-     * Measured either way, so reversing or a U-turn over the
-     * same barcode does not trigger it again.
+     * Duplicate guard ends once the car has moved guard_counts past
+     * the last valid barcode. Measured either way, so reversing or a
+     * U-turn over the same barcode stays covered. Captures are still
+     * taken meanwhile; barcode_finish_capture() drops repeats.
      */
-    if (guard_active)
+    if (guard_active &&
+        (abs_counts(encoder_position - guard_position) >= guard_counts))
     {
-        if (abs_counts(encoder_position - guard_position)
-            < guard_counts)
-        {
-            return;
-        }
-
         guard_active = false;
     }
 
@@ -820,6 +915,12 @@ void barcode_update(
      */
     if (edge_count < BARCODE_MAX_EDGES)
     {
+        /* A capture that starts within the guard may be a repeat. */
+        if (edge_count == 0U)
+        {
+            capture_in_guard = guard_active;
+        }
+
         /* The element this edge closes, for the end gap. */
         if ((edge_count > 0U) &&
             (abs_counts(encoder_position -
@@ -869,6 +970,20 @@ void barcode_finish_capture(void)
     {
         decoded_char = barcode_decode_char();
         decoded_code = course_code_of(decoded_char);
+
+        /*
+         * Begun within the duplicate guard: the same barcode again,
+         * or a partial read of it, is dropped. A different course
+         * barcode is reported.
+         */
+        if (capture_in_guard &&
+            ((decoded_code == BARCODE_INVALID) ||
+             (decoded_char == guard_char)))
+        {
+            barcode_reset();
+            return;
+        }
+
         barcode_ready = true;
 
         /*
@@ -878,6 +993,7 @@ void barcode_finish_capture(void)
         if (decoded_code != BARCODE_INVALID)
         {
             guard_active = true;
+            guard_char = decoded_char;
             guard_position = last_activity_position;
             guard_counts = abs_counts(
                 barcode_edges[edge_count - 1U].encoder_position

@@ -476,6 +476,129 @@ count_valid_two_barcodes(int32_t gap_mm)
 }
 
 
+/* True if pos_um (from that barcode's start) is on a bar of p_el. */
+static bool
+is_black_in(int32_t const * p_el, int32_t len_um, int32_t pos_um)
+{
+    int32_t edge = 0;
+    uint32_t e;
+
+    if ((pos_um < 0) || (pos_um >= len_um))
+    {
+        return false;
+    }
+
+    for (e = 0U; e < MAX_ELEMENTS; e++)
+    {
+        edge += p_el[e];
+
+        if (pos_um < edge)
+        {
+            return (e % 2U) == 0U;
+        }
+    }
+
+    return false;
+}
+
+
+/*
+ * Drive at 150 mm/s over barcode first_pattern, then second_pattern
+ * starting gap_mm after the first ends. Valid codes reported, in
+ * order, go into p_codes[0..1]; returns how many there were.
+ */
+static uint32_t
+read_two_barcodes(uint16_t first_pattern, uint16_t second_pattern,
+                  int32_t gap_mm, barcode_t p_codes[2])
+{
+    int32_t first[MAX_ELEMENTS];
+    int32_t first_len_um;
+    int32_t second_um;
+    int32_t end_um;
+    int32_t pos_um;
+    int32_t enc;
+    uint32_t t_ms;
+    uint32_t e;
+    uint32_t valid = 0U;
+    barcode_t code;
+
+    build(first_pattern, false);
+    for (e = 0U; e < MAX_ELEMENTS; e++)
+    {
+        first[e] = elements[e];
+    }
+    first_len_um = barcode_len_um;
+
+    build(second_pattern, false);
+    second_um = first_len_um + (gap_mm * 1000);
+    end_um = second_um + barcode_len_um + TAIL_UM;
+
+    barcode_init();
+
+    for (t_ms = 0U; ; t_ms += SAMPLE_MS)
+    {
+        pos_um = -QUIET_UM + (150 * (int32_t)t_ms);
+
+        if (pos_um > end_um)
+        {
+            break;
+        }
+
+        enc = (int32_t)(((int64_t)(pos_um + QUIET_UM) * COUNTS_PER_M) / 1000000);
+
+        barcode_update(is_black_in(first, first_len_um, pos_um) ||
+                       is_black_at(pos_um - second_um), t_ms, enc);
+        barcode_check_end(enc);
+
+        if (barcode_available())
+        {
+            code = barcode_get_code();
+            (void)barcode_get_command();
+
+            if ((code != BARCODE_NONE) && (code != BARCODE_INVALID))
+            {
+                if (valid < 2U)
+                {
+                    p_codes[valid] = code;
+                }
+                valid++;
+            }
+        }
+    }
+
+    return valid;
+}
+
+
+/*
+ * 4 Nov track: *A* then *Z* about 330 mm later, large print (~5 mm
+ * narrow, ~260 mm long). The duplicate guard after *A* reached into
+ * *Z* and cut off its first five bars, so *Z* never read.
+ */
+static void
+test_close_barcodes_large_print(void)
+{
+    int32_t const saved_narrow = narrow_um;
+    int32_t const saved_wide = wide_um;
+    barcode_t codes[2] = { BARCODE_NONE, BARCODE_NONE };
+    uint32_t n;
+
+    narrow_um = 5000;
+    wide_um = 17500;
+
+    n = read_two_barcodes(PAT_A, PAT_Z, 330, codes);
+    check("large print: *A* then *Z* 330 mm later both read",
+          (n == 2U) && (codes[0] == BARCODE_A) && (codes[1] == BARCODE_Z));
+
+    n = read_two_barcodes(PAT_A, PAT_A, 330, codes);
+    check("large print: same *A* again within the guard is dropped",
+          n == 1U);
+
+    narrow_um = saved_narrow;
+    wide_um = saved_wide;
+}
+
+
 static void
 test_slow_and_guard(void)
 {
@@ -761,6 +884,10 @@ test_track_captures(void)
         { "B103 W75 B121 W74 B17 W29 B127 W91 B67 W16 B170 W15 B46 W45 B34 W36 B36 W113", BARCODE_INVALID },
         { "B49 W94 B226 W70 B248 W44 B72 W223 B76 W82 B66 W100 B66 W83 B165 W35 B18 W76 B183 W229 B85 W70 B68 W99 B220 W92 B215 W75 B52 W255 B70", BARCODE_Z },
         { "B91 W62 B103 W111 B13 W40 B134 W80 B53 W35 B96 W57 B17 W67 B30 W56 B51 W91", BARCODE_INVALID },
+        /* Small *A* read backwards: bars thin, gaps fat (wide 73 vs narrow 61). */
+        { "B24 W49 B73 W61 B84 W49 B12 W118 B24 W48 B92 W48 B25 W107 B24 W59 B13 W47 B96 W47 B12 W61 B82 W60 B84 W48 B23 W108 B24 W152 B36", BARCODE_A },
+        /* Large *A* from the same run. */
+        { "B34 W208 B47 W103 B184 W101 B146 W101 B47 W93 B190 W83 B31 W87 B46 W236 B45 W93 B183 W106 B46 W205 B36 W106 B187 W109 B165 W76 B34", BARCODE_A },
     };
     uint32_t i;
     bool all_ok = true;
@@ -828,7 +955,7 @@ test_track_captures(void)
         }
     }
 
-    check("4 Nov track captures: *Z* read, swerve reads rejected", all_ok);
+    check("4 Nov track captures: *Z* and *A* read, swerve reads rejected", all_ok);
 }
 
 
@@ -880,6 +1007,7 @@ main(void)
     test_rejects();
     test_stop_mid_barcode();
     test_slow_and_guard();
+    test_close_barcodes_large_print();
     test_specks_before_barcode();
     test_every_character();
     test_large_print();

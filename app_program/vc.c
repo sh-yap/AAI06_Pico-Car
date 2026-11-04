@@ -290,7 +290,11 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out,
  * Centred: steer in proportion to the error, 0 when fully on the line up
  * to VC_STEER_START at the edge (-127), so the steer meets the off-centre
  * ramp without a jump.  Without this the car drove straight while
- * centred and swung back and forth across the line edge.
+ * centred and swung back and forth across the line edge.  Buddy 3 can
+ * only report the centre sensor fading as "left": with no left sensor and
+ * a gap before the right one, the line drifting right fades it too (4 Nov
+ * run: 14 of 42 fades ended RIGHT).  So it steers only when the line was
+ * last seen on the left; otherwise it stays straight as before.
  *
  * Off centre the steer starts at VC_STEER_START and grows by VC_STEER_STEP
  * each step up to full.  A change of side restarts it.  While centred the
@@ -300,7 +304,8 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out,
  *
  * @param  p_vc   VC state holding the ramp.
  * @param  line   Line state this step (JUNCTION means steer straight).
- * @param  error  Line error -127 (left) .. +127 (right), used only centred.
+ * @param  error  Line error -127 (left) .. +127 (right), used only centred
+ *                with the line last seen on the left.
  * @return Steer -127 (left) .. +127 (right).
  */
 static int8_t
@@ -328,7 +333,10 @@ follow_steer (vc_t * p_vc, vc_line_t line, int8_t error)
         p_vc->steer_mag = (int16_t) (((int32_t) p_vc->steer_mag
                                       * VC_STEER_DECAY_NUM)
                                      / VC_STEER_DECAY_DEN);
-        steer = ((int32_t) error * VC_STEER_START) / 127;
+        if (0 > p_vc->last_side)
+        {
+            steer = ((int32_t) error * VC_STEER_START) / 127;
+        }
     }
     else if (0 == side)
     {

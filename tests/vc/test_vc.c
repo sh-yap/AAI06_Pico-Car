@@ -269,7 +269,18 @@ test_follow_line_and_hump (void)
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
     CHECK(!g_out.b_state_changed);
 
-    /* Centred: steer in proportion to the error, START at the edge. */
+    /* Centred, line not yet seen off centre: a fading centre could be
+     * the line going either way, so no steer. */
+    g_in.line_error = -64;
+    step();
+    CHECK(0 == g_out.steer);
+    CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
+
+    /* Line last seen on the left: steer in proportion to the error,
+     * START at the edge. */
+    g_in.line = VC_LINE_LEFT;
+    step();
+    g_in.line       = VC_LINE_CENTRE;
     g_in.line_error = -127;
     step();
     CHECK(-VC_STEER_START == g_out.steer);
@@ -281,6 +292,24 @@ test_follow_line_and_hump (void)
     step();
     CHECK(0 == g_out.steer);
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
+
+    /* Line last seen on the right: the fade may be the line drifting
+     * right through the gap, so no left steer. */
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    g_in.line       = VC_LINE_CENTRE;
+    g_in.line_error = -100;
+    step();
+    CHECK(0 == g_out.steer);
+    g_in.line_error = 0;
+    {
+        int32_t n;
+
+        for (n = 0; 10 > n; n++)            /* Let the ramp fade out. */
+        {
+            step();
+        }
+    }
 
     /* Off centre: steer starts at half (64 at 150 -> 100 mm/s). */
     g_in.line       = VC_LINE_LEFT;
