@@ -55,8 +55,9 @@ void barcode_finish_capture(void);
 
 /*
  * Call every cycle with the current encoder position. If a capture
- * is in progress and the car has travelled BARCODE_END_GAP_COUNTS
- * with no transition, automatically finishes the capture (calls
+ * is in progress and the car has travelled the end gap (twice the
+ * widest element so far, see barcode.c) with no transition,
+ * automatically finishes the capture (calls
  * barcode_finish_capture() internally). Stopping does not end a
  * capture. Safe to call every cycle regardless of state.
  */

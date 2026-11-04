@@ -48,6 +48,12 @@
 #define COMMS_HEARTBEAT_MS       1000U
 #define COMMS_MBF_OVERHEAD       8U     /* per-message kernel header     */
 
+/* TEMPORARY (barcode diagnosis, 2026-11-04): robot/debug text lines.
+ * Set to 0, or delete every COMMS_DEBUG_TEXT block, to remove. */
+#define COMMS_DEBUG_TEXT         1
+#define COMMS_DEBUG_QUEUE_LEN    4U
+#define COMMS_DEBUG_TEXT_MAX     200U   /* below COMMS_LINK_PAYLOAD_MAX  */
+
 #define QOS_0                    0U
 #define QOS_1                    1U
 
@@ -223,6 +229,13 @@ static UW g_cmd_buf[(COMMS_CMD_QUEUE_LEN
                      * (sizeof(uint32_t) + COMMS_MBF_OVERHEAD))
                     / sizeof(UW)];
 
+#if COMMS_DEBUG_TEXT
+static ID g_debug_mbf;
+static UW g_debug_buf[(COMMS_DEBUG_QUEUE_LEN
+                       * (COMMS_DEBUG_TEXT_MAX + COMMS_MBF_OVERHEAD))
+                      / sizeof(UW)];
+#endif
+
 /* ------------------------------------------------------------------ *
  *  Helpers
  * ------------------------------------------------------------------ */
@@ -357,10 +370,46 @@ comms_init (void)
         g_drop_mtx  = tk_cre_mtx(&cmtx);
 
         g_b_ready = (0 < g_event_mbf) && (0 < g_cmd_mbf) && (0 < g_drop_mtx);
+
+#if COMMS_DEBUG_TEXT
+        /* Optional: a failure here only disables robot/debug. */
+        cmbf.bufsz  = (SZ) sizeof(g_debug_buf);
+        cmbf.maxmsz = (INT) COMMS_DEBUG_TEXT_MAX;
+        cmbf.bufptr = g_debug_buf;
+        g_debug_mbf = tk_cre_mbf(&cmbf);
+#endif
     }
 
     return g_b_ready;
 }
+
+
+#if COMMS_DEBUG_TEXT
+void
+comms_debug_text (char const * p_text)
+{
+    char     text[COMMS_DEBUG_TEXT_MAX];
+    uint32_t n = 0U;
+
+    if (g_b_ready && (0 < g_debug_mbf) && (NULL != p_text))
+    {
+        while ((n < (COMMS_DEBUG_TEXT_MAX - 1U)) && ('\0' != p_text[n]))
+        {
+            text[n] = p_text[n];
+            n++;
+        }
+
+        text[n] = '\0';
+        (void) tk_snd_mbf(g_debug_mbf, text, (INT) (n + 1U), TMO_POL);
+    }
+}
+#else
+void
+comms_debug_text (char const * p_text)
+{
+    (void) p_text;
+}
+#endif
 
 
 bool
@@ -579,6 +628,10 @@ static int32_t  g_max_hump_dmm;
 static uint32_t g_hump_count;
 static uint32_t g_barcode_count;
 static uint32_t g_obstacle_count;
+
+#if COMMS_DEBUG_TEXT
+static char     g_debug_rx[COMMS_DEBUG_TEXT_MAX];   /* Radio task only. */
+#endif
 
 /* --- small helpers --- */
 
@@ -1088,6 +1141,14 @@ comms_link_next (comms_link_msg_t * p_msg)
             /* 3. Queued events, oldest first. */
             build_event(p_msg, &event);
         }
+#if COMMS_DEBUG_TEXT
+        else if ((0 < g_debug_mbf)
+                 && (0 < tk_rcv_mbf(g_debug_mbf, g_debug_rx, TMO_POL)))
+        {
+            /* TEMPORARY: debug text lines, after the real events. */
+            codec_text(p_msg, "robot/debug", QOS_0, false, g_debug_rx);
+        }
+#endif
         else if ((now - g_heartbeat_ms) >= COMMS_HEARTBEAT_MS)
         {
             /* 4. Heartbeat. */

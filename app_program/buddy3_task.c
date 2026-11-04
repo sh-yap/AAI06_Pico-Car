@@ -14,8 +14,15 @@
 #include "navigation.h"
 
 #include "motion_encoder.h"
+#include "comms.h"
 
 #include <tm/tmonitor.h>
+
+/* TEMPORARY (barcode diagnosis, 2026-11-04): send each finished capture to
+ * robot/debug, so track runs on the power bank log it.  Same content as the
+ * BUDDY3_DEBUG serial line, plus the threshold, the barcode ADC range seen
+ * during the capture and its length.  Set to 0 or delete to remove. */
+#define BUDDY3_SCAN_TO_MQTT      1
 
 #ifndef VC_RECORDER
 #define VC_RECORDER              (0)    /* Test-only recorder, run_rec.h.   */
@@ -112,6 +119,118 @@ static void debug_print_edges(void)
     }
 
     tm_printf((UB *)"\n");
+}
+#endif
+
+#if BUDDY3_SCAN_TO_MQTT
+#define SCAN_TEXT_MAX    200U
+
+static uint16_t g_scan_adc_min = 0xFFFFU;
+static uint16_t g_scan_adc_max;
+
+/* Append text at *p_len, never past the buffer (the rest is cut). */
+static void scan_append(char *p_buf, uint32_t *p_len, char const *p_text)
+{
+    while (('\0' != *p_text) && (*p_len < (SCAN_TEXT_MAX - 1U)))
+    {
+        p_buf[*p_len] = *p_text;
+        (*p_len)++;
+        p_text++;
+    }
+
+    p_buf[*p_len] = '\0';
+}
+
+static void scan_append_uint(char *p_buf, uint32_t *p_len, uint32_t value)
+{
+    char     digits[11];
+    uint32_t n = 0U;
+    char     text[11];
+    uint32_t i;
+
+    do
+    {
+        digits[n] = (char)('0' + (value % 10U));
+        n++;
+        value /= 10U;
+    } while ((0U != value) && (n < 10U));
+
+    for (i = 0U; i < n; i++)
+    {
+        text[i] = digits[n - 1U - i];
+    }
+
+    text[n] = '\0';
+    scan_append(p_buf, p_len, text);
+}
+
+/* Barcode ADC range while a capture is in progress (edges stored). */
+static void scan_track_adc(uint16_t adc)
+{
+    if (0U == barcode_get_edge_count())
+    {
+        g_scan_adc_min = 0xFFFFU;
+        g_scan_adc_max = 0U;
+    }
+    else
+    {
+        g_scan_adc_min = (adc < g_scan_adc_min) ? adc : g_scan_adc_min;
+        g_scan_adc_max = (adc > g_scan_adc_max) ? adc : g_scan_adc_max;
+    }
+}
+
+/* One line per finished capture, e.g.
+ * "edges=31 char=? thr=1600 adc=210-2950 ms=480 len=812 B37 W36 B110 ..."
+ * widths in encoder counts (narrow ~37, wide ~110). */
+static void scan_publish(uint16_t threshold)
+{
+    char           text[SCAN_TEXT_MAX];
+    uint32_t       len = 0U;
+    uint8_t        count = barcode_get_edge_count();
+    uint8_t        i;
+    barcode_edge_t first;
+    barcode_edge_t prev;
+    barcode_edge_t edge;
+    int32_t        width;
+    char           raw = barcode_get_char();
+    char           ch[2];
+
+    ch[0] = (raw != '\0') ? raw : '?';
+    ch[1] = '\0';
+    text[0] = '\0';
+
+    scan_append(text, &len, "edges=");
+    scan_append_uint(text, &len, count);
+    scan_append(text, &len, " char=");
+    scan_append(text, &len, ch);
+    scan_append(text, &len, " thr=");
+    scan_append_uint(text, &len, threshold);
+    scan_append(text, &len, " adc=");
+    scan_append_uint(text, &len, (g_scan_adc_min <= g_scan_adc_max)
+                                 ? g_scan_adc_min : 0U);
+    scan_append(text, &len, "-");
+    scan_append_uint(text, &len, g_scan_adc_max);
+
+    if ((count > 1U) && barcode_get_edge(0U, &first)
+        && barcode_get_edge((uint8_t)(count - 1U), &edge))
+    {
+        width = edge.encoder_position - first.encoder_position;
+        scan_append(text, &len, " ms=");
+        scan_append_uint(text, &len, edge.timestamp_ms - first.timestamp_ms);
+        scan_append(text, &len, " len=");
+        scan_append_uint(text, &len, (uint32_t)((width < 0) ? -width : width));
+    }
+
+    for (i = 1U; i < count; i++)
+    {
+        (void)barcode_get_edge((uint8_t)(i - 1U), &prev);
+        (void)barcode_get_edge(i, &edge);
+        width = edge.encoder_position - prev.encoder_position;
+        scan_append(text, &len, prev.is_black ? " B" : " W");
+        scan_append_uint(text, &len, (uint32_t)((width < 0) ? -width : width));
+    }
+
+    comms_debug_text(text);
 }
 #endif
 
@@ -336,6 +455,16 @@ void buddy3_task(INT stacd, void *exinf)
 
         barcode_update(barcode_is_black, timestamp_ms, encoder_position);
         barcode_check_end(encoder_position);
+
+#if BUDDY3_SCAN_TO_MQTT
+        /* Before barcode_get_command(), which clears the capture. */
+        scan_track_adc(readings.barcode);
+
+        if (barcode_available())
+        {
+            scan_publish(buddy3_barcode_threshold());
+        }
+#endif
 
 #if BUDDY3_DEBUG
         /* Sample before barcode_get_command(), which clears it. */

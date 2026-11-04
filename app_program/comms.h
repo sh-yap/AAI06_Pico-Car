@@ -228,4 +228,9 @@ bool comms_event_obstacle(comms_obstacle_t const * p_obstacle);
 bool comms_event_motion(comms_motion_class_t motion);
 bool comms_event_calibration(comms_calibration_t const * p_calibration);
 
+/* TEMPORARY (barcode diagnosis, 2026-11-04; remove with COMMS_DEBUG_TEXT):
+ * one line of plain text to robot/debug, from any task.  Longer text is
+ * cut; dropped if the small queue is full.  Not a normal event. */
+void comms_debug_text(char const * p_text);
+
 #endif /* COMMS_H */

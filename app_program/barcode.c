@@ -8,14 +8,24 @@
  * - encoder position
  *
  * Decodes Code 39 barcodes of the form *X* (start, one data
- * character, stop), confirmed from the course sample *A*:
- * narrow element ~3 mm, wide ~9 mm, total ~141 mm.
+ * character, stop). Nothing depends on the print size or on
+ * which character is printed: the course sample *A* was
+ * narrow ~3 mm / wide ~9 mm (141 mm), the track barcode of
+ * 4 Nov about twice that, and both decode the same way.
  *
  * Widths come from encoder positions, so decoding does not
- * depend on speed. In each character exactly 3 of the 9
- * elements are wide, so the 3 widest are taken as wide -
- * no fixed mm threshold is needed. Barcodes read in the
- * opposite direction are decoded by reversing the elements.
+ * depend on speed. Exactly 9 of the 29 elements of *X* are
+ * wide, so the widest elements are taken as wide - no fixed
+ * mm threshold. Each run of elements is compared with every
+ * Code 39 character, read forwards and backwards, and the
+ * read is accepted only if exactly one character fits.
+ *
+ * Seen on the track 4 Nov (robot/debug captures):
+ * - a 1-2 mm white glitch inside a wide bar splits it into
+ *   three elements, so short glitches are merged back;
+ * - the first or last narrow bar and space can be missed,
+ *   so up to C39_MAX_MISSING elements may be absent at each
+ *   end of the barcode.
  */
 
 #include "barcode.h"
@@ -33,19 +43,33 @@
  */
 #define BARCODE_MAX_EDGES    64U
 
+/* Elements (widths between edges) that fit in one capture. */
+#define BARCODE_MAX_ELEMENTS (BARCODE_MAX_EDGES - 1U)
+
 /*
- * End of barcode, in encoder counts (average of both wheels).
- * If the car travels this far with no transition while a capture
- * is in progress, the capture is assumed complete.
- * Measured on the car 29 Oct (after Buddy 2's encoder changes):
- * narrow 3 mm ~ 37 counts, wide 9 mm ~ 110, so ~12.3 counts/mm
- * (matches Motion's 2536 counts/rev, 57.7 mm wheel, x1.14 floor
- * scale).  240 counts ~ 19.5 mm: over twice the widest element and
- * less than the white gap around a barcode.
- * Distance, not time, so the car stopping or slowing on a
- * barcode does not split the capture.
+ * End of barcode, in encoder counts (average of both wheels,
+ * ~12.3 counts/mm, measured on the car 29 Oct). Distance, not
+ * time, so the car stopping or slowing on a barcode does not
+ * split the capture.
+ *
+ * A capture ends when the car travels BARCODE_END_GAP_FACTOR times
+ * the widest element seen so far with no transition, so the gap
+ * scales with the print. Until a wide element must have been seen
+ * (the first BARCODE_END_GAP_EARLY_EDGES edges: reading backwards,
+ * the first wide element is the third) the factor is
+ * BARCODE_END_GAP_EARLY_FACTOR, because a wide element can be over
+ * 3x the narrow one before it. Never less than
+ * BARCODE_END_GAP_MIN_COUNTS (26 mm), so one bar of a large print
+ * is not taken for the end.
+ *
+ * Upper bound: the barcode must be reported before the car reaches
+ * the junction after it, which on the 4 Nov track was 70-140 mm on.
+ * The 4 Nov print (wide ~250 counts) ends 41 mm after its last bar.
  */
-#define BARCODE_END_GAP_COUNTS   240
+#define BARCODE_END_GAP_MIN_COUNTS      320
+#define BARCODE_END_GAP_FACTOR          2
+#define BARCODE_END_GAP_EARLY_FACTOR    3
+#define BARCODE_END_GAP_EARLY_EDGES     3U
 
 /*
  * An edge that undoes the previous one within this many counts
@@ -58,12 +82,30 @@
 #define BARCODE_MIN_EDGES        6U
 
 /*
- * Duplicate guard: after a valid barcode, ignore the sensor for this
- * many counts so one barcode gives at most one command (Tribunal 1).
- * 2460 counts ~ 200 mm at ~12.3 counts/mm: longer than the barcode
- * (141 mm) plus its white margins.
+ * Duplicate guard: after a valid barcode, ignore the sensor so one
+ * barcode gives at most one command (Tribunal 1). The guard covers
+ * the barcode's length plus BARCODE_GUARD_GAP_FACTOR end gaps, so a
+ * U-turn (back over the end gap, then the whole barcode) is covered
+ * for any print size, and is never less than
+ * BARCODE_GUARD_MIN_COUNTS (~200 mm).
  */
-#define BARCODE_GUARD_COUNTS     2460
+#define BARCODE_GUARD_MIN_COUNTS     2460
+#define BARCODE_GUARD_GAP_FACTOR     3
+
+/*
+ * Glitch: an element inside the capture narrower than
+ * 1/BARCODE_GLITCH_DIV of the median element (the median is a narrow
+ * element, since 20 of the 29 are narrow). On the track a 1-2 mm
+ * glitch split a wide bar; it is resolved by trying each way of
+ * merging it with its neighbours, or keeping it: at 200 mm/s a
+ * sample is 2 mm, so a real narrow element can measure that small
+ * (see barcode_build_variant()). Only the first BARCODE_MAX_GLITCHES
+ * get variants, to bound the decode time (4^2 = 16 variants; every
+ * good track read of 4 Nov had one glitch).
+ */
+#define BARCODE_GLITCH_DIV           3U
+#define BARCODE_MAX_GLITCHES         2U
+#define BARCODE_GLITCH_CHOICES       4U    /* glitch_merge_t values */
 
 /* Code 39: 9 elements per character (5 bars, 4 spaces), 3 wide. */
 #define C39_ELEMENTS_PER_CHAR    9U
@@ -76,8 +118,26 @@
 #define C39_ELEMENTS \
     ((C39_CHARS * (C39_ELEMENTS_PER_CHAR + 1U)) - 1U)
 
-/* Edges from the first white->black edge to the last black->white. */
-#define C39_EDGES                (C39_ELEMENTS + 1U)
+/* Wide elements in a whole *X* barcode. */
+#define C39_WIDE_TOTAL           (C39_CHARS * C39_WIDE_PER_CHAR)
+
+/*
+ * Elements that may be missing at each end of the barcode (the first
+ * or last narrow bar and space were missed on the track), and the
+ * fewest elements a readable capture can therefore hold.
+ */
+#define C39_MAX_MISSING          2U
+#define C39_MIN_ELEMENTS         (C39_ELEMENTS - (2U * C39_MAX_MISSING))
+
+/* Element positions of the data character within *X*. */
+#define C39_DATA_FIRST           (C39_ELEMENTS_PER_CHAR + 1U)
+#define C39_DATA_LAST            (C39_DATA_FIRST + C39_ELEMENTS_PER_CHAR - 1U)
+
+/* Positions of the stop character within *X*. */
+#define C39_STOP_FIRST           (2U * (C39_ELEMENTS_PER_CHAR + 1U))
+
+/* Widest widths kept per run: every wide element plus one narrow. */
+#define C39_TOP_WIDTHS           (C39_WIDE_TOTAL + 1U)
 
 /*
  * Narrowest wide element must be at least this percentage of the
@@ -88,7 +148,6 @@
 #define C39_MIN_WIDE_PERCENT     125U
 
 #define C39_PATTERN_STAR         0x094U    /* n w n n w n w n n */
-#define C39_PATTERN_BAD          0xFFFFU
 
 /* Returned by c39_decode() when the barcode cannot be read. */
 #define C39_CHAR_NONE            '\0'
@@ -172,6 +231,10 @@ static bool barcode_overflow = false;
 static int32_t last_activity_position = 0;
 
 
+/* Widest element of the current capture, for the end gap. */
+static int32_t widest_counts = 0;
+
+
 /* Result decoded when the capture was finished. */
 static barcode_t decoded_code = BARCODE_NONE;
 static char decoded_char = C39_CHAR_NONE;
@@ -183,6 +246,28 @@ static char decoded_char = C39_CHAR_NONE;
  */
 static bool guard_active = false;
 static int32_t guard_position = 0;
+static int32_t guard_counts = BARCODE_GUARD_MIN_COUNTS;
+
+
+/* How a glitch element is merged in one decode variant. */
+typedef enum
+{
+    GLITCH_KEEP = 0,        /* Kept as it is (also every non-glitch).   */
+    GLITCH_MERGE_BOTH,      /* Both neighbours and the glitch: one.     */
+    GLITCH_MERGE_BEFORE,    /* Glitch + left neighbour join the one
+                               before (same colour as the glitch).      */
+    GLITCH_MERGE_AFTER      /* Glitch + right neighbour join the one
+                               after (same colour as the glitch).       */
+} glitch_merge_t;
+
+
+/*
+ * Decode work buffers: static so the decode does not need ~600 bytes
+ * of the Buddy 3 task stack. Used only inside barcode_decode_char().
+ */
+static uint32_t raw_widths[BARCODE_MAX_ELEMENTS];
+static uint32_t variant_widths[BARCODE_MAX_ELEMENTS];
+static uint8_t glitch_choice[BARCODE_MAX_ELEMENTS];
 
 
 /* Distance in encoder counts, either direction. */
@@ -192,59 +277,53 @@ static int32_t abs_counts(int32_t delta)
 }
 
 
-/*
- * Wide/narrow pattern of one 9-element character, or
- * C39_PATTERN_BAD if wide and narrow cannot be told apart.
- */
-static uint16_t c39_char_pattern(uint32_t const widths[C39_ELEMENTS_PER_CHAR])
+/* Travel with no transition that ends the current capture (see above). */
+static int32_t barcode_end_gap(void)
 {
-    uint16_t pattern = 0U;
-    uint32_t min_wide = UINT32_MAX;
-    uint32_t max_narrow = 0U;
-    uint32_t best;
-    uint8_t best_index;
-    uint8_t wide;
-    uint8_t i;
+    int32_t gap;
 
-    /* Mark the 3 widest elements as wide. */
-    for (wide = 0U; wide < C39_WIDE_PER_CHAR; wide++)
+    if (edge_count <= BARCODE_END_GAP_EARLY_EDGES)
     {
-        best = 0U;
-        best_index = 0U;
-
-        for (i = 0U; i < C39_ELEMENTS_PER_CHAR; i++)
-        {
-            if (((pattern & (1U << (8U - i))) == 0U) && (widths[i] > best))
-            {
-                best = widths[i];
-                best_index = i;
-            }
-        }
-
-        pattern |= (uint16_t)(1U << (8U - best_index));
+        gap = BARCODE_END_GAP_EARLY_FACTOR * widest_counts;
+    }
+    else
+    {
+        gap = BARCODE_END_GAP_FACTOR * widest_counts;
     }
 
-    for (i = 0U; i < C39_ELEMENTS_PER_CHAR; i++)
+    if (gap < BARCODE_END_GAP_MIN_COUNTS)
     {
-        if ((pattern & (1U << (8U - i))) != 0U)
-        {
-            if (widths[i] < min_wide)
-            {
-                min_wide = widths[i];
-            }
-        }
-        else if (widths[i] > max_narrow)
-        {
-            max_narrow = widths[i];
-        }
+        gap = BARCODE_END_GAP_MIN_COUNTS;
     }
 
-    if ((min_wide * 100U) < (max_narrow * C39_MIN_WIDE_PERCENT))
+    return gap;
+}
+
+
+/*
+ * True if the element at this position (0 .. C39_ELEMENTS - 1) of *X*
+ * is wide. Only for the start and stop characters and the gaps between
+ * characters; the data character is what is being read.
+ */
+static bool c39_frame_is_wide(uint8_t position)
+{
+    uint32_t bit = 0U;
+
+    if (position < C39_ELEMENTS_PER_CHAR)
     {
-        return C39_PATTERN_BAD;
+        bit = C39_PATTERN_STAR >> (C39_ELEMENTS_PER_CHAR - 1U - position);
+    }
+    else if (position >= C39_STOP_FIRST)
+    {
+        bit = C39_PATTERN_STAR >>
+              (C39_ELEMENTS_PER_CHAR - 1U - (position - C39_STOP_FIRST));
+    }
+    else
+    {
+        /* Gap between characters: always narrow. */
     }
 
-    return pattern;
+    return ((bit & 1U) != 0U);
 }
 
 
@@ -265,84 +344,359 @@ static char c39_lookup(uint16_t pattern)
 }
 
 
-/* Data character of the element widths, read forwards or backwards. */
-static char c39_decode(uint32_t const widths[C39_ELEMENTS], bool reversed)
+/*
+ * Add one width to top, the C39_TOP_WIDTHS widest widths so far,
+ * widest first (0 = empty slot; every real width is above 0).
+ */
+static void c39_top_add(uint32_t top[C39_TOP_WIDTHS], uint32_t width)
 {
-    uint32_t char_widths[C39_ELEMENTS_PER_CHAR];
-    uint16_t patterns[C39_CHARS];
-    uint8_t index;
-    uint8_t c;
-    uint8_t e;
+    uint8_t slot;
 
-    for (c = 0U; c < C39_CHARS; c++)
+    if (width > top[C39_TOP_WIDTHS - 1U])
     {
-        for (e = 0U; e < C39_ELEMENTS_PER_CHAR; e++)
-        {
-            /* Skip the narrow gap after each character. */
-            index = (uint8_t)((c * (C39_ELEMENTS_PER_CHAR + 1U)) + e);
+        slot = (uint8_t)(C39_TOP_WIDTHS - 1U);
 
-            char_widths[e] = reversed
-                ? widths[C39_ELEMENTS - 1U - index]
-                : widths[index];
+        while ((slot > 0U) && (top[slot - 1U] < width))
+        {
+            top[slot] = top[slot - 1U];
+            slot--;
         }
 
-        patterns[c] = c39_char_pattern(char_widths);
+        top[slot] = width;
     }
+}
 
-    if ((patterns[0] != C39_PATTERN_STAR) ||
-        (patterns[C39_CHARS - 1U] != C39_PATTERN_STAR))
+
+/*
+ * Data character if a run of count element widths is *X* with
+ * missing_start elements absent before it (in the barcode's own
+ * order), read forwards or reversed; otherwise C39_CHAR_NONE.
+ * The caller keeps count + missing_start within C39_MAX_MISSING of
+ * C39_ELEMENTS. b_first_black is the colour of the run's first element
+ * and top holds the run's widest widths (c39_top_add()).
+ */
+static char c39_match(uint32_t const * p_widths, uint8_t count,
+                      uint8_t missing_start, bool b_reversed,
+                      bool b_first_black,
+                      uint32_t const top[C39_TOP_WIDTHS])
+{
+    uint8_t wide_count = (uint8_t)C39_WIDE_TOTAL;
+    uint8_t position;
+    uint8_t i;
+    uint16_t data = 0U;
+    uint32_t min_wide;
+    bool b_wide;
+
+    /* Bars are the even positions of *X*. */
+    position = b_reversed ? (uint8_t)(missing_start + count - 1U)
+                          : missing_start;
+
+    if (b_first_black != ((position % 2U) == 0U))
     {
         return C39_CHAR_NONE;
     }
 
-    return c39_lookup(patterns[1]);
+    /* Wide elements in the missing ends are not in the run. */
+    for (position = 0U; position < missing_start; position++)
+    {
+        if (c39_frame_is_wide(position))
+        {
+            wide_count--;
+        }
+    }
+
+    for (position = (uint8_t)(missing_start + count);
+         position < C39_ELEMENTS;
+         position++)
+    {
+        if (c39_frame_is_wide(position))
+        {
+            wide_count--;
+        }
+    }
+
+    /* The widest wide_count elements are the wide ones; they must
+     * stand clear of the widest narrow one. */
+    min_wide = top[wide_count - 1U];
+
+    if ((min_wide * 100U) < (top[wide_count] * C39_MIN_WIDE_PERCENT))
+    {
+        return C39_CHAR_NONE;
+    }
+
+    for (i = 0U; i < count; i++)
+    {
+        position = b_reversed ? (uint8_t)(missing_start + count - 1U - i)
+                              : (uint8_t)(missing_start + i);
+        b_wide = (p_widths[i] >= min_wide);
+
+        if ((position >= C39_DATA_FIRST) && (position <= C39_DATA_LAST))
+        {
+            if (b_wide)
+            {
+                data |= (uint16_t)(1U << (C39_DATA_LAST - position));
+            }
+        }
+        else if (b_wide != c39_frame_is_wide(position))
+        {
+            return C39_CHAR_NONE;
+        }
+        else
+        {
+            /* Start, stop or gap element as expected. */
+        }
+    }
+
+    return c39_lookup(data);
+}
+
+
+/*
+ * Median of the first count raw widths (count > 0). Sorts a copy in
+ * variant_widths, which is rebuilt afterwards for each variant.
+ */
+static uint32_t barcode_median_width(uint8_t count)
+{
+    uint32_t width;
+    uint8_t i;
+    uint8_t slot;
+
+    for (i = 0U; i < count; i++)
+    {
+        width = raw_widths[i];
+        slot = i;
+
+        while ((slot > 0U) && (variant_widths[slot - 1U] > width))
+        {
+            variant_widths[slot] = variant_widths[slot - 1U];
+            slot--;
+        }
+
+        variant_widths[slot] = width;
+    }
+
+    return variant_widths[count / 2U];
+}
+
+
+/*
+ * Build decode variant number variant of the raw widths into
+ * variant_widths: digit g (base BARCODE_GLITCH_CHOICES) of variant says
+ * how glitch g is merged. Merging always removes two elements, so
+ * bars and spaces still alternate. Glitches are never the first or
+ * last element. Returns the element count, or 0 if this variant
+ * cannot be built (no element on the side it merges into).
+ */
+static uint8_t barcode_build_variant(uint8_t raw_count,
+                                     uint8_t const glitch_index[],
+                                     uint8_t glitches,
+                                     uint32_t variant)
+{
+    uint32_t digits = variant;
+    uint32_t carry = 0U;
+    uint32_t width;
+    uint8_t out = 0U;
+    uint8_t i;
+    bool b_ok = true;
+
+    for (i = 0U; i < raw_count; i++)
+    {
+        glitch_choice[i] = (uint8_t)GLITCH_KEEP;
+    }
+
+    for (i = 0U; i < glitches; i++)
+    {
+        glitch_choice[glitch_index[i]] =
+            (uint8_t)(digits % BARCODE_GLITCH_CHOICES);
+        digits /= BARCODE_GLITCH_CHOICES;
+    }
+
+    i = 0U;
+
+    while (b_ok && (i < raw_count))
+    {
+        width = raw_widths[i] + carry;
+        carry = 0U;
+
+        switch (glitch_choice[i])
+        {
+            case GLITCH_MERGE_BOTH:
+                b_ok = (out > 0U);
+
+                if (b_ok)
+                {
+                    variant_widths[out - 1U] += width + raw_widths[i + 1U];
+                }
+
+                i = (uint8_t)(i + 2U);
+                break;
+
+            case GLITCH_MERGE_BEFORE:
+                b_ok = (out > 1U);
+
+                if (b_ok)
+                {
+                    variant_widths[out - 2U] += variant_widths[out - 1U]
+                                                + width;
+                    out--;
+                }
+
+                i++;
+                break;
+
+            case GLITCH_MERGE_AFTER:
+                b_ok = ((i + 2U) < raw_count);
+                carry = width + raw_widths[i + 1U];
+                i = (uint8_t)(i + 2U);
+                break;
+
+            case GLITCH_KEEP:
+            default:
+                variant_widths[out] = width;
+                out++;
+                i++;
+                break;
+        }
+    }
+
+    return b_ok ? out : 0U;
+}
+
+
+/*
+ * Try every run of one variant (count elements in variant_widths, the
+ * first one black if b_black0) against *X*. Each character found goes
+ * into *p_character; a second, different one sets *p_b_conflict.
+ */
+static void barcode_match_variant(uint8_t count, bool b_black0,
+                                  char * p_character, bool * p_b_conflict)
+{
+    uint32_t top[C39_TOP_WIDTHS];
+    uint8_t first;
+    uint8_t length;
+    uint8_t missing;
+    uint8_t direction;
+    uint8_t i;
+    bool b_first_black;
+    char found;
+
+    for (first = 0U; (first + C39_MIN_ELEMENTS) <= count; first++)
+    {
+        /* Colours alternate from the first element. */
+        b_first_black = ((first % 2U) == 0U) ? b_black0 : !b_black0;
+
+        /* Widest of the shortest run; each longer run adds one. */
+        for (i = 0U; i < C39_TOP_WIDTHS; i++)
+        {
+            top[i] = 0U;
+        }
+
+        for (i = 0U; i < (C39_MIN_ELEMENTS - 1U); i++)
+        {
+            c39_top_add(top, variant_widths[first + i]);
+        }
+
+        for (length = (uint8_t)C39_MIN_ELEMENTS;
+             (length <= C39_ELEMENTS) && ((first + length) <= count);
+             length++)
+        {
+            c39_top_add(top, variant_widths[first + length - 1U]);
+
+            for (missing = 0U; missing <= C39_MAX_MISSING; missing++)
+            {
+                /* At most C39_MAX_MISSING absent at the far end too. */
+                if (((missing + length) > C39_ELEMENTS) ||
+                    ((missing + length + C39_MAX_MISSING) < C39_ELEMENTS))
+                {
+                    continue;
+                }
+
+                for (direction = 0U; direction < 2U; direction++)
+                {
+                    found = c39_match(&variant_widths[first], length,
+                                      missing, (direction != 0U),
+                                      b_first_black, top);
+
+                    if (found == C39_CHAR_NONE)
+                    {
+                        /* No match for this run. */
+                    }
+                    else if (*p_character == C39_CHAR_NONE)
+                    {
+                        *p_character = found;
+                    }
+                    else if (*p_character != found)
+                    {
+                        *p_b_conflict = true;
+                    }
+                    else
+                    {
+                        /* Same character again. */
+                    }
+                }
+            }
+        }
+    }
 }
 
 
 /*
  * Decode the captured edges into the data character, or C39_CHAR_NONE.
- * Specks or flicker before/after the barcode add extra edges, so every
- * window of C39_EDGES edges starting on a white->black edge is tried;
- * the '*' start/stop check rejects the wrong ones.
+ * Specks or flicker before/after the barcode add extra elements, so
+ * every run of elements is tried; glitches are tried every way they
+ * can merge. The read counts only if every match gives the same
+ * character.
  */
 static char barcode_decode_char(void)
 {
-    uint32_t widths[C39_ELEMENTS];
-    uint8_t first;
+    uint8_t glitch_index[BARCODE_MAX_GLITCHES];
+    uint32_t variants = 1U;
+    uint32_t variant;
+    uint32_t median;
+    uint8_t raw_count;
+    uint8_t glitches = 0U;
     uint8_t i;
+    bool b_conflict = false;
     char character = C39_CHAR_NONE;
 
-    if (barcode_overflow || (edge_count < C39_EDGES))
+    if (barcode_overflow || (edge_count < (C39_MIN_ELEMENTS + 1U)))
     {
         return C39_CHAR_NONE;
     }
 
-    for (first = 0U;
-         (first + C39_EDGES <= edge_count) && (character == C39_CHAR_NONE);
-         first++)
+    raw_count = (uint8_t)(edge_count - 1U);
+
+    /* Absolute width, so reversing wheels still gives positive widths. */
+    for (i = 0U; i < raw_count; i++)
     {
-        if (!barcode_edges[first].is_black)
-        {
-            continue;
-        }
+        raw_widths[i] = (uint32_t)abs_counts(
+            barcode_edges[i + 1U].encoder_position
+            - barcode_edges[i].encoder_position);
+    }
 
-        /* Absolute width, so reversing wheels still gives positive widths. */
-        for (i = 0U; i < C39_ELEMENTS; i++)
-        {
-            widths[i] = (uint32_t)abs_counts(
-                barcode_edges[first + i + 1U].encoder_position
-                - barcode_edges[first + i].encoder_position);
-        }
+    median = barcode_median_width(raw_count);
 
-        character = c39_decode(widths, false);
-
-        if (character == C39_CHAR_NONE)
+    for (i = 1U;
+         ((i + 1U) < raw_count) && (glitches < BARCODE_MAX_GLITCHES);
+         i++)
+    {
+        if ((raw_widths[i] * BARCODE_GLITCH_DIV) < median)
         {
-            character = c39_decode(widths, true);
+            glitch_index[glitches] = i;
+            glitches++;
+            variants *= BARCODE_GLITCH_CHOICES;
         }
     }
 
-    return character;
+    for (variant = 0U; (variant < variants) && !b_conflict; variant++)
+    {
+        barcode_match_variant(
+            barcode_build_variant(raw_count, glitch_index, glitches,
+                                  variant),
+            barcode_edges[0].is_black, &character, &b_conflict);
+    }
+
+    return b_conflict ? C39_CHAR_NONE : character;
 }
 
 
@@ -379,6 +733,7 @@ void barcode_reset(void)
 
     barcode_ready = false;
     barcode_overflow = false;
+    widest_counts = 0;
     decoded_code = BARCODE_NONE;
     decoded_char = C39_CHAR_NONE;
 }
@@ -402,14 +757,14 @@ void barcode_update(
 
     /*
      * Duplicate guard: ignore the sensor until the car has
-     * moved BARCODE_GUARD_COUNTS past the last valid barcode.
+     * moved guard_counts past the last valid barcode.
      * Measured either way, so reversing or a U-turn over the
      * same barcode does not trigger it again.
      */
     if (guard_active)
     {
         if (abs_counts(encoder_position - guard_position)
-            < BARCODE_GUARD_COUNTS)
+            < guard_counts)
         {
             return;
         }
@@ -465,6 +820,17 @@ void barcode_update(
      */
     if (edge_count < BARCODE_MAX_EDGES)
     {
+        /* The element this edge closes, for the end gap. */
+        if ((edge_count > 0U) &&
+            (abs_counts(encoder_position -
+                        barcode_edges[edge_count - 1U].encoder_position)
+             > widest_counts))
+        {
+            widest_counts = abs_counts(
+                encoder_position -
+                barcode_edges[edge_count - 1U].encoder_position);
+        }
+
         barcode_edges[edge_count].is_black =
             is_black;
 
@@ -505,11 +871,23 @@ void barcode_finish_capture(void)
         decoded_code = course_code_of(decoded_char);
         barcode_ready = true;
 
-        /* Valid course barcode: start the duplicate guard at its last edge. */
+        /*
+         * Valid course barcode: start the duplicate guard at its last
+         * edge, long enough to cover this barcode and its end gaps.
+         */
         if (decoded_code != BARCODE_INVALID)
         {
             guard_active = true;
             guard_position = last_activity_position;
+            guard_counts = abs_counts(
+                barcode_edges[edge_count - 1U].encoder_position
+                - barcode_edges[0].encoder_position)
+                + (BARCODE_GUARD_GAP_FACTOR * barcode_end_gap());
+
+            if (guard_counts < BARCODE_GUARD_MIN_COUNTS)
+            {
+                guard_counts = BARCODE_GUARD_MIN_COUNTS;
+            }
         }
     }
     else
@@ -538,7 +916,7 @@ void barcode_check_end(int32_t encoder_position)
 
     /* Either direction counts as travel. */
     if (abs_counts(encoder_position - last_activity_position)
-        >= BARCODE_END_GAP_COUNTS)
+        >= barcode_end_gap())
     {
         barcode_finish_capture();
     }
