@@ -1650,7 +1650,7 @@ test_junction_hold_straight (void)
     CHECK(68 == g_out.steer);
     g_in.line_sensors = 0U;                   /* Both white before LOST. */
     step();
-    CHECK(72 == g_out.steer);
+    CHECK(59 == g_out.steer);                 /* Right fades: 68 * 7 / 8. */
     g_in.line = VC_LINE_LOST;                 /* LOST is no longer suppressed. */
     step();
     CHECK_STATE(VC_STATE_REACQUIRE_LINE);
@@ -1678,6 +1678,104 @@ test_junction_hold_straight (void)
     step();
     CHECK(64 == g_out.steer);                 /* Distance window still expires. */
 
+}
+
+static void
+test_right_white_fades (void)
+{
+    int32_t n;
+    int32_t previous;
+
+    printf("right last seen, sensors white: fade, never grow\n");
+
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+    step();
+    CHECK((VC_STEER_START + VC_STEER_STEP) == g_out.steer);
+
+    g_in.line_sensors = 0U;
+    previous = g_out.steer;
+    for (n = 0; 10 > n; n++)
+    {
+        step();
+        CHECK(g_out.steer <= previous);
+        CHECK(0 <= g_out.steer);
+        previous = g_out.steer;
+    }
+    CHECK(VC_STEER_START > g_out.steer);
+
+    /* Right black again with the ramp below START: restart there. */
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+
+    /* Right black again before it falls below START: carry on growing.
+     * 76 fades to 66, which is still above START, so it resumes at 70. */
+    step();
+    step();
+    step();
+    CHECK(76 == g_out.steer);
+    g_in.line_sensors = 0U;
+    step();
+    CHECK(66 == g_out.steer);
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    CHECK(70 == g_out.steer);
+
+    /* LEFT has no sensor, so bits clear is the normal correction: grows. */
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_LEFT;
+    g_in.line_sensors = 0U;
+    step();
+    CHECK(-VC_STEER_START == g_out.steer);
+    step();
+    CHECK(-(VC_STEER_START + VC_STEER_STEP) == g_out.steer);
+
+    /* RIGHT with bits clear entered from CENTRE: the line is approaching
+     * the right sensor, so the normal ramp. */
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
+    step();
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = 0U;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+    step();
+    CHECK((VC_STEER_START + VC_STEER_STEP) == g_out.steer);
+
+    /* Entered from a LEFT ramp: restart at +START, no carried magnitude. */
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_LEFT;
+    g_in.line_sensors = 0U;
+    for (n = 0; 10 > n; n++)
+    {
+        step();
+    }
+    CHECK(-(VC_STEER_START + (9 * VC_STEER_STEP)) == g_out.steer);
+    g_in.line = VC_LINE_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+
+    /* A CENTRE step clears the flag: bits clear after it use the ramp. */
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    step();
+    g_in.line_sensors = 0U;
+    step();
+    CHECK(59 == g_out.steer);                 /* Faded: 68 * 7 / 8. */
+    g_in.line         = VC_LINE_CENTRE;
+    step();
+    g_in.line         = VC_LINE_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);     /* Ramp path, not a fade. */
+    step();
+    CHECK((VC_STEER_START + VC_STEER_STEP) == g_out.steer);
 }
 
 static void
@@ -1877,6 +1975,7 @@ main (void)
     test_bypass_reacquire_creeps();
     test_invalid_inputs();
     test_junction_hold_straight();
+    test_right_white_fades();
     test_junction_hold_barcode_turn();
     test_junction_advance();
     test_junction_confirm();

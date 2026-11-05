@@ -159,6 +159,7 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
         case VC_STATE_FOLLOW_LINE:
             p_vc->steer_side = 0;           /* Never resume an old ramp. */
             p_vc->steer_mag  = 0;
+            p_vc->b_right_exit = false;
             break;
 
         case VC_STATE_OBSTACLE_SCAN:
@@ -302,17 +303,29 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out,
  * off centre on the same side before it falls below VC_STEER_START, it
  * carries on from there.  Junction or lost drops it to 0.
  *
+ * Buddy 3 keeps reporting RIGHT (last seen) after the right sensor goes
+ * white.  Only after the right sensor really read black (b_right_exit),
+ * with both sensors now white, the ramp fades on its side instead of
+ * growing: in 30 recordings the line then came back at the centre sensor
+ * far more often than at the right one.  RIGHT with both white after
+ * CENTRE or LEFT is the line approaching the right sensor, so it takes the
+ * normal ramp.  LEFT is never faded, as there is no left sensor.
+ *
  * @param  p_vc   VC state holding the ramp.
  * @param  line   Line state this step (JUNCTION means steer straight).
  * @param  error  Line error -127 (left) .. +127 (right), used only centred
  *                with the line last seen on the left.
+ * @param  sensors  Packed Buddy 3 sensor bits (VC_LINE_SENSOR_*), 1 = black.
  * @return Steer -127 (left) .. +127 (right).
  */
 static int8_t
-follow_steer (vc_t * p_vc, vc_line_t line, int8_t error)
+follow_steer (vc_t * p_vc, vc_line_t line, int8_t error,
+              uint8_t sensors)
 {
     int32_t steer = 0;
     int8_t  side  = 0;
+    bool    b_white;
+    bool    b_fade;
 
     if (VC_LINE_RIGHT == line)
     {
@@ -327,6 +340,22 @@ follow_steer (vc_t * p_vc, vc_line_t line, int8_t error)
         /* Centre, junction or lost: no ramp this step. */
     }
 
+    b_white = (0U == (sensors & (VC_LINE_SENSOR_CENTRE
+                                 | VC_LINE_SENSOR_RIGHT)));
+    b_fade  = (VC_LINE_RIGHT == line) && b_white && p_vc->b_right_exit;
+    if (VC_LINE_RIGHT != line)
+    {
+        p_vc->b_right_exit = false;
+    }
+    else if (0U != (sensors & VC_LINE_SENSOR_RIGHT))
+    {
+        p_vc->b_right_exit = true;
+    }
+    else
+    {
+        /* Right white: the flag keeps its value. */
+    }
+
     if (VC_LINE_CENTRE == line)
     {
         /* Keep the ramp's side; let its size fade. */
@@ -337,6 +366,14 @@ follow_steer (vc_t * p_vc, vc_line_t line, int8_t error)
         {
             steer = ((int32_t) error * VC_STEER_START) / 127;
         }
+    }
+    else if (b_fade)
+    {
+        /* Right sensor was black, both white now: fade, steer right. */
+        p_vc->steer_mag = (int16_t) (((int32_t) p_vc->steer_mag
+                                      * VC_STEER_DECAY_NUM)
+                                     / VC_STEER_DECAY_DEN);
+        steer = (int32_t) p_vc->steer_mag;
     }
     else if (0 == side)
     {
@@ -468,7 +505,8 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
                                          (p_vc->b_junction_hold
                                           && !p_vc->b_junction_track)
                                          ? VC_LINE_JUNCTION : line,
-                                         p_in->line_error);
+                                         p_in->line_error,
+                                         p_in->line_sensors);
         /* A healthy ramp report keeps the forward command at ramp speed:
          * historical climbs stalled at 50 mm/s. Keep steering and LOST
          * recovery, unlike the reverted straight hold. Missing terrain alone
@@ -1032,6 +1070,7 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->last_side         = 0;
         p_vc->steer_side        = 0;
         p_vc->steer_mag         = 0;
+        p_vc->b_right_exit      = false;
         p_vc->search            = VC_SEARCH_NONE;
         p_vc->search_dir        = 0;
         p_vc->search_origin_mdeg = 0;

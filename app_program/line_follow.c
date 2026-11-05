@@ -227,22 +227,29 @@ static uint32_t cal_level(uint16_t reading, uint16_t low, uint32_t span)
 
 
 /*
- * Is the right sensor above its learned low by more than a thirty-second of
- * its own span? Then it sees some of the line. The ranges are those just
- * learned, so the caller decides whether they can be trusted.
+ * Is a reading above its sensor's learned low by more than a thirty-second
+ * of that sensor's span? Then the sensor sees some of the line. The ranges
+ * are those just learned, so the caller decides whether they can be trusted.
  */
-static bool right_sees_line(uint16_t reading)
+static bool sees_some_line(uint16_t reading, uint16_t low, uint16_t high)
 {
-    uint32_t span_r = (uint32_t)cal_result.right.high - cal_result.right.low;
+    uint32_t span = (uint32_t)high - low;
     bool sees = false;
 
-    if (span_r > 0U)
+    if (span > 0U)
     {
-        sees = ((cal_level(reading, cal_result.right.low, span_r)
-                 * LINE_CAL_REST_DIV) > span_r);
+        sees = ((cal_level(reading, low, span) * LINE_CAL_REST_DIV) > span);
     }
 
     return sees;
+}
+
+
+/* Does the right sensor see some of the line? */
+static bool right_sees_line(uint16_t reading)
+{
+    return sees_some_line(reading, cal_result.right.low,
+                          cal_result.right.high);
 }
 
 
@@ -251,18 +258,37 @@ static bool right_sees_line(uint16_t reading)
  * sensor sits right of the centre sensor, so if it sees any of the line the
  * line lies between the two or beyond the right sensor, and RIGHT is always
  * right. A partial centre reading alone is ambiguous (just left or just
- * right of centre), so it decides nothing.
+ * right of centre). After RIGHT with the right sensor blind, though, it
+ * shows the line is no longer beyond the right sensor, so it is reported as
+ * CENTRE (line_get_position() turns that into LEFT, as for any exit from
+ * centre). If the line is really going right, the right sensor sets RIGHT
+ * again.
  *
- * Returns LINE_RIGHT if the right sensor sees the line, else the unchanged
- * last-seen side. Without a good sweep it always returns last-seen.
+ * Returns LINE_RIGHT if the right sensor sees the line, LINE_CENTRE if
+ * last-seen is RIGHT and the centre sensor sees some of it, else the
+ * unchanged last-seen side. Without a good sweep it always returns
+ * last-seen.
  */
 static line_state_t both_white_side(ir_readings_t readings)
 {
     line_state_t side = last_seen;
 
-    if ((cal_state == LINE_CAL_OK) && right_sees_line(readings.right))
+    if (cal_state == LINE_CAL_OK)
     {
-        side = LINE_RIGHT;
+        if (right_sees_line(readings.right))
+        {
+            side = LINE_RIGHT;
+        }
+        else if ((LINE_RIGHT == last_seen)
+                 && sees_some_line(readings.centre, cal_result.centre.low,
+                                   cal_result.centre.high))
+        {
+            side = LINE_CENTRE;
+        }
+        else
+        {
+            /* Nothing new: keep the last-seen side. */
+        }
     }
 
     return side;

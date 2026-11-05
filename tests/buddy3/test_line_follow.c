@@ -628,8 +628,10 @@ test_calibration_moving_only(void)
 
 /*
  * Both sensors white: if the right sensor is above its learned low by more
- * than span/32 the side is RIGHT, otherwise the last-seen side stays. The
- * centre reading decides nothing. The sweep uses the 2026-11-02
+ * than span/32 the side is RIGHT. Otherwise, with RIGHT last seen and the
+ * centre above its low by more than span/32, the line is no longer beyond
+ * the right sensor, so it reads LEFT (via CENTRE). In every other case the
+ * last-seen side stays. The sweep uses the 2026-11-02
  * bracket-height levels: centre 171 to 1270, right 240 to 2981, black zones
  * overlapping by 10 samples.
  */
@@ -696,17 +698,48 @@ test_both_white_side(void)
     check("gap side: right slightly higher: error > 0", err > 0);
 
     /* Right only, then the centre part on with the right at its low: the
-     * right was last seen, and the centre alone does not change that. */
+     * line is no longer beyond the right sensor, so LEFT (via CENTRE).
+     * Changed from RIGHT on 5 Nov 2026 (approved): the old rule held RIGHT
+     * here and the steer grew until LOST. */
     (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
     check("gap side: right only reads RIGHT", state == LINE_RIGHT);
     err = step(392U, 209U, &state);
-    check("gap side: centre at a quarter after right: RIGHT",
-          state == LINE_RIGHT);
-    check("gap side: centre at a quarter after right: error > 0", err > 0);
+    check("gap side: centre at a quarter after right: LEFT",
+          state == LINE_LEFT);
+    check("gap side: centre at a quarter after right: error < 0", err < 0);
+    err = step(GAP_CENTRE_LOW, GAP_RIGHT_LOW, &state);
+    check("gap side: then both low: stays LEFT", state == LINE_LEFT);
     err = step(445U, 201U, &state);
-    check("gap side: centre at a third after right: RIGHT",
-          state == LINE_RIGHT);
-    check("gap side: centre at a third after right: error > 0", err > 0);
+    check("gap side: centre at a third after that: LEFT",
+          state == LINE_LEFT);
+    check("gap side: centre at a third after that: error < 0", err < 0);
+
+    /* Right partial, with or without the centre partial: RIGHT. */
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    err = step(GAP_CENTRE_LOW, 1416U, &state);
+    check("gap side: right partial, centre low: RIGHT",
+          (state == LINE_RIGHT) && (err > 0));
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    err = step(445U, 1416U, &state);
+    check("gap side: right partial, centre partial: RIGHT",
+          (state == LINE_RIGHT) && (err > 0));
+
+    /* RIGHT last seen, centre at its low: stays RIGHT. */
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    err = step(GAP_CENTRE_LOW, GAP_RIGHT_LOW, &state);
+    check("gap side: centre low after right: RIGHT",
+          (state == LINE_RIGHT) && (err > 0));
+
+    /* LOST comes at the same count after the CENTRE re-read: 30 samples. */
+    (void)step(GAP_CENTRE_LOW, GAP_RIGHT_HIGH, &state);
+    for (i = 0U; i < 29U; i++)
+    {
+        (void)step(445U, GAP_RIGHT_LOW, &state);
+    }
+    check("gap side: 29 white after right: LEFT, not yet LOST",
+          state == LINE_LEFT);
+    (void)step(445U, GAP_RIGHT_LOW, &state);
+    check("gap side: 30 white after right: LOST", state == LINE_LOST);
 
     /* Centre only, then centre part on with the right at its low: the
      * centre alone does not choose, so last-seen (centre, reported LEFT)

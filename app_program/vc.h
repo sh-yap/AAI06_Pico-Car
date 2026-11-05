@@ -26,6 +26,7 @@
  * ------------------------------------------------------------------------ */
 
 #define VC_LINE_SENSOR_CENTRE   (0x01U) /* Packed Buddy 3 centre-black bit. */
+#define VC_LINE_SENSOR_RIGHT    (0x02U) /* Packed Buddy 3 right-black bit.  */
 
 #define VC_PERIOD_MS            (20U)    /* Matches Motion's 20 ms loop.     */
 #define VC_INIT_TIMEOUT_MS      (10000U) /* TBC: longest subsystem start-up. */
@@ -395,6 +396,8 @@ typedef struct
                                       junction; NONE otherwise.            */
     int8_t     steer_side;         /* FOLLOW_LINE steer ramp: -1 left,
                                       +1 right, 0 centred.                 */
+    bool       b_right_exit;       /* Right sensor read black during this
+                                      RIGHT stretch; cleared otherwise.    */
     int16_t    steer_mag;          /* Ramp magnitude 0 .. 127.            */
 } vc_t;
 

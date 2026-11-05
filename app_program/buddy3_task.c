@@ -461,7 +461,7 @@ void buddy3_task(INT stacd, void *exinf)
         prev_left_counts = enc_snapshot.left_counts;
         prev_right_counts = enc_snapshot.right_counts;
         line_ref_update(readings, travel_counts);
-        line_state =line_get_position(readings);
+        line_state = line_get_position(readings);
         line_error = line_get_error(readings);
         line_sensors = line_get_sensor_bits(readings);
 
