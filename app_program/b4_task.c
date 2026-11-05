@@ -28,6 +28,11 @@
 #define B4_RECORDER                 (0)
 #endif
 
+/* 0 removes the recorder's magnetometer read. The mag fields stay 0. */
+#ifndef B4_REC_MAG
+#define B4_REC_MAG                  (1)
+#endif
+
 #if B4_RECORDER
 #include "motion_encoder.h"
 #include "run_rec.h"
@@ -80,7 +85,9 @@
 #define B4_TASK_UM_PER_DMM          (100U)
 
 #if B4_RECORDER
+#if B4_REC_MAG
 #define B4_TASK_REC_MAG_SAMPLES     (3U)      /* Mag read every 3rd sample.  */
+#endif
 #define B4_TASK_REC_UM_PER_CMM      (10U)     /* Micrometres per 0.01 mm.    */
 #define B4_TASK_REC_TURN_SHIFT      (4U)
 #define B4_TASK_REC_NIBBLE_MASK     (0xFU)
@@ -122,7 +129,9 @@ static uint32_t         g_b4_task_drive_change_ms = 0U;
 static bool             g_b4_task_b_drive_seen = false;
 #if B4_RECORDER
 static b4_types_mag_sample_t g_b4_task_rec_mag;  /* Latest valid sample.    */
+#if B4_REC_MAG
 static uint32_t         g_b4_task_rec_mag_count = 0U;
+#endif
 static uint64_t         g_b4_task_rec_last_us = 0U;
 static bool             g_b4_task_b_rec_seen = false;
 #endif
@@ -792,6 +801,7 @@ b4_task_rec_u16 (uint64_t value)
     return ((uint16_t)clamped);
 }
 
+#if B4_REC_MAG
 /** @brief Read the magnetometer for the record on every third sample.
  *
  * A failed read only leaves the sample unmarked. It does not touch the
@@ -820,15 +830,20 @@ b4_task_rec_read_mag (void)
 
     return (b_new);
 }
+#endif /* B4_REC_MAG */
 
 static void
 b4_task_record (b4_types_status_t const * p_status)
 {
     motion_encoder_snapshot_t snapshot = {0};
     b4_rec_record_t           rec = {0};
-    bool                      b_mag_new = b4_task_rec_read_mag();
+    bool                      b_mag_new = false;
     uint64_t                  dt_us = 0U;
     uint32_t                  flags = 0U;
+
+#if B4_REC_MAG
+    b_mag_new = b4_task_rec_read_mag();
+#endif
 
     motion_encoder_get_snapshot(&snapshot);
 

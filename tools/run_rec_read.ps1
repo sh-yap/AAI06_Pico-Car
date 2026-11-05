@@ -49,7 +49,8 @@
 # noise_mg = learned noise median; active_height_cmm / final_height_cmm =
 # hump in progress and last completed hump in 0.01 mm, also as
 # active_height_mm / final_height_mm; mag_x/y/z = latest magnetometer counts
-# (read every 3rd sample, so values repeat; mag_new marks a fresh one);
+# (read every 3rd sample, so values repeat; mag_new marks a fresh one; all 0
+# in a B4_REC_MAG=0 build, image name ..._b4rec_nomag);
 # left_enc / right_enc = encoder counts, low 16 bits, wrap; drive_speed_mm_s
 # = mean absolute wheel speed; dt_us = hardware us since the previous row
 # (65535 = that or more); hump_state = b4_types_hump_state_t; motion / turn =
