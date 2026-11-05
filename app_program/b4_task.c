@@ -23,6 +23,16 @@
 #include "b4_task.h"
 #include "comms.h"
 
+/* Test-only Buddy 4 recorder ring, run_rec.h.  Off unless built in. */
+#ifndef B4_RECORDER
+#define B4_RECORDER                 (0)
+#endif
+
+#if B4_RECORDER
+#include "motion_encoder.h"
+#include "run_rec.h"
+#endif
+
 /* Below the VC and Buddy 3 (5): a late sample only delays a reading,
  * because every sample carries its own timestamp. */
 #define B4_TASK_PRIORITY            (6)
@@ -69,6 +79,14 @@
 #define B4_TASK_CAL_FLOOR_SHIFT     (3U)
 #define B4_TASK_UM_PER_DMM          (100U)
 
+#if B4_RECORDER
+#define B4_TASK_REC_MAG_SAMPLES     (3U)      /* Mag read every 3rd sample.  */
+#define B4_TASK_REC_UM_PER_CMM      (10U)     /* Micrometres per 0.01 mm.    */
+#define B4_TASK_REC_TURN_SHIFT      (4U)
+#define B4_TASK_REC_NIBBLE_MASK     (0xFU)
+#define B4_TASK_REC_ENC_MASK        (0xFFFFU)
+#endif
+
 #define B4_TASK_HEALTH_SHIFT        (0U)
 #define B4_TASK_HEALTH_MASK         (0x3U)
 #define B4_TASK_TURN_SHIFT          (2U)
@@ -102,6 +120,12 @@ static volatile uint32_t g_b4_task_drive_word = 0U;
 static uint32_t         g_b4_task_drive_seq = 0U;
 static uint32_t         g_b4_task_drive_change_ms = 0U;
 static bool             g_b4_task_b_drive_seen = false;
+#if B4_RECORDER
+static b4_types_mag_sample_t g_b4_task_rec_mag;  /* Latest valid sample.    */
+static uint32_t         g_b4_task_rec_mag_count = 0U;
+static uint64_t         g_b4_task_rec_last_us = 0U;
+static bool             g_b4_task_b_rec_seen = false;
+#endif
 
 /** @brief Return the kernel time in milliseconds.
  *
@@ -164,6 +188,19 @@ static void
 b4_task_diag_terrain (b4_types_status_t const * p_status);
 
 #endif /* B4_TASK_DIAG_TERRAIN */
+
+#if B4_RECORDER
+/** @brief TEMPORARY test recorder: log the latest status to g_b4_rec.
+ *
+ * Reads the magnetometer every B4_TASK_REC_MAG_SAMPLES samples for the
+ * record only. The reading never reaches b4_proc, so the turn output and
+ * the terrain word are unchanged.
+ *
+ * @param p_status The status after the latest sample.
+ */
+static void
+b4_task_record (b4_types_status_t const * p_status);
+#endif /* B4_RECORDER */
 
 /** @brief Convert micrometres to clamped 0.1 mm steps.
  *
@@ -708,6 +745,175 @@ b4_task_height_dmm (uint32_t height_um)
     return (height_dmm);
 }
 
+#if B4_RECORDER
+/** @brief Clamp a signed value to the 16-bit signed range.
+ *
+ * @param value The value.
+ * @return The value limited to -32768..32767.
+ */
+static int16_t
+b4_task_rec_i16 (int32_t value)
+{
+    int32_t clamped = value;
+
+    if (clamped > (int32_t)INT16_MAX)
+    {
+        clamped = (int32_t)INT16_MAX;
+    }
+    else if (clamped < (int32_t)INT16_MIN)
+    {
+        clamped = (int32_t)INT16_MIN;
+    }
+    else
+    {
+        /* Already in range. */
+    }
+
+    /* The clamp above makes the narrowing exact. */
+    return ((int16_t)clamped);
+}
+
+/** @brief Clamp an unsigned value to the 16-bit unsigned range.
+ *
+ * @param value The value.
+ * @return The value limited to 0..65535.
+ */
+static uint16_t
+b4_task_rec_u16 (uint64_t value)
+{
+    uint64_t clamped = value;
+
+    if (clamped > (uint64_t)UINT16_MAX)
+    {
+        clamped = (uint64_t)UINT16_MAX;
+    }
+
+    /* The clamp above makes the narrowing exact. */
+    return ((uint16_t)clamped);
+}
+
+/** @brief Read the magnetometer for the record on every third sample.
+ *
+ * A failed read only leaves the sample unmarked. It does not touch the
+ * accelerometer health that decides whether the IMU is reopened.
+ *
+ * @return True when a new valid magnetometer sample arrived.
+ */
+static bool
+b4_task_rec_read_mag (void)
+{
+    b4_types_mag_sample_t mag = {0};
+    bool                  b_new = false;
+
+    g_b4_task_rec_mag_count++;
+
+    if ((true == g_b4_task_b_imu_open) &&
+        (0U == (g_b4_task_rec_mag_count % B4_TASK_REC_MAG_SAMPLES)))
+    {
+        if ((B4_RESULT_OK == b4_imu_read_magnetometer(&mag)) &&
+            (true == mag.b_valid))
+        {
+            g_b4_task_rec_mag = mag;
+            b_new = true;
+        }
+    }
+
+    return (b_new);
+}
+
+static void
+b4_task_record (b4_types_status_t const * p_status)
+{
+    motion_encoder_snapshot_t snapshot = {0};
+    b4_rec_record_t           rec = {0};
+    bool                      b_mag_new = b4_task_rec_read_mag();
+    uint64_t                  dt_us = 0U;
+    uint32_t                  flags = 0U;
+
+    motion_encoder_get_snapshot(&snapshot);
+
+    if ((true == g_b4_task_b_rec_seen) &&
+        (snapshot.sampled_at_us > g_b4_task_rec_last_us))
+    {
+        dt_us = snapshot.sampled_at_us - g_b4_task_rec_last_us;
+    }
+
+    g_b4_task_rec_last_us = snapshot.sampled_at_us;
+    g_b4_task_b_rec_seen  = true;
+
+    if (true == p_status->sample.b_valid)
+    {
+        flags |= B4_REC_FLAG_VALID;
+    }
+
+    if (true == b_mag_new)
+    {
+        flags |= B4_REC_FLAG_MAG_NEW;
+    }
+
+    if (true == p_status->b_hump_height_valid)
+    {
+        flags |= B4_REC_FLAG_HEIGHT;
+    }
+
+    if (true == p_status->b_impact_event)
+    {
+        flags |= B4_REC_FLAG_IMPACT;
+    }
+
+    if (true == p_status->b_hump_started_event)
+    {
+        flags |= B4_REC_FLAG_STARTED;
+    }
+
+    if (true == p_status->b_hump_completed_event)
+    {
+        flags |= B4_REC_FLAG_DONE;
+    }
+
+    if (true == p_status->b_sample_stale)
+    {
+        flags |= B4_REC_FLAG_STALE;
+    }
+
+    rec.ms                = b4_task_now_ms();
+    rec.accel_x_mg        = b4_task_rec_i16(p_status->sample.accel_x_mg);
+    rec.accel_y_mg        = b4_task_rec_i16(p_status->sample.accel_y_mg);
+    rec.accel_z_mg        = b4_task_rec_i16(p_status->sample.accel_z_mg);
+    rec.incline_mg        = b4_task_rec_i16(p_status->roll_mg);
+    rec.baseline_mg       = b4_task_rec_i16(p_status->roll_baseline_mg);
+    rec.delta_mg          = b4_task_rec_i16(p_status->incline_delta_mg);
+    rec.noise_mg          = b4_task_rec_u16((uint64_t)p_status->noise_mg);
+    rec.active_height_cmm = b4_task_rec_u16(
+        (uint64_t)(p_status->active_hump_height_um /
+                   B4_TASK_REC_UM_PER_CMM));
+    rec.final_height_cmm  = b4_task_rec_u16(
+        (uint64_t)(p_status->hump_peak_height_um /
+                   B4_TASK_REC_UM_PER_CMM));
+    rec.mag_x             = g_b4_task_rec_mag.mag_x;
+    rec.mag_y             = g_b4_task_rec_mag.mag_y;
+    rec.mag_z             = g_b4_task_rec_mag.mag_z;
+    /* Low 16 bits of the counts, wrapping by design. */
+    rec.left_enc          = (uint16_t)((uint32_t)snapshot.left_counts &
+                                       B4_TASK_REC_ENC_MASK);
+    rec.right_enc         = (uint16_t)((uint32_t)snapshot.right_counts &
+                                       B4_TASK_REC_ENC_MASK);
+    rec.drive_speed_mm_s  = b4_task_rec_i16(p_status->drive_speed_mm_s);
+    rec.dt_us             = b4_task_rec_u16(dt_us);
+    /* The enums are small and the flags use seven bits, so each cast
+     * below is exact. */
+    rec.hump_state        = (uint8_t)p_status->hump_state;
+    rec.flags             = (uint8_t)flags;
+    rec.motion_turn       = (uint8_t)(
+        (((uint32_t)p_status->motion) & B4_TASK_REC_NIBBLE_MASK) |
+        ((((uint32_t)p_status->turn) & B4_TASK_REC_NIBBLE_MASK) <<
+         B4_TASK_REC_TURN_SHIFT));
+    rec.tilt              = (uint8_t)p_status->tilt;
+
+    b4_rec_add(&rec);
+}
+#endif /* B4_RECORDER */
+
 static void
 b4_task_tick_handler (void * p_exinf)
 {
@@ -770,6 +976,9 @@ b4_task_sample_task (INT stacd, void * p_exinf)
 
         (void)b4_proc_get_status(b4_task_now_ms(), &status);
         b4_task_count_events(&status);
+#if B4_RECORDER
+        b4_task_record(&status);
+#endif
         samples++;
 
         if (0U == (samples % B4_TASK_PUBLISH_SAMPLES))

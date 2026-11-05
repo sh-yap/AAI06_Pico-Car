@@ -14,6 +14,10 @@
 
 #include "run_rec.h"
 
+#ifndef B4_RECORDER
+#define B4_RECORDER (0)
+#endif
+
 static uint32_t failures = 0U;
 static uint32_t checks = 0U;
 
@@ -68,6 +72,15 @@ test_before_begin(void)
     add_ms(1U);
     check_u32("no begin: magic", g_run_rec.magic, 0U);
     check_u32("no begin: total", g_run_rec.total, 0U);
+#if B4_RECORDER
+    {
+        b4_rec_record_t rec = {0};
+
+        b4_rec_add(&rec);
+        check_u32("b4 no begin: magic", g_b4_rec.magic, 0U);
+        check_u32("b4 no begin: total", g_b4_rec.total, 0U);
+    }
+#endif
 }
 
 
@@ -175,7 +188,11 @@ test_bc_ring(void)
               (uint32_t)offsetof(bc_rec_t, records), 20U);
     check_u32("bc layout: flags",
               (uint32_t)offsetof(bc_rec_record_t, flags), 16U);
-    check_u32("bc capacity", BC_REC_CAPACITY >= 2000U ? 1U : 0U, 1U);
+#if B4_RECORDER
+    check_u32("bc capacity", BC_REC_CAPACITY, 500U);
+#else
+    check_u32("bc capacity", BC_REC_CAPACITY, 2000U);
+#endif
 
     /* A reset of the run ring resets this one too. */
     run_rec_begin();
@@ -221,6 +238,85 @@ test_bc_ring(void)
     add_bc(7U);
     check_u32("bc reset: first ms", g_bc_rec.records[0].ms, 7U);
 }
+
+
+#if B4_RECORDER
+static void
+add_b4(uint32_t ms)
+{
+    b4_rec_record_t rec = {0};
+
+    rec.ms = ms;
+    rec.noise_mg = (uint16_t)(ms & 0xFFFU);
+    b4_rec_add(&rec);
+}
+
+
+static void
+test_b4_ring(void)
+{
+    uint32_t i;
+    uint32_t const n = B4_REC_CAPACITY + 5U;    /* Five past full.           */
+    uint32_t total;
+
+    check_u32("b4 layout: record", (uint32_t)sizeof(b4_rec_record_t), 40U);
+    check_u32("b4 layout: header",
+              (uint32_t)offsetof(b4_rec_t, records), 20U);
+    check_u32("b4 layout: dt_us",
+              (uint32_t)offsetof(b4_rec_record_t, dt_us), 34U);
+    check_u32("b4 layout: hump_state",
+              (uint32_t)offsetof(b4_rec_record_t, hump_state), 36U);
+    check_u32("b4 layout: tilt",
+              (uint32_t)offsetof(b4_rec_record_t, tilt), 39U);
+    check_u32("b4 capacity", B4_REC_CAPACITY, 1500U);
+    check_u32("b4 magic", B4_REC_MAGIC, 0x31523442UL);
+
+    /* A reset of the run ring resets this one too. */
+    run_rec_begin();
+    check_u32("b4 begin: magic", g_b4_rec.magic, B4_REC_MAGIC);
+    check_u32("b4 begin: record_size", g_b4_rec.record_size, 40U);
+    check_u32("b4 begin: capacity", g_b4_rec.capacity, B4_REC_CAPACITY);
+    check_u32("b4 begin: total", g_b4_rec.total, 0U);
+    check_u32("b4 begin: frozen", g_b4_rec.frozen, 0U);
+
+    add_b4(10U);
+    add_b4(20U);
+    check_u32("b4 2: total", g_b4_rec.total, 2U);
+    check_u32("b4 2: write_index", g_b4_rec.write_index, 2U);
+    check_u32("b4 2: first ms", g_b4_rec.records[0].ms, 10U);
+    check_u32("b4 2: second noise", g_b4_rec.records[1].noise_mg, 20U);
+
+    run_rec_begin();
+
+    for (i = 0U; i < n; i++)
+    {
+        add_b4(i);
+    }
+
+    check_u32("b4 wrap: total", g_b4_rec.total, n);
+    check_u32("b4 wrap: write_index", g_b4_rec.write_index, 5U);
+    check_u32("b4 wrap: oldest ms", g_b4_rec.records[5].ms, 5U);
+    check_u32("b4 wrap: newest ms", g_b4_rec.records[4].ms, n - 1U);
+    check_u32("b4 wrap: last slot untouched",
+              g_b4_rec.records[B4_REC_CAPACITY - 1U].ms,
+              B4_REC_CAPACITY - 1U);
+
+    run_rec_freeze();
+    total = g_b4_rec.total;
+    check_u32("b4 freeze: frozen", g_b4_rec.frozen, 1U);
+    add_b4(99999U);
+    check_u32("b4 frozen: total unchanged", g_b4_rec.total, total);
+    check_u32("b4 frozen: index unchanged", g_b4_rec.write_index, 5U);
+    check_u32("b4 frozen: newest unchanged", g_b4_rec.records[4].ms, n - 1U);
+
+    run_rec_begin();
+    check_u32("b4 reset: total", g_b4_rec.total, 0U);
+    check_u32("b4 reset: write_index", g_b4_rec.write_index, 0U);
+    check_u32("b4 reset: frozen", g_b4_rec.frozen, 0U);
+    add_b4(7U);
+    check_u32("b4 reset: first ms", g_b4_rec.records[0].ms, 7U);
+}
+#endif /* B4_RECORDER */
 
 
 static void
@@ -322,6 +418,9 @@ main(int argc, char * argv[])
     test_wrap_keeps_newest();
     test_freeze_and_reset();
     test_bc_ring();
+#if B4_RECORDER
+    test_b4_ring();
+#endif
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

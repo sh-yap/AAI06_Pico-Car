@@ -16,6 +16,10 @@
 #ifndef RUN_REC_H
 #define RUN_REC_H
 
+#ifndef B4_RECORDER
+#define B4_RECORDER         (0)             /* Buddy 4 ring off unless built.*/
+#endif
+
 #define RUN_REC_MAGIC       (0x31434552UL)  /* "REC1" little endian.        */
 #define RUN_REC_CAPACITY    (1500U)         /* 30 s at 20 ms.               */
 #define RUN_REC_FLAG_RAMP   (0x01U)         /* Terrain: ramp active.        */
@@ -70,14 +74,15 @@ typedef struct
 
 extern run_rec_t g_run_rec;
 
-/* Run BEGIN: empty the ring (and the barcode ring) and start recording. */
+/* Run BEGIN: empty the ring (and the barcode and Buddy 4 rings) and start
+ * recording. */
 void run_rec_begin(void);
 
 /* Append one record (cycle is filled in here).  Ignored when frozen or
  * before the first BEGIN. */
 void run_rec_add(run_rec_record_t const * p_record);
 
-/* Run END: stop writing (both rings), keep the contents. */
+/* Run END: stop writing (all rings), keep the contents. */
 void run_rec_freeze(void);
 
 /* ---- Barcode sensor trace ------------------------------------------------
@@ -89,7 +94,11 @@ void run_rec_freeze(void);
  * in step. */
 
 #define BC_REC_MAGIC        (0x31524342UL)  /* "BCR1" little endian.        */
+#if B4_RECORDER
+#define BC_REC_CAPACITY     (500U)          /* 5 s: RAM goes to the B4 ring. */
+#else
 #define BC_REC_CAPACITY     (2000U)         /* 20 s at 10 ms.               */
+#endif
 #define BC_REC_FLAG_BLACK   (0x01U)         /* Barcode sensor read black.   */
 #define BC_REC_FLAG_DONE    (0x02U)         /* A capture finished this cycle.*/
 #define BC_REC_FLAG_ACTIVE  (0x04U)         /* Edges stored, not finished.  */
@@ -130,6 +139,70 @@ extern bc_rec_t g_bc_rec;
 
 /* Append one record.  Ignored when frozen or before the first BEGIN. */
 void bc_rec_add(bc_rec_record_t const * p_record);
+
+#if B4_RECORDER
+/* ---- Buddy 4 trace ---------------------------------------------------------
+ * A third ring, g_b4_rec: one record per Buddy 4 cycle (10 ms) with the
+ * accelerometer, incline, hump and magnetometer signals, so ramp crossings
+ * and turns can be analysed offline.  Built only with B4_RECORDER=1, which
+ * needs VC_RECORDER=1.  It begins and freezes with the run ring.  Only the
+ * Buddy 4 task writes records; the VC task resets and freezes it, so a record
+ * torn at the boundary is possible and accepted.  No locks.  Keep
+ * tools/run_rec_read.ps1 in step. */
+
+#define B4_REC_MAGIC        (0x31523442UL)  /* "B4R1" little endian.        */
+#define B4_REC_CAPACITY     (1500U)         /* 15 s at 10 ms.               */
+#define B4_REC_FLAG_VALID   (0x01U)         /* Accelerometer sample valid.  */
+#define B4_REC_FLAG_MAG_NEW (0x02U)         /* Mag sample new and valid.    */
+#define B4_REC_FLAG_HEIGHT  (0x04U)         /* Hump height valid.           */
+#define B4_REC_FLAG_IMPACT  (0x08U)         /* Impact event this cycle.     */
+#define B4_REC_FLAG_STARTED (0x10U)         /* Hump started this cycle.     */
+#define B4_REC_FLAG_DONE    (0x20U)         /* Hump completed this cycle.   */
+#define B4_REC_FLAG_STALE   (0x40U)         /* Sample stale.                */
+
+/* One Buddy 4 cycle, 40 bytes, no padding. */
+typedef struct
+{
+    uint32_t ms;                /* Kernel time, same clock as the VC ring.  */
+    int16_t  accel_x_mg;        /* Calibrated sample, clamped to 16 bits.   */
+    int16_t  accel_y_mg;
+    int16_t  accel_z_mg;
+    int16_t  incline_mg;        /* Filtered incline (roll_mg).              */
+    int16_t  baseline_mg;       /* Flat-ground incline baseline.            */
+    int16_t  delta_mg;          /* Incline offset the detector used.        */
+    uint16_t noise_mg;          /* Learned noise median.                    */
+    uint16_t active_height_cmm; /* Hump in progress, 0.01 mm, saturating.   */
+    uint16_t final_height_cmm;  /* Last completed hump, 0.01 mm.            */
+    int16_t  mag_x;             /* Latest magnetometer sample, counts.      */
+    int16_t  mag_y;
+    int16_t  mag_z;
+    uint16_t left_enc;          /* Encoder counts, low 16 bits, wrap.       */
+    uint16_t right_enc;
+    int16_t  drive_speed_mm_s;  /* Mean absolute wheel speed.               */
+    uint16_t dt_us;             /* Hardware us since previous record.       */
+    uint8_t  hump_state;        /* b4_types_hump_state_t.                   */
+    uint8_t  flags;             /* B4_REC_FLAG_*.                           */
+    uint8_t  motion_turn;       /* Motion in bits 0-3, turn in bits 4-7.    */
+    uint8_t  tilt;              /* b4_types_tilt_t.                         */
+} b4_rec_record_t;
+
+/* Same header shape as bc_rec_t.  magic is 0 until the first BEGIN. */
+typedef struct
+{
+    uint32_t        magic;          /* B4_REC_MAGIC once a run began.       */
+    uint16_t        record_size;    /* sizeof(b4_rec_record_t).             */
+    uint16_t        capacity;       /* B4_REC_CAPACITY.                     */
+    uint32_t        write_index;    /* Next slot to write.                  */
+    uint32_t        total;          /* Records written since BEGIN.         */
+    uint32_t        frozen;         /* 1 once the run ended.                */
+    b4_rec_record_t records[B4_REC_CAPACITY];
+} b4_rec_t;
+
+extern b4_rec_t g_b4_rec;
+
+/* Append one record.  Ignored when frozen or before the first BEGIN. */
+void b4_rec_add(b4_rec_record_t const * p_record);
+#endif /* B4_RECORDER */
 
 #endif /* RUN_REC_H */
 

@@ -11,6 +11,10 @@
 #define VC_RECORDER              (0)    /* Recorder off unless built in.    */
 #endif
 
+#ifndef B4_RECORDER
+#define B4_RECORDER              (0)    /* Buddy 4 ring off unless built in.*/
+#endif
+
 #if VC_RECORDER
 
 /* The readout decodes this layout: fail the build if it changes. */
@@ -20,6 +24,13 @@ typedef char run_rec_record_size_check[
 /* Likewise for the barcode ring. */
 typedef char bc_rec_record_size_check[
     (36U == sizeof(bc_rec_record_t)) ? 1 : -1];
+
+#if B4_RECORDER
+typedef char b4_rec_record_size_check[
+    (40U == sizeof(b4_rec_record_t)) ? 1 : -1];
+
+b4_rec_t  g_b4_rec;                     /* Zero until the first BEGIN.      */
+#endif
 
 run_rec_t g_run_rec;                    /* Zero until the first BEGIN.      */
 bc_rec_t  g_bc_rec;                     /* Zero until the first BEGIN.      */
@@ -43,6 +54,16 @@ run_rec_begin (void)
     g_bc_rec.capacity     = (uint16_t) BC_REC_CAPACITY;
     g_bc_rec.magic        = BC_REC_MAGIC;
     g_bc_rec.frozen       = 0U;
+
+#if B4_RECORDER
+    g_b4_rec.frozen       = 1U;         /* Same order as above.             */
+    g_b4_rec.write_index  = 0U;
+    g_b4_rec.total        = 0U;
+    g_b4_rec.record_size  = (uint16_t) sizeof(b4_rec_record_t);
+    g_b4_rec.capacity     = (uint16_t) B4_REC_CAPACITY;
+    g_b4_rec.magic        = B4_REC_MAGIC;
+    g_b4_rec.frozen       = 0U;
+#endif
 }
 
 
@@ -100,11 +121,47 @@ bc_rec_add (bc_rec_record_t const * p_record)
 }
 
 
+#if B4_RECORDER
+void
+b4_rec_add (b4_rec_record_t const * p_record)
+{
+    uint32_t index;
+
+    if ((B4_REC_MAGIC == g_b4_rec.magic) && (0U == g_b4_rec.frozen))
+    {
+        index = g_b4_rec.write_index;
+
+        /* A reset by the VC between the checks above and here may leave
+         * the index stale: stay inside the ring. */
+        if (B4_REC_CAPACITY <= index)
+        {
+            index = 0U;
+        }
+
+        g_b4_rec.records[index] = *p_record;
+
+        index++;
+
+        if (B4_REC_CAPACITY <= index)
+        {
+            index = 0U;
+        }
+
+        g_b4_rec.write_index = index;
+        g_b4_rec.total++;
+    }
+}
+#endif /* B4_RECORDER */
+
+
 void
 run_rec_freeze (void)
 {
     g_run_rec.frozen = 1U;
     g_bc_rec.frozen  = 1U;
+#if B4_RECORDER
+    g_b4_rec.frozen  = 1U;
+#endif
 }
 
 #endif /* VC_RECORDER */

@@ -11,7 +11,8 @@
 # Decode a dump already on disk:
 #   powershell -ExecutionPolicy Bypass -File tools\run_rec_read.ps1 -File <dump.bin>
 #
-# -Elf defaults to the newest build_make\*_rec_vc_car_*.elf.  It must be the
+# -Elf defaults to the newest build_make\*_rec*_vc_car*.elf (plain _rec or
+# _rec_b4rec).  It must be the
 # ELF of the image on the car: the address of g_run_rec comes from it.
 # Output: evidence\recorder\<time>_<name>.bin (raw) and .csv.  Not committed.
 #
@@ -39,6 +40,22 @@
 # and acquisition_ms. The ADC channels are sequential, bracketed by ms/end.
 # Legacy 20-byte records retain their historical system clock and blank
 # appended fields. With -File, pass the barcode dump as -BcFile.
+# Buddy 4 trace: if the image also has g_b4_rec (B4_RECORDER=1 build), the
+# same command dumps it to <time>_<name>_b4.bin and writes <time>_<name>_b4.csv,
+# one row per 10 ms Buddy 4 cycle, oldest first.  With -File, pass the dump as
+# -B4File.  Columns: dt_ms = ms step from the previous row; accel_*_mg =
+# calibrated accelerometer sample; incline_mg / baseline_mg / delta_mg =
+# filtered incline, flat-ground baseline and the offset the detector used;
+# noise_mg = learned noise median; active_height_cmm / final_height_cmm =
+# hump in progress and last completed hump in 0.01 mm, also as
+# active_height_mm / final_height_mm; mag_x/y/z = latest magnetometer counts
+# (read every 3rd sample, so values repeat; mag_new marks a fresh one);
+# left_enc / right_enc = encoder counts, low 16 bits, wrap; drive_speed_mm_s
+# = mean absolute wheel speed; dt_us = hardware us since the previous row
+# (65535 = that or more); hump_state = b4_types_hump_state_t; motion / turn =
+# b4_types_motion_t / b4_types_turn_t (from motion_turn); tilt =
+# b4_types_tilt_t; flags = raw byte, then 0/1 columns valid, mag_new,
+# height_valid, impact, started, completed, stale.
 # A warning is printed if the ring was not frozen (run still going, or the
 # image was reset before it ended).
 
@@ -47,6 +64,7 @@ param(
     [string]$Elf     = "",
     [string]$File    = "",
     [string]$BcFile  = "",
+    [string]$B4File  = "",
     [string]$OpenOcd = "C:\tools\openocd-rpi-2.3.1",
     [string]$Nm      = "C:\tools\xpack-arm-none-eabi-gcc-15.2.1-1.1\bin\arm-none-eabi-nm.exe",
     [int]$Speed      = 5000,
@@ -64,6 +82,8 @@ $headerBytes = 20
 $recordBytes = 44
 $bcRecBytes  = @(20, 36)
 $bcMagic     = 0x31524342
+$b4Magic     = 0x31523442
+$b4RecBytes  = 40
 $magic       = 0x31434552
 $lineNames   = @("LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION")
 $stateNames  = @("INITIALISE", "READY", "CALIBRATE", "FOLLOW_LINE",
@@ -80,10 +100,13 @@ if ($File -ne "") {
     $bcBin = ""
     if ($BcFile -ne "") { $bcBin = (Resolve-Path $BcFile).Path }
     $bcCsv = (Join-Path (Split-Path $bin) ([System.IO.Path]::GetFileNameWithoutExtension($bin))) + "_barcode.csv"
+    $b4Bin = ""
+    if ($B4File -ne "") { $b4Bin = (Resolve-Path $B4File).Path }
+    $b4Csv = (Join-Path (Split-Path $bin) ([System.IO.Path]::GetFileNameWithoutExtension($bin))) + "_b4.csv"
 }
 else {
     if ($Elf -eq "") {
-        $latest = Get-ChildItem (Join-Path $root "build_make") -Filter "*_rec_vc_car*.elf" |
+        $latest = Get-ChildItem (Join-Path $root "build_make") -Filter "*_rec*_vc_car*.elf" |
                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($null -eq $latest) { Write-Error "No recorder ELF found; pass -Elf"; exit 1 }
         $Elf = $latest.FullName
@@ -121,11 +144,26 @@ else {
     else {
         Write-Warning "g_bc_rec not in the ELF: no barcode trace."
     }
+    # Optional Buddy 4 ring (B4_RECORDER=1 builds), same session.
+    $b4Bin = ""
+    $b4Csv = Join-Path $outDir ("{0}_{1}_b4.csv" -f $stamp, $Name)
+    $b4Cmd = @()
+    $b4Sym = (& $Nm -S --defined-only $Elf) | Where-Object { $_ -match "\sg_b4_rec$" }
+    if ($b4Sym) {
+        $h      = ($b4Sym | Select-Object -First 1).Trim() -split "\s+"
+        $b4Addr = [Convert]::ToUInt32($h[0], 16)
+        $b4Size = [Convert]::ToUInt32($h[1], 16)
+        Write-Host ("g_b4_rec at 0x{0:x8}, {1} bytes" -f $b4Addr, $b4Size)
+        $b4Bin    = Join-Path $outDir ("{0}_{1}_b4.bin" -f $stamp, $Name)
+        $b4BinTcl = $b4Bin -replace "\\", "/"
+        $b4Cmd    = @("-c", ("dump_image {{{0}}} 0x{1:x8} 0x{2:x}" -f $b4BinTcl, $b4Addr, $b4Size))
+    }
     & (Join-Path $OpenOcd "openocd.exe") -s (Join-Path $OpenOcd "scripts") `
         -f interface/cmsis-dap.cfg -f target/rp2040.cfg `
         -c "adapter speed $Speed" -c init `
         -c ("dump_image {{{0}}} 0x{1:x8} 0x{2:x}" -f $binTcl, $addr, $size) `
         @bcCmd `
+        @b4Cmd `
         -c shutdown
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bin)) {
         Write-Error "OpenOCD dump failed (probe connected? car powered?)"
@@ -265,5 +303,70 @@ if ($bcBin -ne "") {
         [System.IO.File]::WriteAllText($bcCsv, $cb.ToString(), [System.Text.Encoding]::ASCII)
         Write-Host ("{0} barcode rows (total {1}, frozen {2}), captures finished {3}, longest step {4} ms" -f $cn, $cTotal, $cFrozen, $cDone, $cMaxDt)
         Write-Host "Barcode CSV: $bcCsv"
+    }
+}
+
+# 5. Buddy 4 trace, if it was dumped.
+if ($b4Bin -ne "") {
+    $d = [System.IO.File]::ReadAllBytes($b4Bin)
+    if ($d.Length -lt $headerBytes) { Write-Error "Buddy 4 dump too short ($($d.Length) bytes)"; exit 1 }
+    $dMagic  = [BitConverter]::ToUInt32($d, 0)
+    $dRecSz  = [BitConverter]::ToUInt16($d, 4)
+    $dCap    = [BitConverter]::ToUInt16($d, 6)
+    $dWr     = [BitConverter]::ToUInt32($d, 8)
+    $dTotal  = [BitConverter]::ToUInt32($d, 12)
+    $dFrozen = [BitConverter]::ToUInt32($d, 16)
+    if ($dMagic -ne $b4Magic) {
+        Write-Warning ("No Buddy 4 data: magic 0x{0:x8}" -f $dMagic)
+    }
+    elseif ($dRecSz -ne $b4RecBytes) {
+        Write-Error "Buddy 4 record size $dRecSz, decoder expects $b4RecBytes"; exit 1
+    }
+    elseif ($d.Length -lt ($headerBytes + $dCap * $dRecSz)) {
+        Write-Error "Buddy 4 dump shorter than the ring"; exit 1
+    }
+    else {
+        if ($dFrozen -eq 0) { Write-Warning "Buddy 4 ring not frozen." }
+        $dn     = [Math]::Min([uint32]$dCap, $dTotal)
+        $dFirst = ([int]$dWr - [int]$dn + $dCap) % $dCap
+        $db = New-Object System.Text.StringBuilder
+        [void]$db.AppendLine("row,ms,dt_ms,accel_x_mg,accel_y_mg,accel_z_mg,incline_mg,baseline_mg,delta_mg,noise_mg,active_height_cmm,active_height_mm,final_height_cmm,final_height_mm,mag_x,mag_y,mag_z,left_enc,right_enc,drive_speed_mm_s,dt_us,hump_state,motion,turn,tilt,flags,valid,mag_new,height_valid,impact,started,completed,stale")
+        $dPrev  = $null
+        $dMaxUs = 0
+        for ($i = 0; $i -lt $dn; $i++) {
+            $o     = $headerBytes + (($dFirst + $i) % $dCap) * $dRecSz
+            $ms    = [BitConverter]::ToUInt32($d, $o)
+            $dt    = ""
+            if ($null -ne $dPrev) {
+                $e = [int64]$ms - [int64]$dPrev
+                if ($e -lt 0) { $e += 4294967296 }
+                $dt = $e
+            }
+            $dPrev = $ms
+            $us    = [BitConverter]::ToUInt16($d, $o + 34)
+            if ($us -gt $dMaxUs) { $dMaxUs = $us }
+            $fl    = $d[$o + 37]
+            $mt    = $d[$o + 38]
+            $act   = [BitConverter]::ToUInt16($d, $o + 18)
+            $fin   = [BitConverter]::ToUInt16($d, $o + 20)
+            [void]$db.AppendLine(("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11:0.00},{12},{13:0.00},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27},{28},{29},{30},{31},{32}" -f `
+                $i, $ms, $dt,
+                [BitConverter]::ToInt16($d, $o + 4), [BitConverter]::ToInt16($d, $o + 6),
+                [BitConverter]::ToInt16($d, $o + 8), [BitConverter]::ToInt16($d, $o + 10),
+                [BitConverter]::ToInt16($d, $o + 12), [BitConverter]::ToInt16($d, $o + 14),
+                [BitConverter]::ToUInt16($d, $o + 16),
+                $act, ($act / 100.0), $fin, ($fin / 100.0),
+                [BitConverter]::ToInt16($d, $o + 22), [BitConverter]::ToInt16($d, $o + 24),
+                [BitConverter]::ToInt16($d, $o + 26),
+                [BitConverter]::ToUInt16($d, $o + 28), [BitConverter]::ToUInt16($d, $o + 30),
+                [BitConverter]::ToInt16($d, $o + 32), $us,
+                $d[$o + 36], ($mt -band 15), ($mt -shr 4), $d[$o + 39], $fl,
+                ($fl -band 1), (($fl -shr 1) -band 1), (($fl -shr 2) -band 1),
+                (($fl -shr 3) -band 1), (($fl -shr 4) -band 1),
+                (($fl -shr 5) -band 1), (($fl -shr 6) -band 1)))
+        }
+        [System.IO.File]::WriteAllText($b4Csv, $db.ToString(), [System.Text.Encoding]::ASCII)
+        Write-Host ("{0} Buddy 4 rows (total {1}, frozen {2}), longest dt_us {3}" -f $dn, $dTotal, $dFrozen, $dMaxUs)
+        Write-Host "Buddy 4 CSV: $b4Csv"
     }
 }
