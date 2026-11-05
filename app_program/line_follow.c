@@ -16,6 +16,7 @@
  */
 
 #include "line_follow.h"
+#include "motion_config.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -125,6 +126,40 @@ static uint32_t cal_history_count;      /* Samples recorded since sweep.   */
 static bool cal_sweeping;               /* The pivot has started.          */
 
 
+/*
+ * Distance-windowed references. The START sweep sets the thresholds once,
+ * but the tape's black level varies along the track. While driving, the
+ * highest reading of each line sensor over the last LINE_REF_WINDOW_MM of
+ * forward wheel travel is kept in a ring of buckets, and the black level
+ * follows it. White stays at the START low level: a centred car never sees
+ * white, so the window minimum would be an edge reading. The window is
+ * distance, not time, so a stopped or pivoting car never forgets its
+ * reference.
+ *
+ * NOTE: the window length is a starting value to be confirmed by a car run.
+ */
+#define LINE_REF_WINDOW_MM         150U
+#define LINE_REF_BUCKETS           6U
+#define LINE_REF_BUCKET_MM         (LINE_REF_WINDOW_MM / LINE_REF_BUCKETS)
+
+/* pi in Q16, as motion_task.c uses it for the same count conversion. */
+#define LINE_REF_PI_Q16            205887LL
+#define LINE_REF_SCALE_ONE         1024LL
+
+typedef struct
+{
+    uint16_t centre_max;
+    uint16_t right_max;
+} ref_bucket_t;
+
+static ref_bucket_t ref_bucket[LINE_REF_BUCKETS];
+static uint32_t ref_head;            /* Bucket now collecting.            */
+static uint32_t ref_travel;          /* Counts travelled in that bucket.  */
+static uint32_t ref_advances;        /* Buckets started since the seed.   */
+static uint32_t ref_bucket_counts;   /* Encoder counts per bucket.        */
+static bool ref_active;              /* Seeded from a successful START.   */
+
+
 static void clear_line_state(void)
 {
     junction_count = 0U;
@@ -140,6 +175,8 @@ void line_follow_init(void)
     right_threshold = IR_RIGHT_THRESHOLD_DEFAULT;
     centre_full_black = IR_CENTRE_FULL_BLACK_DEFAULT;
     cal_state = LINE_CAL_IDLE;
+    ref_active = false;
+    ref_bucket_counts = 0U;
 }
 
 
@@ -530,9 +567,102 @@ static void cal_record_ranges(void)
 }
 
 
+/*
+ * Encoder counts for mm of travel on one wheel, the inverse of the
+ * mm-per-count conversion in motion_task.c.
+ */
+static int64_t ref_wheel_counts(uint32_t mm, int32_t counts_per_rev,
+                                int32_t diameter_um, uint16_t scale_q10)
+{
+    int64_t denom = LINE_REF_PI_Q16 * diameter_um * scale_q10;
+    int64_t num = (int64_t)mm * counts_per_rev * 1000LL
+                  * LINE_REF_SCALE_ONE * 65536LL;
+
+    return (denom > 0) ? (num / denom) : 0;
+}
+
+
+/* Counts per bucket: the mean of both wheels, computed once. */
+static uint32_t ref_get_bucket_counts(void)
+{
+    motion_config_t config;
+    int64_t left;
+    int64_t right;
+    int64_t mean;
+
+    if (0U == ref_bucket_counts)
+    {
+        motion_config_default(&config);
+        left = ref_wheel_counts(LINE_REF_BUCKET_MM,
+                                config.left_counts_per_wheel_rev,
+                                config.left_wheel_diameter_um,
+                                config.distance_scale_q10);
+        right = ref_wheel_counts(LINE_REF_BUCKET_MM,
+                                 config.right_counts_per_wheel_rev,
+                                 config.right_wheel_diameter_um,
+                                 config.distance_scale_q10);
+        mean = (left + right) / 2;
+
+        /* A bad config must not make the bucket length zero. */
+        ref_bucket_counts = (mean > 0) ? (uint32_t)mean : 1U;
+    }
+
+    return ref_bucket_counts;
+}
+
+
+static void ref_clear_bucket(ref_bucket_t *p_bucket)
+{
+    p_bucket->centre_max = 0U;
+    p_bucket->right_max = 0U;
+}
+
+
+/* Start the window from the START result (the sweep's own raw range). */
+static void ref_seed(void)
+{
+    uint32_t k;
+
+    for (k = 0U; k < LINE_REF_BUCKETS; k++)
+    {
+        ref_clear_bucket(&ref_bucket[k]);
+    }
+
+    ref_bucket[0].centre_max = cal_result.centre.high;
+    ref_bucket[0].right_max = cal_result.right.high;
+    ref_head = 0U;
+    ref_travel = 0U;
+    ref_advances = 0U;
+    ref_active = true;
+}
+
+
+/*
+ * True if the window maximum of one sensor is usable as its black level:
+ * the sensor saw tape (the maximum is above its current threshold) and the
+ * span above the START low level is at least LINE_CAL_MIN_SPAN. Then the
+ * threshold is the midpoint of the START low level and the maximum.
+ */
+static bool ref_threshold(uint16_t black, uint16_t start_low,
+                          uint16_t current, uint16_t *p_threshold)
+{
+    bool ok = (black > current) && (black >= start_low)
+              && (((uint32_t)black - start_low) >= LINE_CAL_MIN_SPAN);
+
+    if (ok)
+    {
+        *p_threshold = (uint16_t)((uint32_t)start_low
+                                  + (((uint32_t)black - start_low) / 2U));
+    }
+
+    return ok;
+}
+
+
 void line_cal_begin(void)
 {
     cal_state = LINE_CAL_RUNNING;
+    ref_active = false;
     cal_first_sample = true;
     cal_history_count = 0U;
     cal_sweeping = false;
@@ -743,6 +873,98 @@ void line_cal_update(ir_readings_t readings)
         centre_full_black = cal_result.centre_full_black;
         clear_line_state();
         cal_state = LINE_CAL_OK;
+        ref_seed();
+    }
+}
+
+
+void line_ref_update(ir_readings_t readings, int32_t travel_counts)
+{
+    uint32_t bucket_counts;
+    uint32_t travel;
+    uint32_t k;
+    uint16_t c_max = 0U;
+    uint16_t r_max = 0U;
+    uint16_t threshold;
+    uint16_t full_black;
+    ref_bucket_t *p_bucket;
+
+    if ((cal_state != LINE_CAL_OK) || !ref_active)
+    {
+        return;
+    }
+
+    bucket_counts = ref_get_bucket_counts();
+    travel = (travel_counts > 0) ? (uint32_t)travel_counts : 0U;
+
+    /* A jump longer than the window forgets the whole window anyway. */
+    if (travel > (bucket_counts * LINE_REF_BUCKETS))
+    {
+        travel = bucket_counts * LINE_REF_BUCKETS;
+    }
+
+    /* Move to a new bucket for each bucket length of forward travel. */
+    ref_travel += travel;
+
+    while (ref_travel >= bucket_counts)
+    {
+        ref_travel -= bucket_counts;
+        ref_head = (ref_head + 1U) % LINE_REF_BUCKETS;
+        ref_clear_bucket(&ref_bucket[ref_head]);
+        ref_advances++;
+    }
+
+    /* Standing or pivoting adds samples here but never advances. */
+    p_bucket = &ref_bucket[ref_head];
+
+    if (readings.centre > p_bucket->centre_max)
+    {
+        p_bucket->centre_max = readings.centre;
+    }
+
+    if (readings.right > p_bucket->right_max)
+    {
+        p_bucket->right_max = readings.right;
+    }
+
+    /* Until the seed bucket has rolled out, the START levels stay. */
+    if (ref_advances < LINE_REF_BUCKETS)
+    {
+        return;
+    }
+
+    for (k = 0U; k < LINE_REF_BUCKETS; k++)
+    {
+        if (ref_bucket[k].centre_max > c_max)
+        {
+            c_max = ref_bucket[k].centre_max;
+        }
+
+        if (ref_bucket[k].right_max > r_max)
+        {
+            r_max = ref_bucket[k].right_max;
+        }
+    }
+
+    if (ref_threshold(c_max, cal_result.centre.low, centre_threshold,
+                      &threshold))
+    {
+        /* The error division relies on full black above the threshold. */
+        full_black = (uint16_t)((uint32_t)c_max
+                                - (((uint32_t)c_max - cal_result.centre.low)
+                                   / LINE_CAL_FULL_BLACK_DIV));
+
+        if (full_black > threshold)
+        {
+            centre_threshold = threshold;
+            centre_full_black = full_black;
+        }
+    }
+
+    if (ref_threshold(r_max, cal_result.right.low, right_threshold,
+                      &threshold))
+    {
+        right_threshold = threshold;
     }
 }
 

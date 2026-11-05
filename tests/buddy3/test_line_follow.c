@@ -801,6 +801,247 @@ test_both_white_side_uncalibrated(void)
 }
 
 
+/*
+ * Distance-windowed references. A calibrated START (both sensors 200 to
+ * 3800), then the car drives in steps of REF_STEP counts. A bucket is about
+ * 306 counts and the window six of them, so REF_WINDOW_CYCLES cycles cover
+ * more than one whole window.
+ */
+#define REF_STEP             10
+#define REF_WINDOW_CYCLES    200U
+#define REF_PROBE            2600U    /* Between threshold and full black. */
+
+static void
+ref_calibrate(void)
+{
+    stretches_t s = { 40U, 60U, 30U, 50U };
+
+    line_follow_init();
+    (void)run_sweep(&s);
+}
+
+
+/* One driven cycle: references first, then the error as the task does. */
+static int8_t
+ref_cycle(uint16_t centre, int32_t travel)
+{
+    ir_readings_t r = { centre, WHITE, WHITE };
+    line_state_t state;
+
+    line_ref_update(r, travel);
+    return step(centre, WHITE, &state);
+}
+
+
+/* The error for a fixed reading, without feeding it to the references. */
+static int8_t
+ref_probe(void)
+{
+    line_state_t state;
+
+    return step(REF_PROBE, WHITE, &state);
+}
+
+
+/* One window of weaving: the centre sensor reaches peak half the time. */
+static void
+ref_drive_window(uint16_t peak, int32_t travel)
+{
+    uint32_t k;
+
+    for (k = 0U; k < REF_WINDOW_CYCLES; k++)
+    {
+        (void)ref_cycle(((k % 20U) < 10U) ? peak : WHITE, travel);
+    }
+}
+
+
+static void
+test_ref_slow_fade(void)
+{
+    uint32_t w;
+    uint16_t peak = BLACK_LEVEL;
+    int8_t err = 0;
+    line_state_t state = LINE_LOST;
+    ir_readings_t at_peak;
+
+    ref_calibrate();
+    check("ref: calibrated", line_cal_state() == LINE_CAL_OK);
+
+    for (w = 0U; w < 14U; w++)
+    {
+        peak = (uint16_t)(BLACK_LEVEL - ((w * (BLACK_LEVEL * 3U / 10U)) / 13U));
+        ref_drive_window(peak, REF_STEP);
+        err = ref_cycle(peak, REF_STEP);
+    }
+
+    at_peak = (ir_readings_t){ peak, WHITE, WHITE };
+    state = line_get_position(at_peak);
+    check("ref: faded to 70 percent", peak <= ((BLACK_LEVEL * 71U) / 100U));
+    check("ref: slow fade, error 0 at local peak", err == 0);
+    check("ref: slow fade, still on the line", state == LINE_CENTRE);
+}
+
+
+static void
+test_ref_quick_slide_off(void)
+{
+    uint32_t k;
+    uint16_t centre;
+    int8_t before;
+    int8_t after;
+    bool all_left = true;
+
+    ref_calibrate();
+    ref_drive_window(BLACK_LEVEL, REF_STEP);
+    ref_drive_window(BLACK_LEVEL, REF_STEP);
+    before = ref_probe();
+    check("ref: slide, probe reads left of centre", before < 0);
+
+    /* Within about one bucket the centre slides from the peak to white. */
+    for (k = 0U; k < 40U; k++)
+    {
+        centre = (uint16_t)(BLACK_LEVEL - ((k * (BLACK_LEVEL - WHITE)) / 39U));
+
+        if (ref_cycle(centre, 5) > 0)
+        {
+            all_left = false;
+        }
+    }
+
+    after = ref_probe();
+    check("ref: slide, error never turns right", all_left);
+    check("ref: slide, reference not lowered", after == before);
+}
+
+
+static void
+test_ref_centred_no_white(void)
+{
+    uint32_t k;
+    uint32_t w;
+    uint16_t level = 2800U;
+    uint16_t low_on = (uint16_t)((level * 7U) / 10U);
+    ir_readings_t r;
+    bool all_on = true;
+
+    ref_calibrate();
+
+    /* The first window only rolls out the START seed. Centred for several
+     * windows: readings only 70 to 100 percent of the
+     * tape's black, never near white. */
+    for (w = 0U; w < 5U; w++)
+    {
+        for (k = 0U; k < REF_WINDOW_CYCLES; k++)
+        {
+            r.centre = ((k % 20U) < 10U) ? level : low_on;
+            r.right = WHITE;
+            r.barcode = WHITE;
+            line_ref_update(r, REF_STEP);
+
+            if ((w > 0U)
+                && ((line_get_sensor_bits(r) & LINE_SENSOR_CENTRE) == 0U))
+            {
+                all_on = false;
+            }
+        }
+    }
+
+    check("ref: no white in window, on-tape readings stay on the line",
+          all_on);
+
+    /* The threshold is the midpoint of the START low (200) and the window
+     * maximum, so a reading just above it is black and just below is not. */
+    r = (ir_readings_t){ 1500U, WHITE, WHITE };
+    check("ref: threshold follows window max (1500 is black)",
+          (line_get_sensor_bits(r) & LINE_SENSOR_CENTRE) != 0U);
+    r = (ir_readings_t){ 1499U, WHITE, WHITE };
+    check("ref: threshold not above half of window max (1499 is white)",
+          (line_get_sensor_bits(r) & LINE_SENSOR_CENTRE) == 0U);
+}
+
+
+static void
+test_ref_no_tape_or_stationary(void)
+{
+    uint32_t k;
+    int8_t before;
+
+    ref_calibrate();
+    ref_drive_window(BLACK_LEVEL, REF_STEP);
+    ref_drive_window(BLACK_LEVEL, REF_STEP);
+    before = ref_probe();
+
+    /* Standing still on white forever: the window never moves. */
+    for (k = 0U; k < 5000U; k++)
+    {
+        (void)ref_cycle(WHITE, 0);
+    }
+
+    check("ref: stationary on white keeps thresholds",
+          ref_probe() == before);
+
+    /* A pivot in place with the line seen now and then: same. */
+    for (k = 0U; k < 5000U; k++)
+    {
+        (void)ref_cycle(((k % 50U) < 25U) ? BLACK_LEVEL : WHITE, 0);
+    }
+
+    check("ref: pivoting keeps thresholds",
+          ref_probe() == before);
+
+    /* Driving over white for many windows: no span, nothing accepted. */
+    for (k = 0U; k < 8U; k++)
+    {
+        ref_drive_window(WHITE, REF_STEP);
+    }
+
+    check("ref: no tape in window keeps thresholds",
+          ref_probe() == before);
+
+    /* Negative travel is ignored, not counted as distance. */
+    for (k = 0U; k < 5000U; k++)
+    {
+        (void)ref_cycle(WHITE, -50);
+    }
+
+    check("ref: negative travel keeps thresholds",
+          ref_probe() == before);
+}
+
+
+static void
+test_ref_reset_on_recalibration(void)
+{
+    stretches_t s = { 40U, 60U, 30U, 50U };
+    uint32_t w;
+    int8_t fresh;
+    int8_t faded;
+
+    ref_calibrate();
+    fresh = ref_probe();
+
+    for (w = 0U; w < 6U; w++)
+    {
+        ref_drive_window(3000U, REF_STEP);
+    }
+
+    faded = ref_probe();
+    check("ref: thresholds followed the weaker tape", faded != fresh);
+
+    (void)run_sweep(&s);
+    check("ref: recalibrated", line_cal_state() == LINE_CAL_OK);
+    check("ref: recalibration restores the START result",
+          ref_probe() == fresh);
+
+    /* Not running: no effect while a sweep is in progress. */
+    line_cal_begin();
+    ref_drive_window(3000U, REF_STEP);
+    line_cal_abort();
+    check("ref: ignored unless calibrated", line_cal_state() == LINE_CAL_IDLE);
+}
+
+
 int
 main(void)
 {
@@ -816,6 +1057,11 @@ main(void)
     test_calibration_moving_only();
     test_both_white_side();
     test_both_white_side_uncalibrated();
+    test_ref_slow_fade();
+    test_ref_quick_slide_off();
+    test_ref_centred_no_white();
+    test_ref_no_tape_or_stationary();
+    test_ref_reset_on_recalibration();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

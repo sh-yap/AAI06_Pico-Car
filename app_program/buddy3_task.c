@@ -373,6 +373,12 @@ void buddy3_task(INT stacd, void *exinf)
 
     motion_encoder_snapshot_t enc_snapshot;
     int32_t encoder_position;
+    int32_t prev_left_counts = 0;
+    int32_t prev_right_counts = 0;
+    int32_t wheel_dl;
+    int32_t wheel_dr;
+    int32_t travel_counts;
+    bool have_prev_enc = false;
 
     bool barcode_is_black;
 
@@ -421,8 +427,8 @@ void buddy3_task(INT stacd, void *exinf)
         bc_rec.ms = (uint32_t)sys_time.lo; /* Low 32 bits, wraps by design. */
 #endif
         readings = ir_sensor_read();
-#if VC_RECORDER
         motion_encoder_get_snapshot(&enc_snapshot);
+#if VC_RECORDER
         (void)tk_get_otm(&sys_time);
         bc_rec.sample_end_ms = (uint32_t)sys_time.lo; /* Same wrapping clock. */
         bc_rec.left_enc = enc_snapshot.left_counts;
@@ -433,7 +439,29 @@ void buddy3_task(INT stacd, void *exinf)
         buddy3_reading_word = ((uint32_t)(readings.centre & 0xFFFU))
                               | ((uint32_t)(readings.right & 0xFFFU) << 12);
         service_calibration(readings);
-        line_state = line_get_position(readings);
+
+        /* Forward travel this cycle is the mean of both wheels' counts. */
+        if (have_prev_enc)
+        {
+            wheel_dl = enc_snapshot.left_counts - prev_left_counts;
+            wheel_dr = enc_snapshot.right_counts - prev_right_counts;
+            travel_counts = (wheel_dl + wheel_dr) / 2;
+
+            if (travel_counts < 0)
+            {
+                travel_counts = -travel_counts;
+            }
+        }
+        else
+        {
+            travel_counts = 0;
+            have_prev_enc = true;
+        }
+
+        prev_left_counts = enc_snapshot.left_counts;
+        prev_right_counts = enc_snapshot.right_counts;
+        line_ref_update(readings, travel_counts);
+        line_state =line_get_position(readings);
         line_error = line_get_error(readings);
         line_sensors = line_get_sensor_bits(readings);
 
@@ -447,9 +475,6 @@ void buddy3_task(INT stacd, void *exinf)
          * Average of both wheels - reasonable for a robot driving
          * roughly straight over a barcode. 
          */
-#if !VC_RECORDER
-        motion_encoder_get_snapshot(&enc_snapshot);
-#endif
         encoder_position =
             (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
 

@@ -86,6 +86,15 @@ void line_cal_update(ir_readings_t readings);
  */
 line_cal_state_t line_cal_end(void);
 
+/*
+ * Keep the thresholds current while driving. Call every Buddy 3 cycle with
+ * travel_counts, this cycle's forward travel in encoder counts (0 or more).
+ * The references are the highest and lowest readings over the last
+ * LINE_REF_WINDOW_MM of forward travel. No effect unless calibration
+ * succeeded. Starts from the START result after each successful sweep.
+ */
+void line_ref_update(ir_readings_t readings, int32_t travel_counts);
+
 /* Drop a sweep in progress or a result (stop, failure elsewhere). */
 void line_cal_abort(void);
 

@@ -9,8 +9,8 @@ buddy3_status_tests: test_buddy3_status.c ../../app_program/buddy3_status.c ../.
 barcode_tests: test_barcode.c ../../app_program/barcode.c ../../app_program/barcode.h ../../app_program/navigation.h
 	$(CC) $(CFLAGS) -I../../app_program -o $@ test_barcode.c ../../app_program/barcode.c
 
-line_follow_tests: test_line_follow.c ../../app_program/line_follow.c ../../app_program/line_follow.h ../../app_program/ir_sensor.h
-	$(CC) $(CFLAGS) -I../../app_program -o $@ test_line_follow.c ../../app_program/line_follow.c
+line_follow_tests: test_line_follow.c ../../app_program/line_follow.c ../../app_program/motion_config.c ../../app_program/motion_config.h ../../app_program/line_follow.h ../../app_program/ir_sensor.h
+	$(CC) $(CFLAGS) -I../../app_program -o $@ test_line_follow.c ../../app_program/line_follow.c ../../app_program/motion_config.c
 
 test: buddy3_status_tests barcode_tests line_follow_tests
 	./buddy3_status_tests
