@@ -10,7 +10,8 @@
  * be read after STOP.  Only the VC task writes it.  It never blocks,
  * allocates or prints.  Readout: tools/run_rec_read.ps1.
  *
- * BARR-C 4.2: no #include here.  Include <stdint.h> before this header.
+ * BARR-C 4.2: no #include here.  Include <stdint.h> and <stdbool.h> before
+ * this header.
  */
 
 #ifndef RUN_REC_H
@@ -203,6 +204,79 @@ extern b4_rec_t g_b4_rec;
 /* Append one record.  Ignored when frozen or before the first BEGIN. */
 void b4_rec_add(b4_rec_record_t const * p_record);
 #endif /* B4_RECORDER */
+
+/* ---- Whole-run event log --------------------------------------------------
+ * A fourth, small log, g_ev_rec: the rings above keep only the newest few
+ * seconds, so this one keeps the line losses, ramp edges and hump results of
+ * the whole run.  When full it stops (earliest events kept) and counts
+ * dropped; it never wraps.  It begins and freezes with the run ring.  Only
+ * the VC task writes it (ev_rec_step at the 20 ms step, ev_rec_hump when a
+ * terrain word shows a new hump count).  Keep tools/run_rec_read.ps1 in
+ * step. */
+
+#define EV_REC_MAGIC        (0x31564545UL)  /* "EEV1" little endian.        */
+#define EV_REC_CAPACITY     (62U)           /* 16 + 62 * 8 = 512 bytes.     */
+#define EV_REC_VALID_BIT    (0x80U)         /* HUMP_DONE count byte: the
+                                               word's height was valid.     */
+#define EV_REC_COUNT_MASK   (0x7FU)         /* HUMP_DONE count byte: hump
+                                               count (4 bits in the word).  */
+
+typedef enum
+{
+    EV_REC_LINE_LOST = 1,       /* Line LOST in FOLLOW_LINE; value = steer
+                                   of the previous step.                    */
+    EV_REC_LINE_BACK,           /* Line left LOST; value = ms since
+                                   LINE_LOST, clamped to 32767.             */
+    EV_REC_RAMP_START,          /* Ramp flag rose; value 0.                 */
+    EV_REC_RAMP_END,            /* Ramp flag fell; value 0.                 */
+    EV_REC_HUMP_DONE,           /* Hump count changed; value = newest
+                                   height in 0.1 mm, count = hump count
+                                   (EV_REC_COUNT_MASK) | EV_REC_VALID_BIT
+                                   when the word's height was valid.        */
+    EV_REC_RUN_MAX              /* The word's highest height changed;
+                                   value = it in 0.1 mm.  Not logged for
+                                   the reset to 0 at BEGIN.                 */
+} ev_rec_type_t;
+
+/* One event, 8 bytes, no padding. */
+typedef struct
+{
+    uint32_t ms;                /* Kernel time, same clock as the VC ring.  */
+    int16_t  value;             /* Per ev_rec_type_t.                       */
+    uint8_t  type;              /* ev_rec_type_t.                           */
+    uint8_t  count;             /* HUMP_DONE: count and valid bit, else 0.  */
+} ev_rec_record_t;
+
+/* Header first.  magic is 0 until the first BEGIN.  Records 0 .. count - 1
+ * are valid, oldest first. */
+typedef struct
+{
+    uint32_t        magic;          /* EV_REC_MAGIC once a run began.       */
+    uint16_t        record_size;    /* sizeof(ev_rec_record_t).             */
+    uint16_t        capacity;       /* EV_REC_CAPACITY.                     */
+    uint16_t        count;          /* Events stored.                       */
+    uint16_t        dropped;        /* Events lost because it was full.     */
+    uint16_t        frozen;         /* 1 once the run ended.                */
+    uint16_t        reserved;       /* 0.                                   */
+    ev_rec_record_t records[EV_REC_CAPACITY];
+} ev_rec_t;
+
+extern ev_rec_t g_ev_rec;
+
+/* Detect changes since the previous 20 ms step and log them.  Call once per
+ * step, after the state change, with this step's values.  Ignored when
+ * frozen or before the first BEGIN. */
+void ev_rec_step(uint32_t ms, bool b_lost, bool b_follow, int8_t steer,
+                 bool b_ramp);
+
+/* Log a completed hump with its newest height and whether that height was
+ * valid.  Ignored when frozen or before the first BEGIN. */
+void ev_rec_hump(uint32_t ms, uint16_t height_dmm, uint8_t count,
+                 bool b_valid);
+
+/* Log the word's highest height when it differs from the last one seen
+ * (the last one is 0 at BEGIN).  Ignored when frozen or before BEGIN. */
+void ev_rec_max(uint32_t ms, uint16_t highest_dmm);
 
 #endif /* RUN_REC_H */
 

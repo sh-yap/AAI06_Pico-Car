@@ -609,6 +609,11 @@ read_line (vc_inputs_t * p_in, uint32_t now)
 
 #if VC_HAVE_BUDDY4
 
+/* A run reset was requested and Buddy 4's hump count has not shown 0 yet,
+ * so that drop is not a finished hump.  Set where the reset is requested,
+ * cleared in read_terrain(); both run in the VC task. */
+static bool s_b_hump_reset_pending = false;
+
 /* A completed hump: report a valid height to the laptop, log either way. */
 static void
 report_hump (b4_task_terrain_t const * p_terrain)
@@ -656,10 +661,21 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
 
             /* The count, not a one-sample flag, marks a completed hump,
              * so a word lost in between cannot hide one. */
-            if (s_b_seen && (s_terrain.hump_count != s_humps))
+            if (s_b_hump_reset_pending && (0U == s_terrain.hump_count))
+            {
+                s_b_hump_reset_pending = false;     /* Reset, not a hump. */
+            }
+            else if (s_b_seen && (s_terrain.hump_count != s_humps))
             {
                 report_hump(&s_terrain);
+#if VC_RECORDER
+                ev_rec_hump(now, s_terrain.current_height_dmm,
+                            s_terrain.hump_count, s_terrain.b_height_valid);
+#endif
             }
+#if VC_RECORDER
+            ev_rec_max(now, s_terrain.highest_height_dmm);
+#endif
 
             s_humps   = s_terrain.hump_count;
             s_seen_ms = now;
@@ -1833,7 +1849,8 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
             g_run_start_ms = now;
             (void) comms_begin_run();
 #if VC_HAVE_BUDDY4
-            b4_task_request_run_reset();    /* New run: clear max height. */
+            b4_task_request_run_reset();    /* New run: clear max and count. */
+            s_b_hump_reset_pending = true;
 #endif
         }
         else if (g_b_run_active
@@ -1932,6 +1949,9 @@ record_cycle (vc_inputs_t const * p_in, vc_outputs_t const * p_out)
     motion_get_learned(&rec.learn_fwd_gain, &rec.learn_fwd_offset,
                        &rec.learn_turn_gain, &rec.learn_state);
     run_rec_add(&rec);
+    ev_rec_step(p_in->now_ms, (VC_LINE_LOST == p_in->line),
+                (VC_STATE_FOLLOW_LINE == p_out->state), p_out->steer,
+                p_in->b_ramp_active);
 
     if (!g_b_rec_active)
     {

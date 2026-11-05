@@ -8,6 +8,7 @@
  * offline decoder (tools/run_rec_read.ps1 -File) can be checked against it.
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -72,6 +73,10 @@ test_before_begin(void)
     add_ms(1U);
     check_u32("no begin: magic", g_run_rec.magic, 0U);
     check_u32("no begin: total", g_run_rec.total, 0U);
+    ev_rec_hump(1U, 1U, 1U, true);
+    ev_rec_max(1U, 5U);
+    check_u32("ev no begin: magic", g_ev_rec.magic, 0U);
+    check_u32("ev no begin: count", g_ev_rec.count, 0U);
 #if B4_RECORDER
     {
         b4_rec_record_t rec = {0};
@@ -409,6 +414,125 @@ write_sample(char const * p_path)
 }
 
 
+/* One 20 ms step of the event detector. */
+static void
+ev_step(uint32_t ms, bool b_lost, bool b_follow, int8_t steer, bool b_ramp)
+{
+    ev_rec_step(ms, b_lost, b_follow, steer, b_ramp);
+}
+
+
+static void
+test_ev_rec(void)
+{
+    uint32_t i;
+
+    check_u32("ev layout: record size", (uint32_t)sizeof(ev_rec_record_t), 8U);
+    check_u32("ev layout: total size", (uint32_t)sizeof(ev_rec_t), 512U);
+    check_u32("ev layout: records offset",
+              (uint32_t)offsetof(ev_rec_t, records), 16U);
+
+    /* BEGIN clears it, and nothing is logged without a change. */
+    run_rec_begin();
+    check_u32("ev begin: magic", g_ev_rec.magic, EV_REC_MAGIC);
+    check_u32("ev begin: record_size", g_ev_rec.record_size, 8U);
+    check_u32("ev begin: capacity", g_ev_rec.capacity, EV_REC_CAPACITY);
+    check_u32("ev begin: count", g_ev_rec.count, 0U);
+    check_u32("ev begin: dropped", g_ev_rec.dropped, 0U);
+    ev_step(1000U, false, true, 10, false);
+    ev_step(1020U, false, true, 20, false);
+    check_u32("ev steady: count", g_ev_rec.count, 0U);
+
+    /* LOST in FOLLOW_LINE: value is the previous step's steer. */
+    ev_step(1040U, true, false, 127, false);
+    check_u32("ev lost: count", g_ev_rec.count, 1U);
+    check_u32("ev lost: type", g_ev_rec.records[0].type, EV_REC_LINE_LOST);
+    check_u32("ev lost: ms", g_ev_rec.records[0].ms, 1040U);
+    check_u32("ev lost: value", (uint32_t)g_ev_rec.records[0].value, 20U);
+    ev_step(1060U, true, false, 0, false);
+    check_u32("ev still lost: count", g_ev_rec.count, 1U);
+
+    /* LINE_BACK: ms since LOST. */
+    ev_step(1340U, false, false, 0, false);
+    check_u32("ev back: count", g_ev_rec.count, 2U);
+    check_u32("ev back: type", g_ev_rec.records[1].type, EV_REC_LINE_BACK);
+    check_u32("ev back: value", (uint32_t)g_ev_rec.records[1].value, 300U);
+
+    /* LOST outside FOLLOW_LINE is not logged, nor its return. */
+    ev_step(1360U, true, false, 0, false);
+    ev_step(1380U, false, false, 0, false);
+    check_u32("ev lost outside follow: count", g_ev_rec.count, 2U);
+
+    /* Ramp edges: one event each. */
+    ev_step(1400U, false, true, 0, true);
+    ev_step(1420U, false, true, 0, true);
+    check_u32("ev ramp start: count", g_ev_rec.count, 3U);
+    check_u32("ev ramp start: type", g_ev_rec.records[2].type,
+              EV_REC_RAMP_START);
+    ev_step(1440U, false, true, 0, false);
+    check_u32("ev ramp end: count", g_ev_rec.count, 4U);
+    check_u32("ev ramp end: type", g_ev_rec.records[3].type, EV_REC_RAMP_END);
+
+    /* Hump: newest height, count and the valid bit, both ways. */
+    ev_rec_hump(1500U, 123U, 2U, true);
+    check_u32("ev hump: count", g_ev_rec.count, 5U);
+    check_u32("ev hump: type", g_ev_rec.records[4].type, EV_REC_HUMP_DONE);
+    check_u32("ev hump: value", (uint32_t)g_ev_rec.records[4].value, 123U);
+    check_u32("ev hump: valid stored", g_ev_rec.records[4].count,
+              2U | EV_REC_VALID_BIT);
+    ev_rec_hump(1505U, 40U, 3U, false);
+    check_u32("ev hump invalid: count", g_ev_rec.count, 6U);
+    check_u32("ev hump invalid: byte", g_ev_rec.records[5].count, 3U);
+
+    /* RUN_MAX: nothing for 0 after BEGIN, once per change. */
+    ev_rec_max(1510U, 0U);
+    check_u32("ev max 0 after begin: count", g_ev_rec.count, 6U);
+    ev_rec_max(1520U, 150U);
+    check_u32("ev max: count", g_ev_rec.count, 7U);
+    check_u32("ev max: type", g_ev_rec.records[6].type, EV_REC_RUN_MAX);
+    check_u32("ev max: value", (uint32_t)g_ev_rec.records[6].value, 150U);
+    ev_rec_max(1530U, 150U);
+    check_u32("ev max unchanged: count", g_ev_rec.count, 7U);
+    ev_rec_max(1540U, 180U);
+    check_u32("ev max changed: count", g_ev_rec.count, 8U);
+
+    /* Ordering: the times never go backwards. */
+    for (i = 1U; i < g_ev_rec.count; i++)
+    {
+        check_u32("ev order", (g_ev_rec.records[i].ms
+                               >= g_ev_rec.records[i - 1U].ms) ? 1U : 0U, 1U);
+    }
+
+    /* Full: the earliest events stay, the rest are counted, no wrap. */
+    for (i = 0U; i < 100U; i++)
+    {
+        ev_rec_hump(2000U + i, 1U, 3U, true);
+    }
+
+    check_u32("ev full: count", g_ev_rec.count, EV_REC_CAPACITY);
+    check_u32("ev full: dropped", g_ev_rec.dropped,
+              8U + 100U - EV_REC_CAPACITY);
+    check_u32("ev full: first kept", g_ev_rec.records[0].type,
+              EV_REC_LINE_LOST);
+
+    /* Frozen: nothing more is logged. */
+    run_rec_freeze();
+    ev_rec_hump(9000U, 1U, 4U, true);
+    ev_rec_max(9010U, 999U);
+    check_u32("ev frozen: dropped", g_ev_rec.dropped,
+              8U + 100U - EV_REC_CAPACITY);
+
+    /* BEGIN again clears it, including the edge memory. */
+    run_rec_begin();
+    check_u32("ev rebegin: count", g_ev_rec.count, 0U);
+    check_u32("ev rebegin: dropped", g_ev_rec.dropped, 0U);
+    ev_rec_max(3005U, 0U);
+    check_u32("ev rebegin: max 0 logs nothing", g_ev_rec.count, 0U);
+    ev_step(3000U, true, true, 5, false);
+    check_u32("ev rebegin: no stale edge", g_ev_rec.count, 0U);
+}
+
+
 int
 main(int argc, char * argv[])
 {
@@ -418,6 +542,7 @@ main(int argc, char * argv[])
     test_wrap_keeps_newest();
     test_freeze_and_reset();
     test_bc_ring();
+    test_ev_rec();
 #if B4_RECORDER
     test_b4_ring();
 #endif

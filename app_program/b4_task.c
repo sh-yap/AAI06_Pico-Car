@@ -968,6 +968,7 @@ b4_task_sample_task (INT stacd, void * p_exinf)
         if (0U != (pattern & B4_TASK_FLAG_RUN_RESET))
         {
             (void)b4_proc_clear_run_maximum();
+            g_b4_task_humps = 0U;   /* Per run; this task also counts. */
         }
 
         b4_task_calibrate(pattern);

@@ -57,6 +57,15 @@
 # b4_types_motion_t / b4_types_turn_t (from motion_turn); tilt =
 # b4_types_tilt_t; flags = raw byte, then 0/1 columns valid, mag_new,
 # height_valid, impact, started, completed, stale.
+# Event log: if the image also has g_ev_rec (whole-run log of line losses,
+# ramp edges and hump results, 62 events, earliest kept), the same command
+# dumps it to <time>_<name>_events.bin and writes <time>_<name>_events.csv:
+# ms, event (LINE_LOST value = steer before the loss; LINE_BACK value = ms
+# since LINE_LOST; RAMP_START / RAMP_END value 0; HUMP_DONE value = newest
+# height in 0.1 mm; RUN_MAX value = the word's highest height in 0.1 mm,
+# logged when it changes), value, count (hump count for HUMP_DONE), valid
+# (HUMP_DONE only: the word's height was valid; empty otherwise).  With
+# -File, pass the dump as -EvFile.
 # A warning is printed if the ring was not frozen (run still going, or the
 # image was reset before it ended).
 
@@ -66,6 +75,7 @@ param(
     [string]$File    = "",
     [string]$BcFile  = "",
     [string]$B4File  = "",
+    [string]$EvFile  = "",
     [string]$OpenOcd = "C:\tools\openocd-rpi-2.3.1",
     [string]$Nm      = "C:\tools\xpack-arm-none-eabi-gcc-15.2.1-1.1\bin\arm-none-eabi-nm.exe",
     [int]$Speed      = 5000,
@@ -85,6 +95,11 @@ $bcRecBytes  = @(20, 36)
 $bcMagic     = 0x31524342
 $b4Magic     = 0x31523442
 $b4RecBytes  = 40
+$evMagic     = 0x31564545
+$evRecBytes  = 8
+$evHeader    = 16
+$evNames     = @("?0", "LINE_LOST", "LINE_BACK", "RAMP_START", "RAMP_END",
+                 "HUMP_DONE", "RUN_MAX")
 $magic       = 0x31434552
 $lineNames   = @("LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION")
 $stateNames  = @("INITIALISE", "READY", "CALIBRATE", "FOLLOW_LINE",
@@ -104,6 +119,9 @@ if ($File -ne "") {
     $b4Bin = ""
     if ($B4File -ne "") { $b4Bin = (Resolve-Path $B4File).Path }
     $b4Csv = (Join-Path (Split-Path $bin) ([System.IO.Path]::GetFileNameWithoutExtension($bin))) + "_b4.csv"
+    $evBin = ""
+    if ($EvFile -ne "") { $evBin = (Resolve-Path $EvFile).Path }
+    $evCsv = (Join-Path (Split-Path $bin) ([System.IO.Path]::GetFileNameWithoutExtension($bin))) + "_events.csv"
 }
 else {
     if ($Elf -eq "") {
@@ -159,12 +177,27 @@ else {
         $b4BinTcl = $b4Bin -replace "\\", "/"
         $b4Cmd    = @("-c", ("dump_image {{{0}}} 0x{1:x8} 0x{2:x}" -f $b4BinTcl, $b4Addr, $b4Size))
     }
+    # Optional event log, same session.
+    $evBin = ""
+    $evCsv = Join-Path $outDir ("{0}_{1}_events.csv" -f $stamp, $Name)
+    $evCmd = @()
+    $evSym = (& $Nm -S --defined-only $Elf) | Where-Object { $_ -match "\sg_ev_rec$" }
+    if ($evSym) {
+        $k      = ($evSym | Select-Object -First 1).Trim() -split "\s+"
+        $evAddr = [Convert]::ToUInt32($k[0], 16)
+        $evSize = [Convert]::ToUInt32($k[1], 16)
+        Write-Host ("g_ev_rec at 0x{0:x8}, {1} bytes" -f $evAddr, $evSize)
+        $evBin    = Join-Path $outDir ("{0}_{1}_events.bin" -f $stamp, $Name)
+        $evBinTcl = $evBin -replace "\\", "/"
+        $evCmd    = @("-c", ("dump_image {{{0}}} 0x{1:x8} 0x{2:x}" -f $evBinTcl, $evAddr, $evSize))
+    }
     & (Join-Path $OpenOcd "openocd.exe") -s (Join-Path $OpenOcd "scripts") `
         -f interface/cmsis-dap.cfg -f target/rp2040.cfg `
         -c "adapter speed $Speed" -c init `
         -c ("dump_image {{{0}}} 0x{1:x8} 0x{2:x}" -f $binTcl, $addr, $size) `
         @bcCmd `
         @b4Cmd `
+        @evCmd `
         -c shutdown
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $bin)) {
         Write-Error "OpenOCD dump failed (probe connected? car powered?)"
@@ -369,5 +402,47 @@ if ($b4Bin -ne "") {
         [System.IO.File]::WriteAllText($b4Csv, $db.ToString(), [System.Text.Encoding]::ASCII)
         Write-Host ("{0} Buddy 4 rows (total {1}, frozen {2}), longest dt_us {3}" -f $dn, $dTotal, $dFrozen, $dMaxUs)
         Write-Host "Buddy 4 CSV: $b4Csv"
+    }
+}
+
+# 6. Event log, if it was dumped.
+if ($evBin -ne "") {
+    $e = [System.IO.File]::ReadAllBytes($evBin)
+    if ($e.Length -lt $evHeader) { Write-Error "Event dump too short ($($e.Length) bytes)"; exit 1 }
+    $eMagic   = [BitConverter]::ToUInt32($e, 0)
+    $eRecSz   = [BitConverter]::ToUInt16($e, 4)
+    $eCap     = [BitConverter]::ToUInt16($e, 6)
+    $eCount   = [BitConverter]::ToUInt16($e, 8)
+    $eDropped = [BitConverter]::ToUInt16($e, 10)
+    $eFrozen  = [BitConverter]::ToUInt16($e, 12)
+    if ($eMagic -ne $evMagic) {
+        Write-Warning ("No event data: magic 0x{0:x8}" -f $eMagic)
+    }
+    elseif ($eRecSz -ne $evRecBytes) {
+        Write-Error "Event record size $eRecSz, decoder expects $evRecBytes"; exit 1
+    }
+    elseif ($e.Length -lt ($evHeader + $eCap * $eRecSz)) {
+        Write-Error "Event dump shorter than the log"; exit 1
+    }
+    else {
+        if ($eFrozen -eq 0) { Write-Warning "Event log not frozen." }
+        $en = [Math]::Min([int]$eCap, [int]$eCount)
+        $eb = New-Object System.Text.StringBuilder
+        [void]$eb.AppendLine("row,ms,event,value,count,valid")
+        for ($i = 0; $i -lt $en; $i++) {
+            $o = $evHeader + $i * $eRecSz
+            $eType = $e[$o + 6]
+            $eCnt  = $e[$o + 7] -band 0x7F
+            $eVal  = ""
+            if ($eType -eq 5) {
+                $eVal = ($e[$o + 7] -shr 7) -band 1
+            }
+            [void]$eb.AppendLine(("{0},{1},{2},{3},{4},{5}" -f `
+                $i, [BitConverter]::ToUInt32($e, $o), (Get-Name $evNames $eType),
+                [BitConverter]::ToInt16($e, $o + 4), $eCnt, $eVal))
+        }
+        [System.IO.File]::WriteAllText($evCsv, $eb.ToString(), [System.Text.Encoding]::ASCII)
+        Write-Host ("{0} events (dropped {1}, frozen {2})" -f $en, $eDropped, $eFrozen)
+        Write-Host "Events CSV: $evCsv"
     }
 }
