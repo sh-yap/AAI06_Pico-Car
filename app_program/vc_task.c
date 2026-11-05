@@ -2034,7 +2034,8 @@ vc_task_entry (INT stacd, void * p_exinf)
          * next start, so a fault that lasted one step still shows why the
          * car stopped.  Set before the state, so the state message that
          * reports EMERGENCY_STOP already carries the reason.  While
-         * idle, the IMU bit follows the live value instead. */
+         * idle, the IMU bit follows the live value instead.  During
+         * calibration it is not published. */
         if ((VC_STATE_READY == before) && (VC_STATE_READY != out.state))
         {
             g_faults_seen = 0U;                 /* New run: clean slate. */
@@ -2050,6 +2051,17 @@ vc_task_entry (INT stacd, void * p_exinf)
                                          & (uint16_t) ~VC_FAULT_IMU)
                                         | in.serious_faults
                                         | terrain_fault);
+        }
+        else if (VC_STATE_CALIBRATE == g_vc.state)
+        {
+            /* START makes Buddy 4 re-level, which briefly makes it not
+             * ready on purpose, so the IMU bit is left out here.  A real
+             * failure is reported by VC_FAULT_CAL_BUDDY4 (cal_fail).
+             * Calibration ends only with Buddy 4 ready, so an IMU bit
+             * seen later is a real fault. */
+            g_faults_seen = (uint16_t) ((g_faults_seen
+                                         & (uint16_t) ~VC_FAULT_IMU)
+                                        | in.serious_faults);
         }
         else
         {
