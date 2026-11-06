@@ -51,21 +51,11 @@ buddy3_tick_handler(void *p_exinf)
 }
 
 /*
- * Fallback threshold for the dedicated barcode IR sensor (GP28 / ADC2),
- * used when the START sweep did not see the sensor go black (it reads
- * beside the line, so it may not).  Measured 2026-10-27, room light, on the course barcode print, after
- * rotating the sensor so emitter and receiver sit side by side along
- * the bars (across the direction of travel), ~3-5 mm above the paper
- * (car stationary, sensor centred on each element):
- *   thin 3 mm white gap between bars ~1060, thin 3 mm bar ~3730.
- * 2026-10-29 driving test (*F*): white ~150-260, but a thin bar next to
- * a wide white space read only ~2080, so 2400 missed it and the capture
- * ended early.  PROVISIONAL: ~midway between thin gap (~1060) and that
- * thin bar (~2080).  Re-measure both (car still, sensor centred on the
- * thin bar beside a wide space, and on the thin gap between two wide
- * bars) and set the threshold midway.
+ * The barcode sensor (GP28 / ADC2) is classified from raw samples in
+ * barcode.c. That module learns this scan's white and black levels and
+ * reports 0 until it has credible levels, so there is no fixed ADC
+ * fallback controlling acquisition.
  */
-#define BARCODE_IR_THRESHOLD     1600U
 
 /*
  * Output message buffer - default choice (message buffer, matching
@@ -286,7 +276,7 @@ void buddy3_get_readings(uint16_t *p_centre, uint16_t *p_right)
 
 uint16_t buddy3_barcode_threshold(void)
 {
-    return line_cal_barcode_threshold(BARCODE_IR_THRESHOLD);
+    return barcode_get_learned_threshold();
 }
 
 /* Console log of a finished sweep: what each sensor saw and the result. */
@@ -300,16 +290,15 @@ static void print_calibration(void)
 
     tm_printf((UB *)"[cal] b3 state=%d centre lo=%u hi=%u thr=%u full=%u"
                     " right lo=%u hi=%u thr=%u"
-                    " barcode lo=%u hi=%u thr=%u (%s)\n",
+                    " barcode lo=%u hi=%u sweep=%u active=%u (%s)\n",
               (INT)line_cal_state(),
               (UINT)result.centre.low, (UINT)result.centre.high,
               (UINT)result.centre.threshold, (UINT)result.centre_full_black,
               (UINT)result.right.low, (UINT)result.right.high,
               (UINT)result.right.threshold,
               (UINT)result.barcode.low, (UINT)result.barcode.high,
-              (UINT)barcode_threshold,
-              (UB *)((0U != result.barcode.threshold) ? "learned"
-                                                       : "default"));
+              (UINT)result.barcode.threshold, (UINT)barcode_threshold,
+              (UB *)((0U != barcode_threshold) ? "active" : "pending"));
 }
 
 /* Act on a new request, then record this cycle's readings in the sweep. */
@@ -465,9 +454,6 @@ void buddy3_task(INT stacd, void *exinf)
         line_error = line_get_error(readings);
         line_sensors = line_get_sensor_bits(readings);
 
-        barcode_is_black = ir_sensor_is_black(
-            readings.barcode, buddy3_barcode_threshold());
-
         tk_get_tim(&sys_time);
         timestamp_ms = sys_time.lo;
 
@@ -478,8 +464,11 @@ void buddy3_task(INT stacd, void *exinf)
         encoder_position =
             (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
 
-        barcode_update(barcode_is_black, timestamp_ms, encoder_position);
+        barcode_update_raw(readings.barcode, timestamp_ms, encoder_position);
         barcode_check_end(encoder_position);
+
+        /* Deferred until finish/decode may have rebuilt the final edges. */
+        barcode_is_black = barcode_get_black_state();
 
 #if BUDDY3_SCAN_TO_MQTT
         /* Before barcode_get_command(), which clears the capture. */

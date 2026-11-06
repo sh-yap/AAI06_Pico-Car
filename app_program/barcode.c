@@ -82,6 +82,69 @@
 #define BARCODE_MIN_EDGES        6U
 
 /*
+ * Raw acquisition buffer. One sample per encoder position is kept, so a
+ * stationary sensor cannot fill it with repeated readings.
+ *
+ * 480 samples at the 100 Hz task rate is 4.8 s. The largest complete
+ * saved scan (4 Nov 2026, 30 edges) used 283 samples from its first edge
+ * to completion, so this leaves room for the preceding quiet distance.
+ * The buffer is deliberately bounded: a longer capture is reported as
+ * invalid instead of decoding an overwritten prefix.
+ */
+#define BARCODE_RAW_MAX_SAMPLES       480U
+
+/*
+ * Level learning: a 128-bin histogram is 32 ADC counts per bin. The
+ * split is chosen by Otsu's between-class variance, then the median of
+ * each class is the level. This is not the minimum/maximum, so one hot
+ * or dark sample cannot define a level.
+ */
+#define BARCODE_LEVEL_BINS            128U
+#define BARCODE_LEVEL_BIN_SHIFT       5U
+#define BARCODE_LEVEL_BIN_MID         16U
+#define BARCODE_LEVEL_MIN_SAMPLES     8U
+#define BARCODE_LEVEL_MIN_CLASS       2U
+
+/*
+ * Credibility: the two levels must stand clear of within-level noise.
+ * 64 counts is a floor for the 12-bit ADC, not a barcode threshold.
+ * Low/high separation below this, or below four times the measured
+ * noise, is treated as no readable barcode.
+ */
+#define BARCODE_LEVEL_MIN_SEPARATION  64U
+#define BARCODE_LEVEL_NOISE_FACTOR    4U
+#define BARCODE_LEVEL_GATE_DIV        8U
+
+/*
+ * Slow level drift is followed with 32-sample local midpoints, using
+ * the 10th/90th percentile of each block (not its extrema). A block
+ * needs 16 samples and a credible local span; otherwise the nearest
+ * valid block midpoint is used.
+ */
+#define BARCODE_LEVEL_BLOCK           32U
+#define BARCODE_LEVEL_LOCAL_MIN       16U
+#define BARCODE_LEVEL_LOCAL_LOW_PCT   10U
+#define BARCODE_LEVEL_LOCAL_HIGH_PCT  90U
+#define BARCODE_LEVEL_LOCAL_DIV       4U
+#define BARCODE_RAW_BLOCKS \
+    ((BARCODE_RAW_MAX_SAMPLES + BARCODE_LEVEL_BLOCK - 1U) \
+     / BARCODE_LEVEL_BLOCK)
+
+/* Hysteresis follows the measured noise, capped at a quarter of the span. */
+#define BARCODE_LEVEL_HYST_FACTOR     2U
+#define BARCODE_LEVEL_MIN_HYST        8U
+
+/*
+ * If the midpoint read fails, try seven thresholds at 1/8 .. 7/8 of
+ * the learned level span. These are fractions of the observed
+ * separation, never fixed ADC values. The first decode is always the
+ * midpoint. Seven trials stay bounded and each crosses the span once.
+ */
+#define BARCODE_RAW_TRIALS            7U
+#define BARCODE_RAW_TRIAL_FIRST       1U
+#define BARCODE_RAW_TRIAL_DIV         8U
+
+/*
  * Duplicate guard: after a valid barcode, a capture that begins within
  * the guard and reads the same character (or is unreadable) is
  * dropped, so one barcode
@@ -256,6 +319,35 @@ static char guard_char = C39_CHAR_NONE;
 
 /* The current capture began within the duplicate guard. */
 static bool capture_in_guard = false;
+
+
+/* Raw ADC samples for the current acquisition, oldest first. */
+static uint16_t raw_adc[BARCODE_RAW_MAX_SAMPLES];
+static int32_t raw_encoder[BARCODE_RAW_MAX_SAMPLES];
+static uint16_t raw_time_ms[BARCODE_RAW_MAX_SAMPLES];
+
+/* Histogram used only while learning the current capture's levels. */
+static uint16_t raw_hist[BARCODE_LEVEL_BINS];
+
+static uint16_t raw_count = 0U;
+static uint32_t raw_start_ms = 0U;
+
+/* True once this acquisition has been driven by the raw-sample API. */
+static bool raw_mode = false;
+static bool raw_overflow = false;
+
+/* Levels and threshold learned from the current raw samples. */
+static bool raw_levels_valid = false;
+static uint16_t raw_low_level = 0U;
+static uint16_t raw_high_level = 0U;
+static uint16_t raw_threshold = 0U;
+static uint16_t raw_hysteresis = 0U;
+
+/* Most recent raw sample classified with the learned threshold. */
+static bool raw_black_state = false;
+
+/* First reconstructed raw edge has latched this capture's guard state. */
+static bool raw_guard_latched = false;
 
 
 /* How a glitch element is merged in one decode variant. */
@@ -799,6 +891,850 @@ static char barcode_decode_char(void)
 }
 
 
+/* Median ADC value of histogram bins [first, last), count non-zero. */
+static uint16_t barcode_raw_hist_median(uint8_t first, uint8_t last,
+                                        uint32_t count)
+{
+    uint32_t seen = 0U;
+    uint8_t bin;
+
+    for (bin = first; bin < last; bin++)
+    {
+        seen += raw_hist[bin];
+
+        if (seen >= ((count + 1U) / 2U))
+        {
+            /* bin is at most 127, so the shifted value fits uint16_t. */
+            return (uint16_t)(((uint16_t)bin << BARCODE_LEVEL_BIN_SHIFT)
+                              + BARCODE_LEVEL_BIN_MID);
+        }
+    }
+
+    /* last is at least 1 here; keep the bound explicit for the cast. */
+    return (uint16_t)(((uint16_t)(last - 1U) << BARCODE_LEVEL_BIN_SHIFT)
+                      + BARCODE_LEVEL_BIN_MID);
+}
+
+
+/*
+ * Median difference between adjacent samples that both stay on one
+ * level. Reusing the ADC histogram keeps the extra RAM at zero. A
+ * difference histogram ignores slow level drift across a long bar.
+ */
+static bool barcode_raw_pair_noise(uint16_t low_limit, uint16_t high_limit,
+                                   bool b_high, uint16_t *p_noise)
+{
+    uint32_t count = 0U;
+    uint32_t difference;
+    uint16_t i;
+    uint8_t bin;
+    bool b_pair;
+
+    for (bin = 0U; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        raw_hist[bin] = 0U;
+    }
+
+    for (i = 1U; i < raw_count; i++)
+    {
+        if (b_high)
+        {
+            b_pair = ((int32_t)raw_adc[i - 1U] >= (int32_t)high_limit)
+                     && ((int32_t)raw_adc[i] >= (int32_t)high_limit);
+        }
+        else
+        {
+            b_pair = ((int32_t)raw_adc[i - 1U] <= (int32_t)low_limit)
+                     && ((int32_t)raw_adc[i] <= (int32_t)low_limit);
+        }
+
+        if (b_pair)
+        {
+            difference = (raw_adc[i] > raw_adc[i - 1U])
+                         ? (uint32_t)(raw_adc[i] - raw_adc[i - 1U])
+                         : (uint32_t)(raw_adc[i - 1U] - raw_adc[i]);
+            bin = (uint8_t)(difference >> BARCODE_LEVEL_BIN_SHIFT);
+
+            if (bin >= BARCODE_LEVEL_BINS)
+            {
+                bin = (uint8_t)(BARCODE_LEVEL_BINS - 1U);
+            }
+
+            raw_hist[bin] = (uint16_t)(raw_hist[bin] + 1U);
+            count++;
+        }
+    }
+
+    if (count < BARCODE_LEVEL_MIN_CLASS)
+    {
+        return false;
+    }
+
+    *p_noise = barcode_raw_hist_median(0U, BARCODE_LEVEL_BINS, count);
+    return true;
+}
+
+
+/*
+ * Learn robust low/high levels and within-level noise from raw_adc[].
+ * Returns false until the samples contain two credible levels.
+ */
+/* Fill raw_hist[] from raw_adc[] and return the sample count. */
+static uint32_t barcode_raw_histogram(void)
+{
+    uint32_t total = 0U;
+    uint16_t i;
+    uint8_t bin;
+
+    for (bin = 0U; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        raw_hist[bin] = 0U;
+    }
+
+    for (i = 0U; i < raw_count; i++)
+    {
+        /* ADC is 12-bit; the clamp only protects against a bad caller. */
+        bin = (uint8_t)(raw_adc[i] >> BARCODE_LEVEL_BIN_SHIFT);
+
+        if (bin >= BARCODE_LEVEL_BINS)
+        {
+            bin = (uint8_t)(BARCODE_LEVEL_BINS - 1U);
+        }
+
+        raw_hist[bin] = (uint16_t)(raw_hist[bin] + 1U);
+    }
+
+    for (bin = 0U; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        total += raw_hist[bin];
+    }
+
+    return total;
+}
+
+
+/* Otsu split bin that best separates the two histogram classes. */
+static bool barcode_raw_otsu_split(uint32_t total, uint8_t *p_split)
+{
+    uint32_t sum_all = 0U;
+    uint32_t weight_low = 0U;
+    uint32_t sum_low = 0U;
+    uint32_t weight_high;
+    uint32_t sum_high;
+    uint64_t score;
+    uint64_t best_score = 0U;
+    uint64_t numerator;
+    uint64_t denominator;
+    int64_t difference;
+    uint8_t split = 0U;
+    uint8_t bin;
+    uint8_t t;
+
+    for (bin = 0U; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        sum_all += (uint32_t)raw_hist[bin] * (uint32_t)bin;
+    }
+
+    /* Otsu split: maximise the variance between the two classes. */
+    for (t = 1U; t < BARCODE_LEVEL_BINS; t++)
+    {
+        weight_low += raw_hist[t - 1U];
+        sum_low += (uint32_t)raw_hist[t - 1U] * (uint32_t)(t - 1U);
+
+        if ((0U != weight_low) && (weight_low != total))
+        {
+            weight_high = total - weight_low;
+            sum_high = sum_all - sum_low;
+            difference = ((int64_t)sum_low * (int64_t)weight_high)
+                         - ((int64_t)sum_high * (int64_t)weight_low);
+
+            if (difference < 0)
+            {
+                difference = -difference;
+            }
+
+            numerator = (uint64_t)difference * (uint64_t)difference;
+            denominator = (uint64_t)weight_low * (uint64_t)weight_high;
+            score = numerator / denominator;
+
+            if (score > best_score)
+            {
+                best_score = score;
+                split = t;
+            }
+        }
+    }
+
+    *p_split = split;
+    return ((0U != best_score) && (0U != split));
+}
+
+
+/*
+ * Learn robust low/high levels and within-level noise from raw_adc[].
+ * Returns false until the samples contain two credible levels.
+ */
+static bool barcode_raw_find_levels(void)
+{
+    uint32_t total;
+    uint32_t low_count = 0U;
+    uint32_t high_count = 0U;
+    int32_t low_limit;
+    int32_t high_limit;
+    uint16_t low;
+    uint16_t high;
+    uint16_t separation;
+    uint16_t gate;
+    uint16_t noise_low;
+    uint16_t noise_high;
+    uint16_t noise;
+    uint8_t split = 0U;
+    uint8_t bin;
+
+    if (raw_count < BARCODE_LEVEL_MIN_SAMPLES)
+    {
+        return false;
+    }
+
+    total = barcode_raw_histogram();
+
+    if (!barcode_raw_otsu_split(total, &split))
+    {
+        return false;
+    }
+
+    for (bin = 0U; bin < split; bin++)
+    {
+        low_count += raw_hist[bin];
+    }
+
+    for (bin = split; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        high_count += raw_hist[bin];
+    }
+
+    if ((low_count < BARCODE_LEVEL_MIN_CLASS) ||
+        (high_count < BARCODE_LEVEL_MIN_CLASS))
+    {
+        return false;
+    }
+
+    low = barcode_raw_hist_median(0U, split, low_count);
+    high = barcode_raw_hist_median(split, BARCODE_LEVEL_BINS, high_count);
+
+    if (high <= low)
+    {
+        return false;
+    }
+
+    separation = (uint16_t)(high - low);
+    gate = (uint16_t)(separation / BARCODE_LEVEL_GATE_DIV);
+
+    if (0U == gate)
+    {
+        gate = 1U;
+    }
+
+    low_limit = (int32_t)low + (int32_t)gate;
+    high_limit = (int32_t)high - (int32_t)gate;
+
+    if (!barcode_raw_pair_noise((uint16_t)low_limit, (uint16_t)high_limit,
+                                false, &noise_low) ||
+        !barcode_raw_pair_noise((uint16_t)low_limit, (uint16_t)high_limit,
+                                true, &noise_high))
+    {
+        return false;
+    }
+
+    noise = (noise_low > noise_high) ? noise_low : noise_high;
+
+    if ((uint32_t)separation < (BARCODE_LEVEL_MIN_SEPARATION
+                                + ((uint32_t)noise
+                                   * BARCODE_LEVEL_NOISE_FACTOR)))
+    {
+        return false;
+    }
+
+    raw_low_level = low;
+    raw_high_level = high;
+    raw_threshold = (uint16_t)((uint32_t)low
+                               + ((uint32_t)separation / 2U));
+    raw_hysteresis = (uint16_t)(((uint32_t)noise
+                                 * BARCODE_LEVEL_HYST_FACTOR)
+                                + BARCODE_LEVEL_MIN_HYST);
+
+    if (raw_hysteresis > (separation / 4U))
+    {
+        raw_hysteresis = (uint16_t)(separation / 4U);
+    }
+
+    raw_levels_valid = true;
+    return true;
+}
+
+
+/* Value at a histogram percentile, on the same bin grid as the levels. */
+static uint16_t barcode_raw_hist_percentile(uint32_t count, uint8_t percent)
+{
+    uint32_t target;
+    uint32_t seen = 0U;
+    uint8_t bin;
+
+    target = ((count * (uint32_t)percent) + 99U) / 100U;
+
+    if (target < 1U)
+    {
+        target = 1U;
+    }
+
+    for (bin = 0U; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        seen += raw_hist[bin];
+
+        if (seen >= target)
+        {
+            /* bin is at most 127, so the shifted value fits uint16_t. */
+            return (uint16_t)(((uint16_t)bin << BARCODE_LEVEL_BIN_SHIFT)
+                              + BARCODE_LEVEL_BIN_MID);
+        }
+    }
+
+    return 4095U;
+}
+
+
+/* Local midpoint for one block, or 0 if the block has no two levels. */
+static uint16_t barcode_raw_local_threshold(uint16_t first,
+                                            uint16_t count)
+{
+    uint32_t total = 0U;
+    uint32_t below = 0U;
+    uint32_t above = 0U;
+    uint16_t low;
+    uint16_t high;
+    uint16_t separation;
+    uint16_t midpoint;
+    uint16_t i;
+    uint8_t bin;
+
+    if (count < BARCODE_LEVEL_LOCAL_MIN)
+    {
+        return 0U;
+    }
+
+    for (bin = 0U; bin < BARCODE_LEVEL_BINS; bin++)
+    {
+        raw_hist[bin] = 0U;
+    }
+
+    for (i = 0U; i < count; i++)
+    {
+        bin = (uint8_t)(raw_adc[first + i] >> BARCODE_LEVEL_BIN_SHIFT);
+
+        if (bin >= BARCODE_LEVEL_BINS)
+        {
+            bin = (uint8_t)(BARCODE_LEVEL_BINS - 1U);
+        }
+
+        raw_hist[bin] = (uint16_t)(raw_hist[bin] + 1U);
+        total++;
+    }
+
+    low = barcode_raw_hist_percentile(total,
+                                      BARCODE_LEVEL_LOCAL_LOW_PCT);
+    high = barcode_raw_hist_percentile(total,
+                                       BARCODE_LEVEL_LOCAL_HIGH_PCT);
+
+    if (high <= low)
+    {
+        return 0U;
+    }
+
+    separation = (uint16_t)(high - low);
+
+    if ((separation < BARCODE_LEVEL_MIN_SEPARATION) ||
+        (separation < ((uint16_t)(raw_high_level - raw_low_level)
+                       / BARCODE_LEVEL_LOCAL_DIV)))
+    {
+        return 0U;
+    }
+
+    midpoint = (uint16_t)((uint32_t)low
+                          + ((uint32_t)separation / 2U));
+
+    for (i = 0U; i < count; i++)
+    {
+        if (raw_adc[first + i] < midpoint)
+        {
+            below++;
+        }
+        else
+        {
+            above++;
+        }
+    }
+
+    if ((below < BARCODE_LEVEL_MIN_CLASS) ||
+        (above < BARCODE_LEVEL_MIN_CLASS))
+    {
+        return 0U;
+    }
+
+    return midpoint;
+}
+
+
+/* Collect valid local block midpoints, in sample order. */
+static uint8_t barcode_raw_local_table(uint16_t centers[],
+                                       uint16_t thresholds[])
+{
+    uint16_t start = 0U;
+    uint16_t samples;
+    uint16_t value;
+    uint8_t count = 0U;
+
+    while ((start < raw_count) && (count < BARCODE_RAW_BLOCKS))
+    {
+        samples = (uint16_t)(raw_count - start);
+
+        if (samples > BARCODE_LEVEL_BLOCK)
+        {
+            samples = BARCODE_LEVEL_BLOCK;
+        }
+
+        value = barcode_raw_local_threshold(start, samples);
+
+        if (0U != value)
+        {
+            centers[count] = (uint16_t)(start + (samples / 2U));
+            thresholds[count] = value;
+            count++;
+        }
+
+        start = (uint16_t)(start + samples);
+    }
+
+    return count;
+}
+
+
+/* Interpolate the local midpoint; nearest valid block outside the table. */
+static uint16_t barcode_raw_local_at(uint16_t position, uint8_t count,
+                                     uint16_t const centers[],
+                                     uint16_t const thresholds[],
+                                     uint16_t fallback)
+{
+    int32_t threshold;
+    int32_t difference;
+    uint32_t span;
+    uint32_t offset;
+    uint8_t i;
+
+    if (0U == count)
+    {
+        return fallback;
+    }
+
+    if (position <= centers[0])
+    {
+        return thresholds[0];
+    }
+
+    if (position >= centers[count - 1U])
+    {
+        return thresholds[count - 1U];
+    }
+
+    for (i = 1U; i < count; i++)
+    {
+        if (position <= centers[i])
+        {
+            span = (uint32_t)(centers[i] - centers[i - 1U]);
+            offset = (uint32_t)(position - centers[i - 1U]);
+            difference = (int32_t)thresholds[i]
+                         - (int32_t)thresholds[i - 1U];
+            threshold = (int32_t)thresholds[i - 1U]
+                        + ((difference * (int32_t)offset)
+                           / (int32_t)span);
+            /* Interpolation stays between two uint16_t endpoints. */
+            return (uint16_t)threshold;
+        }
+    }
+
+    return thresholds[count - 1U];
+}
+
+
+/* Local midpoint when enabled, otherwise the constant trial threshold. */
+static uint16_t barcode_raw_sample_threshold(uint16_t position,
+                                             uint16_t fallback,
+                                             bool b_local, uint8_t count,
+                                             uint16_t const centers[],
+                                             uint16_t const thresholds[])
+{
+    if (!b_local)
+    {
+        return fallback;
+    }
+
+    return barcode_raw_local_at(position, count, centers, thresholds,
+                                fallback);
+}
+
+
+/*
+ * Encoder position where the ADC line crosses crossing, between two
+ * adjacent samples. The result is clamped to the two sample positions.
+ */
+static int32_t barcode_raw_crossing(uint16_t previous_adc,
+                                    int32_t previous_encoder,
+                                    uint16_t current_adc,
+                                    int32_t current_encoder,
+                                    int32_t crossing)
+{
+    int32_t denominator;
+    int32_t numerator;
+    int64_t delta_encoder;
+    int64_t quotient;
+    int64_t result;
+    int64_t lower;
+    int64_t upper;
+
+    denominator = (int32_t)current_adc - (int32_t)previous_adc;
+
+    if (0 == denominator)
+    {
+        return current_encoder;
+    }
+
+    numerator = crossing - (int32_t)previous_adc;
+    delta_encoder = (int64_t)current_encoder - (int64_t)previous_encoder;
+
+    /* numerator is 16-bit and delta_encoder 32-bit, so this fits int64_t. */
+    quotient = ((int64_t)numerator * delta_encoder) / (int64_t)denominator;
+    result = (int64_t)previous_encoder + quotient;
+    lower = (previous_encoder < current_encoder)
+            ? (int64_t)previous_encoder : (int64_t)current_encoder;
+    upper = (previous_encoder > current_encoder)
+            ? (int64_t)previous_encoder : (int64_t)current_encoder;
+
+    if (result < lower)
+    {
+        result = lower;
+    }
+
+    if (result > upper)
+    {
+        result = upper;
+    }
+
+    /* result is clamped between two int32_t endpoints, so this is safe. */
+    return (int32_t)result;
+}
+
+
+/* Add one reconstructed edge, dropping in-place flicker as before. */
+static void barcode_raw_add_edge(bool is_black, uint32_t timestamp_ms,
+                                 int32_t encoder_position)
+{
+    if ((edge_count > 0U) &&
+        (abs_counts(encoder_position
+                    - barcode_edges[edge_count - 1U].encoder_position)
+         < BARCODE_MIN_ELEMENT_COUNTS))
+    {
+        edge_count--;
+        return;
+    }
+
+    if (edge_count < BARCODE_MAX_EDGES)
+    {
+        barcode_edges[edge_count].is_black = is_black;
+        barcode_edges[edge_count].timestamp_ms = timestamp_ms;
+        barcode_edges[edge_count].encoder_position = encoder_position;
+        edge_count++;
+    }
+    else
+    {
+        barcode_overflow = true;
+    }
+}
+
+
+/* Widest stored element, used by the distance-based end gap. */
+static void barcode_raw_update_widest(void)
+{
+    int32_t widest = 0;
+    int32_t width;
+    uint16_t i;
+
+    for (i = 1U; i < edge_count; i++)
+    {
+        width = abs_counts(barcode_edges[i].encoder_position
+                           - barcode_edges[i - 1U].encoder_position);
+
+        if (width > widest)
+        {
+            widest = width;
+        }
+    }
+
+    widest_counts = widest;
+}
+
+
+/* Rebuild all live edges from raw samples with one threshold/hysteresis. */
+static void barcode_raw_rebuild_edges(uint16_t threshold,
+                                      uint16_t hysteresis, bool b_local)
+{
+    uint16_t local_center[BARCODE_RAW_BLOCKS];
+    uint16_t local_threshold[BARCODE_RAW_BLOCKS];
+    uint8_t local_count = 0U;
+    int32_t low_cross;
+    int32_t high_cross;
+    int32_t previous_encoder;
+    int32_t current_encoder;
+    int32_t position;
+    int32_t last_transition;
+    uint16_t previous_adc;
+    uint16_t current_adc;
+    uint16_t sample_threshold;
+    uint32_t timestamp_ms;
+    uint16_t i;
+    bool black;
+    bool any_transition = false;
+
+    edge_count = 0U;
+    widest_counts = 0;
+    barcode_overflow = raw_overflow;
+
+    if (0U == raw_count)
+    {
+        raw_black_state = false;
+        return;
+    }
+
+    if (b_local)
+    {
+        local_count = barcode_raw_local_table(local_center,
+                                              local_threshold);
+    }
+
+    previous_adc = raw_adc[0];
+    previous_encoder = raw_encoder[0];
+    sample_threshold = barcode_raw_sample_threshold(
+        0U, threshold, b_local, local_count, local_center,
+        local_threshold);
+    black = ((int32_t)previous_adc >= (int32_t)sample_threshold);
+    last_transition = last_activity_position;
+
+    for (i = 1U; i < raw_count; i++)
+    {
+        current_adc = raw_adc[i];
+        current_encoder = raw_encoder[i];
+        timestamp_ms = raw_start_ms + (uint32_t)raw_time_ms[i];
+        sample_threshold = barcode_raw_sample_threshold(
+            i, threshold, b_local, local_count, local_center,
+            local_threshold);
+        low_cross = (int32_t)sample_threshold - (int32_t)hysteresis;
+
+        if (low_cross < 0)
+        {
+            low_cross = 0;
+        }
+
+        high_cross = (int32_t)sample_threshold + (int32_t)hysteresis;
+
+        if (!black && ((int32_t)current_adc >= high_cross))
+        {
+            position = barcode_raw_crossing(previous_adc, previous_encoder,
+                                            current_adc, current_encoder,
+                                            high_cross);
+            barcode_raw_add_edge(true, timestamp_ms, position);
+            black = true;
+            last_transition = position;
+            any_transition = true;
+        }
+        else if (black && ((int32_t)current_adc <= low_cross))
+        {
+            position = barcode_raw_crossing(previous_adc, previous_encoder,
+                                            current_adc, current_encoder,
+                                            low_cross);
+            barcode_raw_add_edge(false, timestamp_ms, position);
+            black = false;
+            last_transition = position;
+            any_transition = true;
+        }
+        else
+        {
+            /* No threshold crossing between these two samples. */
+        }
+
+        previous_adc = current_adc;
+        previous_encoder = current_encoder;
+    }
+
+    raw_black_state = black;
+
+    if (any_transition)
+    {
+        last_activity_position = last_transition;
+    }
+
+    barcode_raw_update_widest();
+}
+
+
+/* Threshold at trial/8 of the learned level span; trials start at 1/8. */
+static uint16_t barcode_raw_trial_threshold(uint8_t trial)
+{
+    uint32_t separation;
+    uint32_t offset;
+
+    separation = (uint32_t)raw_high_level - (uint32_t)raw_low_level;
+    offset = (separation
+              * (uint32_t)(BARCODE_RAW_TRIAL_FIRST + trial))
+             / BARCODE_RAW_TRIAL_DIV;
+
+    return (uint16_t)((uint32_t)raw_low_level + offset);
+}
+
+
+/*
+ * Decode the raw capture. The midpoint is tried first; only if it fails
+ * are thresholds at fractions of the observed level span tried. A valid
+ * character wins only if every successful trial agrees on it.
+ */
+static char barcode_decode_raw_capture(void)
+{
+    char character;
+    char trial_character;
+    char unique = C39_CHAR_NONE;
+    uint16_t accepted_threshold = 0U;
+    uint16_t midpoint_threshold = raw_threshold;
+    uint16_t trial_threshold;
+    uint8_t trial;
+    bool b_conflict = false;
+
+    if (!raw_levels_valid || raw_overflow)
+    {
+        return C39_CHAR_NONE;
+    }
+
+    (void)barcode_raw_rebuild_edges(midpoint_threshold, raw_hysteresis,
+                                    true);
+    character = barcode_decode_char();
+
+    if (C39_CHAR_NONE != character)
+    {
+        return character;
+    }
+
+    for (trial = 0U; (trial < BARCODE_RAW_TRIALS) && !b_conflict; trial++)
+    {
+        trial_threshold = barcode_raw_trial_threshold(trial);
+
+        if (trial_threshold != raw_threshold)
+        {
+            (void)barcode_raw_rebuild_edges(trial_threshold,
+                                            raw_hysteresis, false);
+            trial_character = barcode_decode_char();
+
+            if (C39_CHAR_NONE != trial_character)
+            {
+                if (C39_CHAR_NONE == unique)
+                {
+                    unique = trial_character;
+                    accepted_threshold = trial_threshold;
+                }
+                else if (unique != trial_character)
+                {
+                    b_conflict = true;
+                }
+                else
+                {
+                    /* Another trial agrees with the first. */
+                }
+            }
+        }
+    }
+
+    if (b_conflict)
+    {
+        unique = C39_CHAR_NONE;
+    }
+
+    /* Leave the live edges and reported threshold on the final choice. */
+    if (C39_CHAR_NONE != unique)
+    {
+        raw_threshold = accepted_threshold;
+    }
+
+    (void)barcode_raw_rebuild_edges(
+        raw_threshold, raw_hysteresis,
+        (raw_threshold == midpoint_threshold));
+
+    return unique;
+}
+
+
+/* Keep one sample per encoder position so a stationary car cannot fill it. */
+static void barcode_raw_store_sample(uint16_t adc, uint32_t timestamp_ms,
+                                     int32_t encoder_position)
+{
+    uint32_t elapsed;
+    uint16_t time_delta;
+
+    if (0U == raw_count)
+    {
+        raw_start_ms = timestamp_ms;
+        raw_adc[0] = adc;
+        raw_encoder[0] = encoder_position;
+        raw_time_ms[0] = 0U;
+        raw_count = 1U;
+        return;
+    }
+
+    elapsed = timestamp_ms - raw_start_ms;
+    time_delta = (elapsed > UINT16_MAX)
+                 ? UINT16_MAX : (uint16_t)elapsed; /* Clamped, safe cast. */
+
+    if (encoder_position == raw_encoder[raw_count - 1U])
+    {
+        raw_adc[raw_count - 1U] = adc;
+        raw_time_ms[raw_count - 1U] = time_delta;
+        return;
+    }
+
+    if (raw_count >= BARCODE_RAW_MAX_SAMPLES)
+    {
+        raw_overflow = true;
+        return;
+    }
+
+    raw_adc[raw_count] = adc;
+    raw_encoder[raw_count] = encoder_position;
+    raw_time_ms[raw_count] = time_delta;
+    raw_count++;
+}
+
+
+/* Clear all raw acquisition state; the duplicate guard is separate. */
+static void barcode_raw_clear(void)
+{
+    raw_count = 0U;
+    raw_start_ms = 0U;
+    raw_mode = false;
+    raw_overflow = false;
+    raw_levels_valid = false;
+    raw_low_level = 0U;
+    raw_high_level = 0U;
+    raw_threshold = 0U;
+    raw_hysteresis = 0U;
+    raw_black_state = false;
+    raw_guard_latched = false;
+}
+
+
 /* Course barcode for a decoded character; INVALID if not a course code. */
 static barcode_t course_code_of(char character)
 {
@@ -836,6 +1772,8 @@ void barcode_reset(void)
     capture_in_guard = false;
     decoded_code = BARCODE_NONE;
     decoded_char = C39_CHAR_NONE;
+
+    barcode_raw_clear();
 }
 
 
@@ -956,6 +1894,65 @@ void barcode_update(
 }
 
 
+void barcode_update_raw(
+    uint16_t adc,
+    uint32_t timestamp_ms,
+    int32_t encoder_position
+)
+{
+    /* Do not overwrite a completed capture waiting to be processed. */
+    if (barcode_ready)
+    {
+        return;
+    }
+
+    if (!raw_mode)
+    {
+        barcode_raw_clear();
+        raw_mode = true;
+    }
+
+    /* Same distance-based duplicate guard expiry as barcode_update(). */
+    if (guard_active &&
+        (abs_counts(encoder_position - guard_position) >= guard_counts))
+    {
+        guard_active = false;
+    }
+
+    barcode_raw_store_sample(adc, timestamp_ms, encoder_position);
+
+    if (!state_valid)
+    {
+        state_valid = true;
+        last_activity_position = encoder_position;
+    }
+
+    if (barcode_raw_find_levels())
+    {
+        barcode_raw_rebuild_edges(raw_threshold, raw_hysteresis, true);
+
+        /* Latch once, while guard_active still describes capture start. */
+        if (!raw_guard_latched && (edge_count > 0U))
+        {
+            capture_in_guard = guard_active;
+            raw_guard_latched = true;
+        }
+    }
+    else
+    {
+        raw_levels_valid = false;
+        raw_low_level = 0U;
+        raw_high_level = 0U;
+        raw_threshold = 0U;
+        raw_hysteresis = 0U;
+        raw_black_state = false;
+        edge_count = 0U;
+        widest_counts = 0;
+        barcode_overflow = raw_overflow;
+    }
+}
+
+
 void barcode_finish_capture(void)
 {
     /*
@@ -968,7 +1965,15 @@ void barcode_finish_capture(void)
      */
     if (edge_count >= BARCODE_MIN_EDGES)
     {
-        decoded_char = barcode_decode_char();
+        if (raw_mode)
+        {
+            decoded_char = barcode_decode_raw_capture();
+        }
+        else
+        {
+            decoded_char = barcode_decode_char();
+        }
+
         decoded_code = course_code_of(decoded_char);
 
         /*
@@ -1064,6 +2069,18 @@ barcode_t barcode_get_code(void)
 char barcode_get_char(void)
 {
     return barcode_ready ? decoded_char : '\0';
+}
+
+
+uint16_t barcode_get_learned_threshold(void)
+{
+    return raw_levels_valid ? raw_threshold : 0U;
+}
+
+
+bool barcode_get_black_state(void)
+{
+    return raw_levels_valid ? raw_black_state : false;
 }
 
 

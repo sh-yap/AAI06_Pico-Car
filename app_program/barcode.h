@@ -44,6 +44,29 @@ void barcode_update(
     int32_t encoder_position
 );
 
+/*
+ * Update acquisition with one raw barcode ADC sample.
+ *
+ * The raw samples are buffered so the low (white) and high (black)
+ * levels can be learned from this scan, then classified into edges.
+ * Keep calling barcode_check_end() with the same encoder position.
+ * Do not mix this with barcode_update() during one acquisition.
+ */
+void barcode_update_raw(
+    uint16_t adc,
+    uint32_t timestamp_ms,
+    int32_t encoder_position
+);
+
+/*
+ * Threshold currently learned from the raw samples, or 0 while no
+ * credible black/white levels are available.
+ */
+uint16_t barcode_get_learned_threshold(void);
+
+/* Live raw-sample classification; false while no threshold is learned. */
+bool barcode_get_black_state(void);
+
 
 /*
  * Mark the current barcode capture as complete.
