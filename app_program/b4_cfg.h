@@ -98,7 +98,6 @@ typedef struct
     uint32_t mag_stale_after_ms;
     uint32_t motion_threshold_mg;
     uint32_t tilt_threshold_mg;
-    uint32_t impact_delta_threshold_mg;
     uint32_t impact_refractory_ms;
     uint32_t hump_start_k_tenths;
     uint32_t hump_complete_k_tenths;

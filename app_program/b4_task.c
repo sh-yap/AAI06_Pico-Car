@@ -33,6 +33,28 @@
 #define B4_REC_MAG                  (1)
 #endif
 
+/* 1 stops the recorder ring B4_REC_HUMP_STOP_SAMPLES after the first hump
+ * that finishes while driving (needs B4_RECORDER). */
+#ifndef B4_REC_HUMP_STOP
+#define B4_REC_HUMP_STOP            (0)
+#endif
+
+/* 1 does the same after the first impact event of the run (needs
+ * B4_RECORDER, not with B4_REC_HUMP_STOP). */
+#ifndef B4_REC_IMPACT_STOP
+#define B4_REC_IMPACT_STOP          (0)
+#endif
+
+#if (B4_REC_HUMP_STOP && B4_REC_IMPACT_STOP)
+#error "B4_REC_HUMP_STOP and B4_REC_IMPACT_STOP cannot both be 1"
+#endif
+
+#define B4_REC_ANY_STOP             (B4_REC_HUMP_STOP || B4_REC_IMPACT_STOP)
+
+#if B4_REC_ANY_STOP
+#define B4_REC_HUMP_STOP_SAMPLES    (200U)  /* 2 s at 10 ms.                */
+#endif
+
 #if B4_RECORDER
 #include "motion_encoder.h"
 #include "run_rec.h"
@@ -134,6 +156,12 @@ static uint32_t         g_b4_task_rec_mag_count = 0U;
 #endif
 static uint64_t         g_b4_task_rec_last_us = 0U;
 static bool             g_b4_task_b_rec_seen = false;
+#if B4_REC_ANY_STOP
+static uint32_t         g_b4_task_hs_prev_total = 0U;   /* Ring total seen. */
+static uint8_t          g_b4_task_hs_left = 0U;         /* Samples to add.  */
+static uint8_t          g_b4_task_hs_state = 0U;        /* 0 wait, 1 count,
+                                                           2 stopped.     */
+#endif
 #endif
 
 /** @brief Return the kernel time in milliseconds.
@@ -832,6 +860,73 @@ b4_task_rec_read_mag (void)
 }
 #endif /* B4_REC_MAG */
 
+#if B4_REC_ANY_STOP
+/** @brief Decide whether this sample is the first one after the stop.
+ *
+ * The Buddy 4 task is the only writer of the ring, so it keeps the state.
+ * A new run is seen when the ring total falls below the last one seen:
+ * the VC task sets it to 0 at BEGIN, and a stopped ring does not add, so
+ * the total only falls at a BEGIN.  The first hump that finishes while the
+ * drive word says driving starts a countdown; a hump finishing earlier (a
+ * carried car, the START pivot) is ignored.  With B4_REC_IMPACT_STOP the
+ * first impact event starts it instead, with no drive word check because
+ * impacts are only judged while driving.
+ *
+ * @param p_status The sample just processed.
+ * @return True when the sample must not be added to the ring.
+ */
+static bool
+b4_task_hump_stop_skip (b4_types_status_t const * p_status)
+{
+    uint32_t const total = g_b4_rec.total;
+    bool           b_skip = false;
+    bool           b_trigger;
+
+#if B4_REC_IMPACT_STOP
+    b_trigger = p_status->b_impact_event;
+#else
+    b_trigger = ((true == p_status->b_hump_completed_event) &&
+                 (0U != (g_b4_task_drive_word & B4_TASK_DRIVE_DRIVING_BIT)));
+#endif
+
+    if (total < g_b4_task_hs_prev_total)
+    {
+        g_b4_task_hs_state = 0U;            /* New run began. */
+        g_b4_task_hs_left  = 0U;
+    }
+
+    g_b4_task_hs_prev_total = total;
+
+    if (2U == g_b4_task_hs_state)
+    {
+        b_skip = true;
+    }
+    else if (1U == g_b4_task_hs_state)
+    {
+        if (0U == g_b4_task_hs_left)
+        {
+            g_b4_task_hs_state = 2U;
+            b_skip = true;
+        }
+        else
+        {
+            g_b4_task_hs_left--;
+        }
+    }
+    else if (true == b_trigger)
+    {
+        g_b4_task_hs_state = 1U;
+        g_b4_task_hs_left  = (uint8_t)B4_REC_HUMP_STOP_SAMPLES;
+    }
+    else
+    {
+        /* Waiting for the first hump while driving. */
+    }
+
+    return (b_skip);
+}
+#endif /* B4_REC_ANY_STOP */
+
 static void
 b4_task_record (b4_types_status_t const * p_status)
 {
@@ -840,6 +935,13 @@ b4_task_record (b4_types_status_t const * p_status)
     bool                      b_mag_new = false;
     uint64_t                  dt_us = 0U;
     uint32_t                  flags = 0U;
+
+#if B4_REC_ANY_STOP
+    if (true == b4_task_hump_stop_skip(p_status))
+    {
+        return;
+    }
+#endif
 
 #if B4_REC_MAG
     b_mag_new = b4_task_rec_read_mag();
@@ -969,6 +1071,7 @@ b4_task_sample_task (INT stacd, void * p_exinf)
         {
             (void)b4_proc_clear_run_maximum();
             g_b4_task_humps = 0U;   /* Per run; this task also counts. */
+            g_b4_task_impacts = 0U; /* Per run, like the hump count. */
         }
 
         b4_task_calibrate(pattern);

@@ -38,6 +38,21 @@
  *
  * The multiples remain provisional until flat driving traces set them.
  *
+ * An impact is a knock that is extreme on all three accelerometer axes. Each
+ * axis is high-pass filtered, and the score of a sample is the smallest, over
+ * the three axes, of that axis's largest absolute filtered value in the last
+ * 40 ms. The score runs the lean form of SPOT (Siffer et al., KDD 2017,
+ * "Anomaly Detection in Streams with Extreme Value Theory") with the shape
+ * parameter gamma taken as 0. A streaming 98% quantile t of the score is
+ * learned, and the threshold is t plus the mean excess over t times
+ * ln((k / n) / q). After a warm-up, a score above the threshold flags an
+ * impact and is kept out of learning. The detector learns and judges only
+ * while the Vehicle Controller says the car is driving and moving. What it
+ * learns survives b4_proc_reset_run_stats() and b4_proc_clear_run_maximum()
+ * until power-off. The 200 ms refractory still decides which impacts raise
+ * an event. A flag while a hump is DESCENDING raises no event, because the
+ * crossing's own exit drop would otherwise count.
+ *
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <stddef.h>
@@ -65,6 +80,64 @@
  * 256 is then at most 128000, far inside int32_t. */
 #define B4_PROC_MAX_SEED_MG          500U
 
+/* Impact learning. The warm-up is 3 s of driving at 100 Hz, shorter than the
+ * calibration size used in the SPOT paper. */
+static const uint32_t b4_proc_impact_warmup_samples = 300U;
+
+/* The streaming 98% quantile t is kept in units of 1/50 mg. A step above t
+ * moves it up by 49 units and any other step moves it down by 1 unit. It
+ * rests where 49 * P(above) = 1 * (1 - P(above)), so P(above) = 1 / 50, which
+ * is the 98% quantile the paper uses for t. About 2% of steps are above t. */
+static const uint32_t b4_proc_impact_units_per_mg = 50U;
+static const uint32_t b4_proc_impact_up_step_x50 = 49U;
+static const uint32_t b4_proc_impact_down_step_x50 = 1U;
+
+/* threshold = t + mean_excess * ln((k / n) / q), with k / n = 0.02 and
+ * q = 1 / 12000 per sample, so ln(0.02 / q) = ln(240) = 5.48. One expected
+ * false flag per 2 minutes at 100 Hz is 1 in 12000 samples, which is the
+ * rate taken from the M1 gate. The multiplier is kept as 548 / 100. */
+static const uint32_t b4_proc_impact_tail_mult_x100 = 548U;
+static const uint32_t b4_proc_impact_tail_div = 100U;
+
+/* The high-pass filter of each axis is one pole,
+ * y = a * (y + x - x_previous), with a = exp(-2 * pi * fc / fs). The cutoff
+ * fc = 4 Hz at fs = 100 Hz gives a = 0.777, which is 199 / 256. The cutoff is
+ * an experiment value. The result held from 2 to 8 Hz in replay. */
+static const int32_t b4_proc_impact_hp_coeff = 199;
+static const int32_t b4_proc_impact_hp_scale = 256;
+
+/* Indices of the accelerometer axes. */
+#define B4_PROC_AXIS_X      0U
+#define B4_PROC_AXIS_Y      1U
+#define B4_PROC_AXIS_Z      2U
+#define B4_PROC_AXIS_COUNT  3U
+
+/* The current sample and the 4 before it, which is 40 ms at 100 Hz. All three
+ * axes must have moved within this window. */
+#define B4_PROC_IMPACT_WINDOW_SAMPLES   5U
+
+/* The raw samples of each axis pass through a median of this many samples
+ * before the impact high-pass filter. The size is an experiment value from an
+ * offline replay. */
+#define B4_PROC_IMPACT_MEDIAN_SAMPLES   5U
+
+/* The raw hump-axis samples pass through a median of this many samples before
+ * the hump detector sees them. The size is an experiment value. A median
+ * ignores events shorter than half its window, which is 0.5 s at 100 Hz, and
+ * the logged ramps last 0.94 s or more. It is also the largest window of the
+ * median helper. */
+#define B4_PROC_HUMP_MEDIAN_SAMPLES    50U
+
+/** @brief Learned statistics of the three-axis impact score.
+ */
+typedef struct
+{
+    uint32_t t_x50;
+    uint32_t excess_sum;
+    uint32_t k;
+    uint32_t threshold_mg;
+} b4_proc_impact_t;
+
 /** @brief Private terrain state, including unpublished filter history.
  */
 typedef struct
@@ -86,11 +159,34 @@ typedef struct
     uint32_t          start_threshold_mg;
     uint32_t          complete_threshold_mg;
     uint32_t          last_impact_timestamp_ms;
+    /* Learned impact score statistics. Only b4_proc_init() clears these, so
+     * what is learned carries across runs until power-off. excess_sum is
+     * multiplied as uint64_t, so the product cannot overflow. */
+    b4_proc_impact_t  impact;
+    /* High-pass filter state of each axis, scaled by 256, and the last
+     * absolute filtered values in milli-g. The run reset clears them. */
+    int32_t           impact_hp_x256[B4_PROC_AXIS_COUNT];
+    uint16_t          impact_ring_mg[B4_PROC_AXIS_COUNT]
+                                    [B4_PROC_IMPACT_WINDOW_SAMPLES];
     uint32_t          previous_timestamp_ms;
     uint32_t          mag_last_timestamp_ms;
     int64_t           turn_cross_accum;
     int16_t           mag_previous_x;
     int16_t           mag_previous_y;
+    /* Raw samples ahead of the impact filter, and the median of the previous
+     * sample. The fill count is shared by the three axes. Only the newest
+     * count entries are read, so a restart clears the count, not the data. */
+    int16_t           impact_raw_mg[B4_PROC_AXIS_COUNT]
+                                   [B4_PROC_IMPACT_MEDIAN_SAMPLES];
+    int16_t           impact_median_mg[B4_PROC_AXIS_COUNT];
+    /* Raw hump-axis samples, read the same way. */
+    int16_t           hump_raw_mg[B4_PROC_HUMP_MEDIAN_SAMPLES];
+    uint16_t          impact_n;
+    uint8_t           impact_raw_next;
+    uint8_t           impact_raw_count;
+    uint8_t           hump_raw_next;
+    uint8_t           hump_raw_count;
+    uint8_t           impact_ring_next;
     uint8_t           hump_confirm_count;
     uint8_t           hump_complete_count;
     uint8_t           level_count;
@@ -139,6 +235,42 @@ b4_proc_difference_mg (int32_t left_mg, int32_t right_mg);
 static int32_t
 b4_proc_status_axis_mg (const b4_types_status_t * p_status,
                         uint8_t axis);
+
+/** @brief Read one axis from a raw calibrated sample.
+ *
+ * @param p_sample The calibrated sample.
+ * @param axis The selected axis number.
+ * @return The raw acceleration for the selected axis in milli-g.
+ */
+static int32_t
+b4_proc_sample_axis_mg (const b4_types_sample_t * p_sample, uint8_t axis);
+
+/** @brief Return the median of a small array without changing it.
+ *
+ * The values are copied and sorted. For an even count the upper of the two
+ * middle values is returned.
+ *
+ * @param p_values The values in milli-g, in any order.
+ * @param count The number of values, from 1 to the largest median window.
+ * @return The median in milli-g, or 0 when the count is 0.
+ */
+static int16_t
+b4_proc_median_mg (const int16_t * p_values, uint8_t count);
+
+/** @brief Add a raw hump-axis sample and return the median-based amplitude.
+ *
+ * @param p_sample The newest calibrated sample.
+ * @return The absolute difference between the median of the raw hump-axis
+ *         samples and the flat-ground baseline in milli-g, or 0 while the
+ *         incline offset itself is zero.
+ */
+static uint32_t
+b4_proc_hump_amplitude_mg (const b4_types_sample_t * p_sample);
+
+/** @brief Restart the raw hump-axis history.
+ */
+static void
+b4_proc_hump_ring_clear (void);
 
 /** @brief Apply one step of a fixed-point low-pass filter.
  *
@@ -314,15 +446,46 @@ b4_proc_update_level (uint32_t amplitude_mg);
 static uint32_t
 b4_proc_sample_delta_mg (const b4_types_sample_t * p_sample);
 
+/** @brief Clear the impact filter states and the window of recent values.
+ *
+ * The learned impact statistics are kept.
+ */
+static void
+b4_proc_impact_clear_window (void);
+
+/** @brief Filter the sample and find the three-axis impact score.
+ *
+ * The filters run whenever the previous sample is valid. The window holds 0
+ * for a sample that is not judged.
+ *
+ * @param p_sample The newest calibrated sample.
+ * @param b_judged True when the sample is judged and learned from.
+ * @return The smallest, over the axes, of the largest windowed absolute
+ *         filtered value in milli-g.
+ */
+static uint32_t
+b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged);
+
+/** @brief Learn the score statistics from one unflagged score.
+ *
+ * @param score_mg The three-axis impact score in milli-g.
+ */
+static void
+b4_proc_impact_learn (uint32_t score_mg);
+
 /** @brief Detect an impact and apply the configured refractory interval.
  *
- * @param sample_delta_mg The largest raw axis change in milli-g.
- * @param timestamp_ms The sample time in monotonic milliseconds.
+ * Learns and judges only when the Vehicle Controller says the car is driving
+ * and the previous sample is valid. A score above the threshold while the
+ * hump state is DESCENDING is still kept out of learning, but it raises no
+ * event and does not start the refractory clock, because the crossing's own
+ * exit drop would otherwise count.
+ *
+ * @param p_sample The newest calibrated sample.
  * @return True when this sample starts an impact event.
  */
 static bool
-b4_proc_detect_impact (uint32_t sample_delta_mg,
-                       uint32_t timestamp_ms);
+b4_proc_detect_impact (const b4_types_sample_t * p_sample);
 
 /** @brief Clear the active hump state without changing recorded peak history.
  */
@@ -463,6 +626,7 @@ b4_proc_process (const b4_types_sample_t * p_sample)
     b4_types_result_t result = B4_RESULT_OK;
     uint32_t sample_delta_mg = 0U;
     uint32_t amplitude_mg = 0U;
+    uint32_t hump_amplitude_mg = 0U;
     int32_t vertical_mg = 0;
     int32_t incline_mg = 0;
     int32_t incline_delta_mg = 0;
@@ -514,8 +678,8 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         g_b4_proc_state.status.b_hump_completed_event = false;
 
         sample_delta_mg = b4_proc_sample_delta_mg(p_sample);
-        g_b4_proc_state.status.b_impact_event = b4_proc_detect_impact(
-            sample_delta_mg, p_sample->timestamp_ms);
+        g_b4_proc_state.status.b_impact_event =
+            b4_proc_detect_impact(p_sample);
         b4_proc_update_filter(p_sample);
         b4_proc_update_tilt();
 
@@ -544,11 +708,14 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         incline_delta_mg = b4_proc_incline_delta_mg();
         amplitude_mg = b4_proc_abs_mg(incline_delta_mg);
         g_b4_proc_state.status.incline_delta_mg = incline_delta_mg;
+        /* Only the hump detector uses the median of the raw samples. The
+         * noise, level, baseline and height keep the filtered signal. */
+        hump_amplitude_mg = b4_proc_hump_amplitude_mg(p_sample);
         b4_proc_update_noise(amplitude_mg);
 
         if (false == g_b4_proc_state.status.b_impact_event)
         {
-            b4_proc_advance_hump(amplitude_mg, b_settled);
+            b4_proc_advance_hump(hump_amplitude_mg, b_settled);
             b4_proc_update_height();
         }
         else if ((B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
@@ -754,6 +921,7 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.b_previous_sample_valid = false;
         g_b4_proc_state.b_have_last_impact = false;
         g_b4_proc_state.last_impact_timestamp_ms = 0U;
+        b4_proc_impact_clear_window();
         b4_proc_reset_active_hump();
 
         /* A reset also discards the attitude reference and the settled
@@ -762,6 +930,7 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.incline_baseline_mg = 0;
         g_b4_proc_state.incline_window_count = 0U;
         g_b4_proc_state.incline_window_next = 0U;
+        b4_proc_hump_ring_clear();
         g_b4_proc_state.b_incline_baseline_valid = false;
         g_b4_proc_state.level_count = 0U;
         g_b4_proc_state.b_level_since_gap = false;
@@ -815,6 +984,11 @@ b4_proc_clear_run_maximum (void)
         g_b4_proc_state.learn_count = 0U;
         g_b4_proc_state.travel_um = 0U;
         g_b4_proc_state.status.learn_count = 0U;
+        /* The impact filters, window and refractory clock restart, but the
+         * learned impact statistics are kept. */
+        b4_proc_impact_clear_window();
+        g_b4_proc_state.b_have_last_impact = false;
+        g_b4_proc_state.last_impact_timestamp_ms = 0U;
     }
 
     return (result);
@@ -836,6 +1010,7 @@ b4_proc_calibrate_level (void)
          * at a new tilt gets a new level reference. */
         g_b4_proc_state.incline_window_count = 0U;
         g_b4_proc_state.incline_window_next = 0U;
+        b4_proc_hump_ring_clear();
         g_b4_proc_state.incline_baseline_mg = 0;
         g_b4_proc_state.b_incline_baseline_valid = false;
         g_b4_proc_state.level_count = 0U;
@@ -985,6 +1160,122 @@ b4_proc_status_axis_mg (const b4_types_status_t * p_status, uint8_t axis)
     }
 
     return (axis_mg);
+}
+
+static int32_t
+b4_proc_sample_axis_mg (const b4_types_sample_t * p_sample, uint8_t axis)
+{
+    int32_t axis_mg = 0;
+
+    switch (axis)
+    {
+        case B4_CFG_AXIS_X:
+            axis_mg = p_sample->accel_x_mg;
+            break;
+        case B4_CFG_AXIS_Y:
+            axis_mg = p_sample->accel_y_mg;
+            break;
+        case B4_CFG_AXIS_Z:
+            axis_mg = p_sample->accel_z_mg;
+            break;
+        default:
+            axis_mg = 0;
+            break;
+    }
+
+    return (axis_mg);
+}
+
+static int16_t
+b4_proc_median_mg (const int16_t * p_values, uint8_t count)
+{
+    /* Every entry that is read has been written by the copy first. */
+    int16_t sorted_mg[B4_PROC_HUMP_MEDIAN_SAMPLES];
+    int16_t value_mg = 0;
+    int16_t median_mg = 0;
+    uint8_t used = count;
+    uint8_t index = 0U;
+    uint8_t slot = 0U;
+
+    if (used > B4_PROC_HUMP_MEDIAN_SAMPLES)
+    {
+        used = B4_PROC_HUMP_MEDIAN_SAMPLES;
+    }
+
+    if (0U != used)
+    {
+        for (index = 0U; index < used; index++)
+        {
+            sorted_mg[index] = p_values[index];
+        }
+
+        /* Insertion sort: the arrays are small, and it needs no extra
+         * memory. */
+        for (index = 1U; index < used; index++)
+        {
+            value_mg = sorted_mg[index];
+            slot = index;
+
+            while ((slot > 0U) && (sorted_mg[slot - 1U] > value_mg))
+            {
+                sorted_mg[slot] = sorted_mg[slot - 1U];
+                slot--;
+            }
+
+            sorted_mg[slot] = value_mg;
+        }
+
+        median_mg = sorted_mg[used / 2U];
+    }
+
+    return (median_mg);
+}
+
+static void
+b4_proc_hump_ring_clear (void)
+{
+    /* Only the newest hump_raw_count entries are read, so the old data needs
+     * no clearing. This follows the incline window, which also restarts on a
+     * gap, an invalid sample, a reset and a level calibration. */
+    g_b4_proc_state.hump_raw_next = 0U;
+    g_b4_proc_state.hump_raw_count = 0U;
+}
+
+static uint32_t
+b4_proc_hump_amplitude_mg (const b4_types_sample_t * p_sample)
+{
+    uint8_t mean_samples = g_b4_proc_state.config.height_mean_samples;
+    uint32_t amplitude_mg = 0U;
+    int32_t  raw_mg = b4_proc_sample_axis_mg(
+        p_sample, g_b4_proc_state.config.hump_axis);
+
+    /* The sample is validated to within +-4000 mg, so it fits int16_t. */
+    g_b4_proc_state.hump_raw_mg[g_b4_proc_state.hump_raw_next] =
+        (int16_t)raw_mg;
+    g_b4_proc_state.hump_raw_next++;
+
+    if (g_b4_proc_state.hump_raw_next >= B4_PROC_HUMP_MEDIAN_SAMPLES)
+    {
+        g_b4_proc_state.hump_raw_next = 0U;
+    }
+
+    if (g_b4_proc_state.hump_raw_count < B4_PROC_HUMP_MEDIAN_SAMPLES)
+    {
+        g_b4_proc_state.hump_raw_count++;
+    }
+
+    /* NOTE: Same condition as the incline offset, so the amplitude is zero
+     * while no baseline exists or the incline window has not refilled. */
+    if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
+        (g_b4_proc_state.incline_window_count >= mean_samples))
+    {
+        amplitude_mg = b4_proc_difference_mg(
+            (int32_t)b4_proc_median_mg(g_b4_proc_state.hump_raw_mg,
+                                       g_b4_proc_state.hump_raw_count),
+            g_b4_proc_state.incline_baseline_mg);
+    }
+
+    return (amplitude_mg);
 }
 
 static int32_t
@@ -1343,6 +1634,7 @@ b4_proc_abort_hump (void)
     g_b4_proc_state.b_filter_ready = false;
     g_b4_proc_state.incline_window_count = 0U;
     g_b4_proc_state.incline_window_next = 0U;
+    b4_proc_hump_ring_clear();
     g_b4_proc_state.level_count = 0U;
     g_b4_proc_state.b_level_since_gap = false;
     g_b4_proc_state.learn_count = 0U;
@@ -1607,24 +1899,230 @@ b4_proc_sample_delta_mg (const b4_types_sample_t * p_sample)
     return (max_delta_mg);
 }
 
+static void
+b4_proc_impact_clear_window (void)
+{
+    uint32_t axis = 0U;
+    uint32_t slot = 0U;
+
+    for (axis = 0U; axis < B4_PROC_AXIS_COUNT; axis++)
+    {
+        g_b4_proc_state.impact_hp_x256[axis] = 0;
+
+        for (slot = 0U; slot < B4_PROC_IMPACT_WINDOW_SAMPLES; slot++)
+        {
+            g_b4_proc_state.impact_ring_mg[axis][slot] = 0U;
+        }
+    }
+
+    g_b4_proc_state.impact_ring_next = 0U;
+
+    /* The next median starts a new history and is its own previous, so the
+     * restart cannot look like a step. */
+    g_b4_proc_state.impact_raw_next = 0U;
+    g_b4_proc_state.impact_raw_count = 0U;
+
+    for (axis = 0U; axis < B4_PROC_AXIS_COUNT; axis++)
+    {
+        g_b4_proc_state.impact_median_mg[axis] = 0;
+    }
+}
+
+static uint32_t
+b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
+{
+    int32_t  accel_mg[B4_PROC_AXIS_COUNT] = {0, 0, 0};
+    int32_t  median_mg = 0;
+    uint32_t score_mg = 0xFFFFU;
+    uint32_t window_max_mg = 0U;
+    uint32_t value_mg = 0U;
+    uint32_t axis = 0U;
+    uint32_t slot = 0U;
+    uint8_t  filled = 0U;
+    bool     b_restart = false;
+
+    accel_mg[B4_PROC_AXIS_X] = p_sample->accel_x_mg;
+    accel_mg[B4_PROC_AXIS_Y] = p_sample->accel_y_mg;
+    accel_mg[B4_PROC_AXIS_Z] = p_sample->accel_z_mg;
+
+    /* A break in the stream starts the raw history again. Only the newest
+     * impact_raw_count entries are read, so the old data needs no clearing. */
+    if (false == g_b4_proc_state.b_previous_sample_valid)
+    {
+        g_b4_proc_state.impact_raw_next = 0U;
+        g_b4_proc_state.impact_raw_count = 0U;
+    }
+
+    b_restart = (0U == g_b4_proc_state.impact_raw_count);
+    filled = g_b4_proc_state.impact_raw_count;
+
+    if (filled < B4_PROC_IMPACT_MEDIAN_SAMPLES)
+    {
+        filled++;
+    }
+
+    for (axis = 0U; axis < B4_PROC_AXIS_COUNT; axis++)
+    {
+        value_mg = 0U;
+
+        /* The sample is validated to within +-4000 mg, so it fits int16_t. */
+        g_b4_proc_state.impact_raw_mg[axis][g_b4_proc_state.impact_raw_next]
+            = (int16_t)accel_mg[axis];
+        median_mg = (int32_t)b4_proc_median_mg(
+            g_b4_proc_state.impact_raw_mg[axis], filled);
+
+        if (true == b_restart)
+        {
+            /* The median of validated samples is within +-4000 mg too, so it
+             * fits int16_t. */
+            g_b4_proc_state.impact_median_mg[axis] = (int16_t)median_mg;
+        }
+
+        if (true == g_b4_proc_state.b_previous_sample_valid)
+        {
+            /* Samples are validated to within +-4000 mg, and so is their
+             * median, so the change of the median is within +-8000 mg, or
+             * 2.05e6 scaled by 256. The filter state then stays within
+             * 199 / 57 of that, about 7.2e6. The sum before the product is
+             * at most 9.2e6, and 199 times it is 1.83e9, inside int32_t. */
+            g_b4_proc_state.impact_hp_x256[axis] =
+                (b4_proc_impact_hp_coeff *
+                 (g_b4_proc_state.impact_hp_x256[axis] +
+                  (b4_proc_impact_hp_scale *
+                   (median_mg -
+                    (int32_t)g_b4_proc_state.impact_median_mg[axis])))) /
+                b4_proc_impact_hp_scale;
+
+            if (true == b_judged)
+            {
+                value_mg = b4_proc_abs_mg(
+                    g_b4_proc_state.impact_hp_x256[axis]) /
+                    (uint32_t)b4_proc_impact_hp_scale;
+            }
+        }
+        else
+        {
+            g_b4_proc_state.impact_hp_x256[axis] = 0;
+        }
+
+        /* Within +-4000 mg as above, so the narrowing is exact. */
+        g_b4_proc_state.impact_median_mg[axis] = (int16_t)median_mg;
+
+        if (value_mg > 0xFFFFU)
+        {
+            value_mg = 0xFFFFU;
+        }
+
+        /* The value is at most 65535 here, so it fits uint16_t. */
+        g_b4_proc_state.impact_ring_mg[axis][g_b4_proc_state.impact_ring_next]
+            = (uint16_t)value_mg;
+
+        window_max_mg = 0U;
+
+        for (slot = 0U; slot < B4_PROC_IMPACT_WINDOW_SAMPLES; slot++)
+        {
+            if (g_b4_proc_state.impact_ring_mg[axis][slot] > window_max_mg)
+            {
+                window_max_mg = g_b4_proc_state.impact_ring_mg[axis][slot];
+            }
+        }
+
+        if (window_max_mg < score_mg)
+        {
+            score_mg = window_max_mg;
+        }
+    }
+
+    g_b4_proc_state.impact_ring_next++;
+
+    if (g_b4_proc_state.impact_ring_next >= B4_PROC_IMPACT_WINDOW_SAMPLES)
+    {
+        g_b4_proc_state.impact_ring_next = 0U;
+    }
+
+    g_b4_proc_state.impact_raw_count = filled;
+    g_b4_proc_state.impact_raw_next++;
+
+    if (g_b4_proc_state.impact_raw_next >= B4_PROC_IMPACT_MEDIAN_SAMPLES)
+    {
+        g_b4_proc_state.impact_raw_next = 0U;
+    }
+
+    return (score_mg);
+}
+
+static void
+b4_proc_impact_learn (uint32_t score_mg)
+{
+    b4_proc_impact_t * p_impact = &g_b4_proc_state.impact;
+    uint32_t t_mg = p_impact->t_x50 / b4_proc_impact_units_per_mg;
+
+    if (score_mg > t_mg)
+    {
+        p_impact->t_x50 += b4_proc_impact_up_step_x50;
+        p_impact->k++;
+        p_impact->excess_sum += score_mg - t_mg;
+    }
+    else if (p_impact->t_x50 > 0U)
+    {
+        p_impact->t_x50 -= b4_proc_impact_down_step_x50;
+    }
+    else
+    {
+        /* The estimate is already at zero. */
+    }
+
+    if (p_impact->k > 0U)
+    {
+        /* The 64-bit product cannot overflow, and the quotient is the mean
+         * excess times 5.48, which is no larger than excess_sum times 5.48
+         * and so fits uint32_t for any realistic excess_sum. */
+        p_impact->threshold_mg =
+            (p_impact->t_x50 / b4_proc_impact_units_per_mg) +
+            (uint32_t)(((uint64_t)p_impact->excess_sum *
+                        b4_proc_impact_tail_mult_x100) /
+                       ((uint64_t)b4_proc_impact_tail_div *
+                        (uint64_t)p_impact->k));
+    }
+}
+
 static bool
-b4_proc_detect_impact (uint32_t sample_delta_mg, uint32_t timestamp_ms)
+b4_proc_detect_impact (const b4_types_sample_t * p_sample)
 {
     bool b_detected = false;
-    bool b_threshold_crossed = false;
+    bool b_flagged = false;
     bool b_refractory_elapsed = false;
+    uint32_t score_mg = 0U;
+    bool b_judged = false;
 
-    if (sample_delta_mg >=
-        g_b4_proc_state.config.impact_delta_threshold_mg)
+    b_judged = ((true == g_b4_proc_state.b_learn) &&
+                (true == g_b4_proc_state.b_previous_sample_valid));
+    score_mg = b4_proc_impact_score_mg(p_sample, b_judged);
+
+    if (true == b_judged)
     {
-        b_threshold_crossed = true;
+        if ((g_b4_proc_state.impact_n >= b4_proc_impact_warmup_samples) &&
+            (score_mg > g_b4_proc_state.impact.threshold_mg))
+        {
+            /* Not learned from. */
+            b_flagged = true;
+        }
+        else
+        {
+            b4_proc_impact_learn(score_mg);
+        }
+
+        if (g_b4_proc_state.impact_n < b4_proc_impact_warmup_samples)
+        {
+            g_b4_proc_state.impact_n++;
+        }
     }
 
     if (false == g_b4_proc_state.b_have_last_impact)
     {
         b_refractory_elapsed = true;
     }
-    else if ((timestamp_ms -
+    else if ((p_sample->timestamp_ms -
               g_b4_proc_state.last_impact_timestamp_ms) >=
              g_b4_proc_state.config.impact_refractory_ms)
     {
@@ -1635,11 +2133,11 @@ b4_proc_detect_impact (uint32_t sample_delta_mg, uint32_t timestamp_ms)
         b_refractory_elapsed = false;
     }
 
-    if ((true == b_threshold_crossed) &&
-        (true == b_refractory_elapsed))
+    if ((true == b_flagged) && (true == b_refractory_elapsed) &&
+        (B4_HUMP_DESCENDING != g_b4_proc_state.status.hump_state))
     {
         b_detected = true;
-        g_b4_proc_state.last_impact_timestamp_ms = timestamp_ms;
+        g_b4_proc_state.last_impact_timestamp_ms = p_sample->timestamp_ms;
         g_b4_proc_state.b_have_last_impact = true;
     }
 

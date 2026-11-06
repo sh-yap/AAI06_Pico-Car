@@ -614,6 +614,21 @@ read_line (vc_inputs_t * p_in, uint32_t now)
  * cleared in read_terrain(); both run in the VC task. */
 static bool s_b_hump_reset_pending = false;
 
+#if VC_RECORDER
+/* The same for the impact count, which also resets with the run. */
+static bool s_b_impact_reset_pending = false;
+
+#if B4_REC_IMPACT_STOP
+#define VC_IMPACT_STOP_ROWS (100U)  /* 2 s at 20 ms per row. */
+
+/* Test-only: the first impact of a run starts a countdown of ring rows, and
+ * the ring stops adding when it runs out.  Set in read_terrain(), used in
+ * record_cycle() and rearmed in report_state(); all run in the VC task. */
+static bool    s_b_impact_stop_started = false;
+static uint8_t s_impact_stop_left      = 0U;
+#endif
+#endif
+
 /* A completed hump: report a valid height to the laptop, log either way. */
 static void
 report_hump (b4_task_terrain_t const * p_terrain)
@@ -645,6 +660,9 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     static uint32_t          s_seen_ms = 0U;
     static bool              s_b_seen  = false;
     static uint8_t           s_humps   = 0U;
+#if VC_RECORDER
+    static uint8_t           s_impacts = 0U;
+#endif
     uint32_t                 word;
     uint32_t                 i;
     bool                     b_more = true;
@@ -675,6 +693,30 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
             }
 #if VC_RECORDER
             ev_rec_max(now, s_terrain.highest_height_dmm);
+
+            /* The count marks an impact, as for humps.  It wraps at 8, and
+             * that wrap is logged. */
+            if (s_b_impact_reset_pending && (0U == s_terrain.impact_count))
+            {
+                s_b_impact_reset_pending = false;   /* Reset, not impact. */
+            }
+            else if (s_b_seen && (s_terrain.impact_count != s_impacts))
+            {
+                ev_rec_impact(now, s_terrain.impact_count);
+#if B4_REC_IMPACT_STOP
+                if (!s_b_impact_stop_started)
+                {
+                    s_b_impact_stop_started = true;
+                    s_impact_stop_left      = (uint8_t) VC_IMPACT_STOP_ROWS;
+                }
+#endif
+            }
+            else
+            {
+                /* No new impact. */
+            }
+
+            s_impacts = s_terrain.impact_count;
 #endif
 
             s_humps   = s_terrain.hump_count;
@@ -1851,6 +1893,12 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
 #if VC_HAVE_BUDDY4
             b4_task_request_run_reset();    /* New run: clear max and count. */
             s_b_hump_reset_pending = true;
+#if VC_RECORDER
+            s_b_impact_reset_pending = true;
+#if B4_REC_IMPACT_STOP
+            s_b_impact_stop_started  = false;
+#endif
+#endif
 #endif
         }
         else if (g_b_run_active
@@ -1948,7 +1996,23 @@ record_cycle (vc_inputs_t const * p_in, vc_outputs_t const * p_out)
                                      &rec.right_i_permille);
     motion_get_learned(&rec.learn_fwd_gain, &rec.learn_fwd_offset,
                        &rec.learn_turn_gain, &rec.learn_state);
+#if B4_REC_IMPACT_STOP
+    if (s_b_impact_stop_started && (0U == s_impact_stop_left))
+    {
+        /* Ring stopped 2 s after the first impact. */
+    }
+    else
+    {
+        if (s_b_impact_stop_started)
+        {
+            s_impact_stop_left--;
+        }
+
+        run_rec_add(&rec);
+    }
+#else
     run_rec_add(&rec);
+#endif
     ev_rec_step(p_in->now_ms, (VC_LINE_LOST == p_in->line),
                 (VC_STATE_FOLLOW_LINE == p_out->state), p_out->steer,
                 p_in->b_ramp_active);

@@ -317,6 +317,41 @@ endif
 B4_RECORDER_SUFFIX := $(B4_RECORDER_SUFFIX)_nomag
 endif
 
+# B4_REC_HUMP_STOP=1 (with B4_RECORDER=1) stops the Buddy 4 ring 2 s after the
+# first hump that finishes while driving, so the ring keeps the raw data
+# before it however long the run lasts.  Image is named ..._humpstop.
+B4_REC_HUMP_STOP ?= 0
+ifneq ($(filter $(B4_REC_HUMP_STOP),0 1),$(B4_REC_HUMP_STOP))
+$(error Unknown B4_REC_HUMP_STOP '$(B4_REC_HUMP_STOP)'; use 0 or 1)
+endif
+ifeq ($(B4_REC_HUMP_STOP),1)
+ifneq ($(B4_RECORDER),1)
+$(error B4_REC_HUMP_STOP=1 requires B4_RECORDER=1)
+endif
+B4_RECORDER_SUFFIX := $(B4_RECORDER_SUFFIX)_humpstop
+endif
+
+# B4_REC_IMPACT_STOP=1 (with B4_RECORDER=1 and VC_RECORDER=1) stops the Buddy 4
+# ring and the Vehicle Controller ring 2 s after the first impact event of a
+# run, so they keep the data around it however long the run lasts.  Not with
+# B4_REC_HUMP_STOP=1.  Image is named ..._impactstop.
+B4_REC_IMPACT_STOP ?= 0
+ifneq ($(filter $(B4_REC_IMPACT_STOP),0 1),$(B4_REC_IMPACT_STOP))
+$(error Unknown B4_REC_IMPACT_STOP '$(B4_REC_IMPACT_STOP)'; use 0 or 1)
+endif
+ifeq ($(B4_REC_IMPACT_STOP),1)
+ifneq ($(B4_RECORDER),1)
+$(error B4_REC_IMPACT_STOP=1 requires B4_RECORDER=1)
+endif
+ifneq ($(VC_RECORDER),1)
+$(error B4_REC_IMPACT_STOP=1 requires VC_RECORDER=1)
+endif
+ifeq ($(B4_REC_HUMP_STOP),1)
+$(error B4_REC_IMPACT_STOP=1 cannot be combined with B4_REC_HUMP_STOP=1)
+endif
+B4_RECORDER_SUFFIX := $(B4_RECORDER_SUFFIX)_impactstop
+endif
+
 ifeq ($(WIFI_NETIF),1)
 ifneq ($(WIFI_JOIN),1)
 $(error WIFI_NETIF=1 requires WIFI_JOIN=1)
@@ -419,7 +454,7 @@ ASFLAGS += -DCNF_SMP=1
 endif
 
 # Fake-data driver for the comms API (app_program/comms_demo.c).
-CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE) -DVC_HAVE_BUDDY4=$(VC_TERRAIN) -DVC_RECORDER=$(VC_RECORDER) -DB4_RECORDER=$(B4_RECORDER) -DB4_REC_MAG=$(B4_REC_MAG)
+CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE) -DVC_HAVE_BUDDY4=$(VC_TERRAIN) -DVC_RECORDER=$(VC_RECORDER) -DB4_RECORDER=$(B4_RECORDER) -DB4_REC_MAG=$(B4_REC_MAG) -DB4_REC_HUMP_STOP=$(B4_REC_HUMP_STOP) -DB4_REC_IMPACT_STOP=$(B4_REC_IMPACT_STOP)
 
 # Rebuild the build stamp every time, so the date/time printed at boot and
 # published on robot/info always identifies the image actually flashed.
@@ -465,7 +500,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)-terr$(VC_TERRAIN)-rec$(VC_RECORDER)-b4rec$(B4_RECORDER)-recmag$(B4_REC_MAG)
+PROFILE_ID ?= app$(APP)-board$(BOARD)-smp$(SMP)-$(CONSOLE)-uartmirror$(UART_MIRROR)-wifi$(WIFI)-join$(WIFI_JOIN)-netif$(WIFI_NETIF)-static$(WIFI_STATIC)-dhcp$(WIFI_DHCP)-dns$(WIFI_DNS)-udp$(WIFI_UDP)-tcp$(WIFI_TCP)-bulk$(WIFI_TCPBULK)-mqtt$(WIFI_MQTT)-demo$(COMMS_DEMO)-format$(COMMS_FORMAT)-obst$(VC_OBSTACLE)-terr$(VC_TERRAIN)-rec$(VC_RECORDER)-b4rec$(B4_RECORDER)-recmag$(B4_REC_MAG)-humpstop$(B4_REC_HUMP_STOP)-impactstop$(B4_REC_IMPACT_STOP)
 PROFILE_FILE ?= .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

@@ -211,7 +211,8 @@ void b4_rec_add(b4_rec_record_t const * p_record);
  * the whole run.  When full it stops (earliest events kept) and counts
  * dropped; it never wraps.  It begins and freezes with the run ring.  Only
  * the VC task writes it (ev_rec_step at the 20 ms step, ev_rec_hump when a
- * terrain word shows a new hump count).  Keep tools/run_rec_read.ps1 in
+ * terrain word shows a new hump count, ev_rec_impact when it shows a new
+ * impact count).  Keep tools/run_rec_read.ps1 in
  * step. */
 
 #define EV_REC_MAGIC        (0x31564545UL)  /* "EEV1" little endian.        */
@@ -220,6 +221,8 @@ void b4_rec_add(b4_rec_record_t const * p_record);
                                                word's height was valid.     */
 #define EV_REC_COUNT_MASK   (0x7FU)         /* HUMP_DONE count byte: hump
                                                count (4 bits in the word).  */
+#define EV_REC_IMPACT_MASK  (0x07U)         /* IMPACT count byte: impact
+                                               count (3 bits in the word).  */
 
 typedef enum
 {
@@ -233,9 +236,12 @@ typedef enum
                                    height in 0.1 mm, count = hump count
                                    (EV_REC_COUNT_MASK) | EV_REC_VALID_BIT
                                    when the word's height was valid.        */
-    EV_REC_RUN_MAX              /* The word's highest height changed;
+    EV_REC_RUN_MAX,             /* The word's highest height changed;
                                    value = it in 0.1 mm.  Not logged for
                                    the reset to 0 at BEGIN.                 */
+    EV_REC_IMPACT               /* Impact count changed; value 0, count =
+                                   the 3-bit impact count.  Not logged for
+                                   the per-run reset to 0.                  */
 } ev_rec_type_t;
 
 /* One event, 8 bytes, no padding. */
@@ -244,7 +250,8 @@ typedef struct
     uint32_t ms;                /* Kernel time, same clock as the VC ring.  */
     int16_t  value;             /* Per ev_rec_type_t.                       */
     uint8_t  type;              /* ev_rec_type_t.                           */
-    uint8_t  count;             /* HUMP_DONE: count and valid bit, else 0.  */
+    uint8_t  count;             /* HUMP_DONE: count and valid bit; IMPACT:
+                                   count; else 0.                           */
 } ev_rec_record_t;
 
 /* Header first.  magic is 0 until the first BEGIN.  Records 0 .. count - 1
@@ -277,6 +284,10 @@ void ev_rec_hump(uint32_t ms, uint16_t height_dmm, uint8_t count,
 /* Log the word's highest height when it differs from the last one seen
  * (the last one is 0 at BEGIN).  Ignored when frozen or before BEGIN. */
 void ev_rec_max(uint32_t ms, uint16_t highest_dmm);
+
+/* Log an impact with the terrain word's 3-bit impact count.  Ignored when
+ * frozen or before the first BEGIN. */
+void ev_rec_impact(uint32_t ms, uint8_t count);
 
 #endif /* RUN_REC_H */
 

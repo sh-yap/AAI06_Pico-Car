@@ -232,6 +232,17 @@ ev_rec_max (uint32_t ms, uint16_t highest_dmm)
 
 
 void
+ev_rec_impact (uint32_t ms, uint8_t count)
+{
+    if ((EV_REC_MAGIC == g_ev_rec.magic) && (0U == g_ev_rec.frozen))
+    {
+        ev_rec_put(ms, EV_REC_IMPACT, 0,
+                   (uint8_t) (count & EV_REC_IMPACT_MASK));
+    }
+}
+
+
+void
 bc_rec_add (bc_rec_record_t const * p_record)
 {
     uint32_t index;

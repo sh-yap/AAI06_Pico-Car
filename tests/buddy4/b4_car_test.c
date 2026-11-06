@@ -439,11 +439,10 @@ car_test_print_banner (const b4_cfg_config_t * p_config)
               b4_car_test_log_sign_name(p_config->lateral_sign),
               b4_car_test_log_axis_name(p_config->vertical_axis),
               b4_car_test_log_sign_name(p_config->vertical_sign));
-    tm_printf((UB *)"B4I thresholds_mg motion=%u tilt=%u impact=%u"
+    tm_printf((UB *)"B4I thresholds_mg motion=%u tilt=%u"
               " hump_start_k_tenths=%u\n",
               p_config->motion_threshold_mg,
               p_config->tilt_threshold_mg,
-              p_config->impact_delta_threshold_mg,
               p_config->hump_start_k_tenths);
     tm_printf((UB *)"B4I calibration noise_limit_mg=%u"
               " max_consecutive_read_failures=%u\n",
