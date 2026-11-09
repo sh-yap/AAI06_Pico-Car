@@ -243,7 +243,7 @@ const F=(k,kind,bits,names)=>({k,kind,bits,names});
 const FMT={
   'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16),F('tgt_l_mm_s','s',10),F('tgt_r_mm_s','s',10),F('slew_l_mm_s','s',10),F('slew_r_mm_s','s',10),F('pwm_l','s',11),F('pwm_r','s',11)],
   'robot/telemetry/line':[F('pos','n',3,LINE),F('err','s',8),F('sensors','u',2),F('centre_adc','u',12),F('right_adc','u',12)],
-  'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10)],
+  'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10),F('turn_dps','s',11)],
   'robot/heartbeat':[F('seq','u',16),F('state','n',4,STATES),F('fault','u',10),F('ev_drop','u',8)],
   'robot/state':[F('state','n',4,STATES),F('fault','u',10)],
   'robot/event/barcode':[F('code','n',3,BARCODE),F('command','n',3,NAV)],

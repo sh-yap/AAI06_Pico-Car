@@ -105,6 +105,11 @@
 #define B4_TASK_CAL_STATE_MASK      (0x7U)
 #define B4_TASK_CAL_FLOOR_SHIFT     (3U)
 #define B4_TASK_UM_PER_DMM          (100U)
+/* Turn rate from the wheel speeds: (right - left) / track * 57.2958 deg/s.
+ * The scale is that ratio times 1000, so a track in micrometres divides to
+ * whole degrees per second. */
+#define B4_TASK_RATE_SCALE          (57296U)
+#define B4_TASK_TILT_MAX_MG         (1000)
 
 #if B4_RECORDER
 #if B4_REC_MAG
@@ -149,6 +154,11 @@ static volatile uint32_t g_b4_task_drive_word = 0U;
 static uint32_t         g_b4_task_drive_seq = 0U;
 static uint32_t         g_b4_task_drive_change_ms = 0U;
 static bool             g_b4_task_b_drive_seen = false;
+/* Yaw rate from the wheel speeds, positive when the right wheel is faster,
+ * and the turn class packed into the terrain word. Both stay UNKNOWN/zero
+ * until a fresh drive word arrives. */
+static int16_t          g_b4_task_turn_dps = 0;
+static b4_types_turn_t  g_b4_task_turn = B4_TURN_UNKNOWN;
 #if B4_RECORDER
 static b4_types_mag_sample_t g_b4_task_rec_mag;  /* Latest valid sample.    */
 #if B4_REC_MAG
@@ -189,6 +199,13 @@ b4_task_open_imu (uint32_t now_ms);
 static void
 b4_task_apply_drive (uint32_t now_ms);
 
+/** @brief Report the current terrain fields, with the diagnostic overrides.
+ *
+ * @param p_status The status after the latest sample.
+ */
+static void
+b4_task_report_terrain (b4_types_status_t const * p_status);
+
 /** @brief Read and process one sample, reopening the IMU after a fault.
  *
  * @param now_ms The current time in milliseconds.
@@ -217,12 +234,15 @@ b4_task_pack (b4_types_status_t const * p_status);
  *
  * The detector height is absolute and held at its peak over 200 ms. The
  * detectable height is not held. One console line carries the unheld
- * values.
+ * values. The permanent fields other than tilt and height are left as the
+ * caller set them.
  *
+ * @param p_terrain The terrain report to override tilt and height in.
  * @param p_status The status after the latest sample.
  */
 static void
-b4_task_diag_terrain (b4_types_status_t const * p_status);
+b4_task_diag_terrain (comms_terrain_t * p_terrain,
+                      b4_types_status_t const * p_status);
 
 #endif /* B4_TASK_DIAG_TERRAIN */
 
@@ -238,6 +258,23 @@ b4_task_diag_terrain (b4_types_status_t const * p_status);
 static void
 b4_task_record (b4_types_status_t const * p_status);
 #endif /* B4_RECORDER */
+
+/** @brief Return the current hump height as the terrain word carries it.
+ *
+ * @param p_status The status after the latest sample.
+ * @return The height in 0.1 mm steps, zero when no hump is in progress and
+ *         the last one has no valid height.
+ */
+static uint32_t
+b4_task_current_dmm (b4_types_status_t const * p_status);
+
+/** @brief Return the pitch from the filtered forward axis, clamped.
+ *
+ * @param p_status The status after the latest sample.
+ * @return The oriented pitch in milli-g, between -1000 and +1000.
+ */
+static int32_t
+b4_task_tilt_mg (b4_types_status_t const * p_status);
 
 /** @brief Convert micrometres to clamped 0.1 mm steps.
  *
@@ -548,13 +585,22 @@ b4_task_apply_drive (uint32_t now_ms)
                                               B4_TASK_DRIVE_RIGHT_SHIFT);
     bool     b_fresh = false;
     bool     b_learn = false;
+    bool     b_first = (false == g_b4_task_b_drive_seen);
 
-    if ((false == g_b4_task_b_drive_seen) ||
-        (seq != g_b4_task_drive_seq))
+    if (true == b_first)
     {
         g_b4_task_b_drive_seen = true;
         g_b4_task_drive_seq = seq;
         g_b4_task_drive_change_ms = now_ms;
+    }
+    else if (seq != g_b4_task_drive_seq)
+    {
+        g_b4_task_drive_seq = seq;
+        g_b4_task_drive_change_ms = now_ms;
+    }
+    else
+    {
+        /* The word has not changed, so its age decides freshness. */
     }
 
     b_fresh = ((now_ms - g_b4_task_drive_change_ms) <
@@ -562,6 +608,48 @@ b4_task_apply_drive (uint32_t now_ms)
     b_learn = (true == b_fresh) &&
               (0U != (word & B4_TASK_DRIVE_DRIVING_BIT)) &&
               (0U != (word & B4_TASK_DRIVE_MOVING_BIT));
+
+    if ((true == b_fresh) && (false == b_first))
+    {
+        /* A faster right wheel turns left, so the signed difference is
+         * positive for a left turn. The speeds are within +-1024 mm/s, so
+         * the product stays below 2^31. Rounding adds half the divisor in
+         * the sign's direction, so the quotient is nearest. */
+        int32_t track_um = (int32_t)g_b4_task_config.hump_lever_um;
+        int32_t rate_num = (right_mm_s - left_mm_s) *
+                           (int32_t)B4_TASK_RATE_SCALE;
+
+        if (rate_num >= 0)
+        {
+            rate_num += track_um / 2;
+        }
+        else
+        {
+            rate_num -= track_um / 2;
+        }
+
+        /* The track is 115 mm and at least 50 mm, so the result stays
+         * within +-2350 deg/s, which fits the signed 16-bit field. */
+        g_b4_task_turn_dps = (int16_t)(rate_num / track_um);
+        if (g_b4_task_turn_dps > 0)
+        {
+            g_b4_task_turn = B4_TURN_LEFT;
+        }
+        else if (g_b4_task_turn_dps < 0)
+        {
+            g_b4_task_turn = B4_TURN_RIGHT;
+        }
+        else
+        {
+            g_b4_task_turn = B4_TURN_STRAIGHT;
+        }
+    }
+    else
+    {
+        /* No fresh word, so do not report a direction. */
+        g_b4_task_turn_dps = 0;
+        g_b4_task_turn = B4_TURN_UNKNOWN;
+    }
 
     /* The travel uses the mean of the absolute speeds, so a pivot counts.
      * The speeds are within +-1024, so the sum cannot overflow. */
@@ -630,9 +718,8 @@ b4_task_count_events (b4_types_status_t const * p_status)
 static uint32_t
 b4_task_pack (b4_types_status_t const * p_status)
 {
-    b4_types_hump_state_t state = p_status->hump_state;
     uint32_t health = (uint32_t)p_status->health;
-    uint32_t current_dmm = 0U;
+    uint32_t current_dmm = b4_task_current_dmm(p_status);
     uint32_t valid = 0U;
     uint32_t word = 0U;
 
@@ -641,31 +728,23 @@ b4_task_pack (b4_types_status_t const * p_status)
         health = (uint32_t)B4_HEALTH_FAULT;
     }
 
-    if ((B4_HUMP_ASCENDING == state) || (B4_HUMP_PEAK == state) ||
-        (B4_HUMP_DESCENDING == state))
+    if ((B4_HUMP_ASCENDING != p_status->hump_state) &&
+        (B4_HUMP_PEAK != p_status->hump_state) &&
+        (B4_HUMP_DESCENDING != p_status->hump_state) &&
+        (true == p_status->b_hump_height_valid))
     {
-        /* A hump in progress is never reported as zero height, because
-         * zero with the valid bit clear means no hump. */
-        current_dmm = b4_task_height_dmm(p_status->active_hump_height_um);
-        if (0U == current_dmm)
-        {
-            current_dmm = 1U;
-        }
-    }
-    else if (true == p_status->b_hump_height_valid)
-    {
-        current_dmm = b4_task_height_dmm(p_status->hump_peak_height_um);
         valid = 1U;
     }
     else
     {
-        /* No hump, or the last one has no valid height: report zero. */
+        /* A hump in progress, or no valid stored height: zero. */
     }
 
     /* The enums are below four and the counters are masked, so every
-     * field fits its width. */
+     * field fits its width. The turn class comes from the wheel speeds,
+     * not from the status, whose magnetometer path is not fed. */
     word |= (health & B4_TASK_HEALTH_MASK) << B4_TASK_HEALTH_SHIFT;
-    word |= ((uint32_t)p_status->turn & B4_TASK_TURN_MASK) <<
+    word |= ((uint32_t)g_b4_task_turn & B4_TASK_TURN_MASK) <<
             B4_TASK_TURN_SHIFT;
     word |= current_dmm << B4_TASK_CURRENT_SHIFT;
     word |= b4_task_height_dmm(p_status->highest_hump_height_um) <<
@@ -679,11 +758,99 @@ b4_task_pack (b4_types_status_t const * p_status)
     return (word);
 }
 
-#if B4_TASK_DIAG_TERRAIN
+static uint32_t
+b4_task_current_dmm (b4_types_status_t const * p_status)
+{
+    uint32_t current_dmm = 0U;
+
+    if ((B4_HUMP_ASCENDING == p_status->hump_state) ||
+        (B4_HUMP_PEAK == p_status->hump_state) ||
+        (B4_HUMP_DESCENDING == p_status->hump_state))
+    {
+        /* A hump in progress is never reported as zero height, because
+         * zero with the valid bit clear means no hump. */
+        current_dmm = b4_task_height_dmm(p_status->active_hump_height_um);
+        if (0U == current_dmm)
+        {
+            current_dmm = 1U;
+        }
+    }
+    else if (true == p_status->b_hump_height_valid)
+    {
+        current_dmm = b4_task_height_dmm(p_status->hump_peak_height_um);
+    }
+    else
+    {
+        /* No hump, or the last one has no valid height: report zero. */
+    }
+
+    return (current_dmm);
+}
+
+static int32_t
+b4_task_tilt_mg (b4_types_status_t const * p_status)
+{
+    int32_t axis_mg = 0;
+
+    switch (g_b4_task_config.forward_axis)
+    {
+        case B4_CFG_AXIS_X:
+            axis_mg = p_status->filtered_x_mg;
+            break;
+        case B4_CFG_AXIS_Y:
+            axis_mg = p_status->filtered_y_mg;
+            break;
+        case B4_CFG_AXIS_Z:
+            axis_mg = p_status->filtered_z_mg;
+            break;
+        default:
+            axis_mg = 0;
+            break;
+    }
+
+    /* The same orientation as b4_proc's tilt, so positive is forward. */
+    axis_mg *= (int32_t)g_b4_task_config.forward_sign;
+
+    if (axis_mg > B4_TASK_TILT_MAX_MG)
+    {
+        axis_mg = B4_TASK_TILT_MAX_MG;
+    }
+    else if (axis_mg < -B4_TASK_TILT_MAX_MG)
+    {
+        axis_mg = -B4_TASK_TILT_MAX_MG;
+    }
+    else
+    {
+        /* Already within the telemetry range. */
+    }
+
+    return (axis_mg);
+}
+
 static void
-b4_task_diag_terrain (b4_types_status_t const * p_status)
+b4_task_report_terrain (b4_types_status_t const * p_status)
 {
     comms_terrain_t terrain;
+
+    /* Both motion enumerations run 0..4 in the same order. */
+    terrain.motion = (comms_motion_class_t)p_status->motion;
+    terrain.tilt_mg = b4_task_tilt_mg(p_status);
+    /* The helper clamps the height to the telemetry range. */
+    terrain.hump_dmm = (int32_t)b4_task_current_dmm(p_status);
+    terrain.turn_dps = (int32_t)g_b4_task_turn_dps;
+
+#if B4_TASK_DIAG_TERRAIN
+    b4_task_diag_terrain(&terrain, p_status);
+#endif
+
+    comms_report_terrain(&terrain);
+}
+
+#if B4_TASK_DIAG_TERRAIN
+static void
+b4_task_diag_terrain (comms_terrain_t * p_terrain,
+                      b4_types_status_t const * p_status)
+{
     int64_t height_dmm = 0;
     int64_t incline_abs_mg = 0;
     uint32_t detectable_dmm = 0U;
@@ -720,29 +887,11 @@ b4_task_diag_terrain (b4_types_status_t const * p_status)
         /* Already within the telemetry range. */
     }
 
-    terrain.motion = COMMS_MOTION_QUIET;
-    if (true == p_status->b_impact_event)
-    {
-        terrain.motion = COMMS_MOTION_IMPACT;
-    }
-    else if ((B4_HUMP_CANDIDATE == p_status->hump_state) ||
-             (B4_HUMP_ASCENDING == p_status->hump_state) ||
-             (B4_HUMP_PEAK == p_status->hump_state))
-    {
-        terrain.motion = COMMS_MOTION_CLIMBING_HUMP;
-    }
-    else if (B4_HUMP_DESCENDING == p_status->hump_state)
-    {
-        terrain.motion = COMMS_MOTION_DESCENDING_HUMP;
-    }
-    else
-    {
-        /* Quiet, as set above. */
-    }
+    /* The permanent motion class already comes from the status. */
 
     /* The helper clamps the height to the telemetry range. */
     detectable_dmm = b4_task_height_dmm(p_status->detectable_height_um);
-    terrain.tilt_mg = (int32_t)detectable_dmm;
+    p_terrain->tilt_mg = (int32_t)detectable_dmm;
     /* The cast narrows a value clamped to 0..800 above. */
     if ((int32_t)height_dmm > peak_dmm)
     {
@@ -753,8 +902,7 @@ b4_task_diag_terrain (b4_types_status_t const * p_status)
         /* The held peak is still the largest. */
     }
 
-    terrain.hump_dmm = peak_dmm;
-    comms_report_terrain(&terrain);
+    p_terrain->hump_dmm = peak_dmm;
 
     calls++;
     if (10U <= calls)
@@ -1107,9 +1255,7 @@ b4_task_sample_task (INT stacd, void * p_exinf)
             word = b4_task_pack(&status);
             (void)tk_snd_mbf(g_b4_task_mbf_id, &word, (INT)sizeof(word),
                              TMO_POL);
-#if B4_TASK_DIAG_TERRAIN
-            b4_task_diag_terrain(&status);
-#endif
+            b4_task_report_terrain(&status);
         }
 
         if ((now_ms - report_ms) >= B4_TASK_REPORT_MS)

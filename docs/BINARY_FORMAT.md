@@ -65,8 +65,9 @@ header included.  JSON size = average from the CR1 baseline
 | `tilt_mg` | 11 s | pitch, −1000 … +1000 milli-g (clamped) | Confirmed (Buddy 4) |
 | `hump_dmm` | 10 | current hump height, 0 … 800 = 0 … 80.0 mm | Confirmed (Buddy 4) |
 | `max_hump_dmm` | 10 | highest hump this run, same scale | Confirmed (Buddy 4) |
+| `turn_dps` | 11 s | yaw rate from wheel encoders, deg/s, + = left | Proposed (Buddy 4) |
 
-34 + 34 = 68 bits → **9 bytes** (JSON 99 B).
+45 + 34 = 79 bits → **10 bytes** (JSON 99 B).
 
 ### robot/heartbeat  (Buddy 1, once per second)
 

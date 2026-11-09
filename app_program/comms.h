@@ -137,6 +137,9 @@ typedef struct
     int32_t              tilt_mg;    /* pitch, -1000 .. +1000 milli-g   */
     int32_t              hump_dmm;   /* current hump height, 0.1 mm
                                         steps, 0 .. 800 (0 .. 80.0 mm)  */
+    int32_t              turn_dps;   /* yaw rate from the wheel
+                                        encoders, deg/s, positive turns
+                                        left                            */
 } comms_terrain_t;
 
 /* Buddy 5 - obstacle profile (sent as an event). */
