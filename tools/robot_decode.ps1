@@ -20,7 +20,7 @@ $script:States  = @('INIT','READY','LINE_FOLLOW','EXECUTE_NAV','OBSTACLE_STOP',
                     'OBSTACLE_SCAN','BYPASS','LINE_RECOVERY','FINISHED','SAFE_STOP')
 $script:Nav     = @('NONE','LEFT','RIGHT','STRAIGHT','UTURN')
 $script:Line    = @('LEFT','CENTRE','RIGHT','LOST','JUNCTION')
-$script:Motion  = @('QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IMPACT')
+$script:Motion  = @('QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IMPACT','TURNING')
 $script:Avoid   = @('STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY')
 $script:Cmd     = @('unknown','start','stop','status')
 $script:Run     = @('END','BEGIN')

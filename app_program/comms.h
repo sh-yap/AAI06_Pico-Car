@@ -69,8 +69,10 @@ typedef enum
     COMMS_LINE_COUNT
 } comms_line_pos_t;
 
-/* Same numbering as Buddy 4's b4_types_motion_t.  QUIET means the readings
- * barely changed; it does NOT prove the car is stationary. */
+/* Same numbering as Buddy 4's b4_types_motion_t, with TURNING added at the
+ * end.  TURNING is a pivot reported by Buddy 4's task; the classifier itself
+ * does not produce it.  QUIET means the readings barely changed; it does NOT
+ * prove the car is stationary. */
 typedef enum
 {
     COMMS_MOTION_QUIET = 0,
@@ -78,6 +80,7 @@ typedef enum
     COMMS_MOTION_CLIMBING_HUMP,
     COMMS_MOTION_DESCENDING_HUMP,
     COMMS_MOTION_IMPACT,
+    COMMS_MOTION_TURNING,
     COMMS_MOTION_COUNT
 } comms_motion_class_t;
 

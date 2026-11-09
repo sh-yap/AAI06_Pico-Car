@@ -159,6 +159,12 @@ static bool             g_b4_task_b_drive_seen = false;
  * until a fresh drive word arrives. */
 static int16_t          g_b4_task_turn_dps = 0;
 static b4_types_turn_t  g_b4_task_turn = B4_TURN_UNKNOWN;
+/** @brief True when a fresh MOVING drive word has opposite wheel speeds.
+ *
+ * Opposite signs mean a pivot on the spot, which the terrain report names
+ * TURNING. It is cleared whenever the word is stale or first seen.
+ */
+static bool             g_b4_task_b_pivot = false;
 #if B4_RECORDER
 static b4_types_mag_sample_t g_b4_task_rec_mag;  /* Latest valid sample.    */
 #if B4_REC_MAG
@@ -611,6 +617,13 @@ b4_task_apply_drive (uint32_t now_ms)
 
     if ((true == b_fresh) && (false == b_first))
     {
+        /* A pivot needs the MOVING bit and strictly opposite wheel speeds,
+         * so both wheels pull in opposite directions on the spot. */
+        g_b4_task_b_pivot =
+            (0U != (word & B4_TASK_DRIVE_MOVING_BIT)) &&
+            (((left_mm_s > 0) && (right_mm_s < 0)) ||
+             ((left_mm_s < 0) && (right_mm_s > 0)));
+
         /* A faster right wheel turns left, so the signed difference is
          * positive for a left turn. The speeds are within +-1024 mm/s, so
          * the product stays below 2^31. Rounding adds half the divisor in
@@ -646,9 +659,10 @@ b4_task_apply_drive (uint32_t now_ms)
     }
     else
     {
-        /* No fresh word, so do not report a direction. */
+        /* No fresh word, so do not report a direction or a pivot. */
         g_b4_task_turn_dps = 0;
         g_b4_task_turn = B4_TURN_UNKNOWN;
+        g_b4_task_b_pivot = false;
     }
 
     /* The travel uses the mean of the absolute speeds, so a pivot counts.
@@ -712,6 +726,10 @@ b4_task_count_events (b4_types_status_t const * p_status)
     if (true == p_status->b_impact_event)
     {
         g_b4_task_impacts++;
+
+        /* The telemetry samples every 200 ms, so every impact also goes out
+         * as an event; a full event queue drops it and is not a fault. */
+        (void)comms_event_motion(COMMS_MOTION_IMPACT);
     }
 }
 
@@ -834,6 +852,18 @@ b4_task_report_terrain (b4_types_status_t const * p_status)
 
     /* Both motion enumerations run 0..4 in the same order. */
     terrain.motion = (comms_motion_class_t)p_status->motion;
+
+    /* A pivot is TURNING unless the classifier saw an impact, which wins. */
+    if ((true == g_b4_task_b_pivot) &&
+        (B4_MOTION_IMPACT != p_status->motion))
+    {
+        terrain.motion = COMMS_MOTION_TURNING;
+    }
+    else
+    {
+        /* Keep the classifier's motion. */
+    }
+
     terrain.tilt_mg = b4_task_tilt_mg(p_status);
     /* The helper clamps the height to the telemetry range. */
     terrain.hump_dmm = (int32_t)b4_task_current_dmm(p_status);

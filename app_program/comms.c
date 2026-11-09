@@ -179,7 +179,8 @@ static char const * const g_line_names[COMMS_LINE_COUNT] =
 
 static char const * const g_motion_names[COMMS_MOTION_COUNT] =
 {
-    "QUIET", "ACCELERATING", "CLIMBING_HUMP", "DESCENDING_HUMP", "IMPACT"
+    "QUIET", "ACCELERATING", "CLIMBING_HUMP", "DESCENDING_HUMP", "IMPACT",
+    "TURNING"
 };
 
 static char const * const g_avoid_names[COMMS_AVOID_COUNT] =
