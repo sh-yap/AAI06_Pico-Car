@@ -868,6 +868,8 @@ b4_task_report_terrain (b4_types_status_t const * p_status)
     /* The helper clamps the height to the telemetry range. */
     terrain.hump_dmm = (int32_t)b4_task_current_dmm(p_status);
     terrain.turn_dps = (int32_t)g_b4_task_turn_dps;
+    /* The terrain word carries the same 3-bit counter, so mask it here. */
+    terrain.impact_count = (int32_t)(g_b4_task_impacts & B4_TASK_IMPACTS_MASK);
 
 #if B4_TASK_DIAG_TERRAIN
     b4_task_diag_terrain(&terrain, p_status);

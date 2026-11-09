@@ -143,6 +143,8 @@ typedef struct
     int32_t              turn_dps;   /* yaw rate from the wheel
                                         encoders, deg/s, positive turns
                                         left                            */
+    int32_t              impact_count; /* impacts this run, 0 .. 7,
+                                          wraps like the terrain word */
 } comms_terrain_t;
 
 /* Buddy 5 - obstacle profile (sent as an event). */

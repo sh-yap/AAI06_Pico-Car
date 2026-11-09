@@ -45,7 +45,7 @@ $script:RobotFormat = @{
                                   (F centre_adc u 12), (F right_adc u 12))
     'robot/telemetry/terrain' = @((F motion n 3 $script:Motion), (F tilt_mg s 11),
                                   (F hump_dmm u 10), (F max_hump_dmm u 10),
-                                  (F turn_dps s 11))
+                                  (F turn_dps s 11), (F impact_count u 3))
     'robot/heartbeat'         = @((F seq u 16), (F state n 4 $script:States),
                                   (F fault u 10), (F ev_drop u 8))
     'robot/state'             = @((F state n 4 $script:States), (F fault u 10))
