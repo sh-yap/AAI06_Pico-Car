@@ -73,7 +73,6 @@
 #define BITS_TILT                11U    /* signed */
 #define BITS_HUMP                10U
 #define BITS_TURN                11U    /* signed, yaw rate in deg/s      */
-#define BITS_IMPACT              3U     /* impacts this run, wraps at 8   */
 #define BITS_SEQ                 16U
 #define BITS_STATE               4U
 #define BITS_FAULT               10U    /* ten faults (DATA_DEFS §6)      */
@@ -180,7 +179,7 @@ static char const * const g_line_names[COMMS_LINE_COUNT] =
 
 static char const * const g_motion_names[COMMS_MOTION_COUNT] =
 {
-    "QUIET", "ACCELERATING", "CLIMBING_HUMP", "DESCENDING_HUMP", "IMPACT",
+    "QUIET", "ACCELERATING", "CLIMBING_HUMP", "DESCENDING_HUMP", "LIFTED",
     "TURNING"
 };
 
@@ -1054,7 +1053,7 @@ next_terrain (comms_link_msg_t * p_msg, uint32_t now)
 {
     comms_terrain_t terrain;
     codec_writer_t  w;
-    int32_t         fields[6];
+    int32_t         fields[5];
     uint32_t        seq;
     uint32_t        hash;
     bool            b_built = false;
@@ -1067,9 +1066,8 @@ next_terrain (comms_link_msg_t * p_msg, uint32_t now)
         fields[2] = terrain.hump_dmm;
         fields[3] = g_max_hump_dmm;
         fields[4] = terrain.turn_dps;
-        fields[5] = terrain.impact_count;
 
-        if (snapshot_due(&g_terrain_tx, seq, fields, 6U, now,
+        if (snapshot_due(&g_terrain_tx, seq, fields, 5U, now,
                          COMMS_TELEMETRY_MS, &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/terrain", QOS_0, false,
@@ -1085,8 +1083,6 @@ next_terrain (comms_link_msg_t * p_msg, uint32_t now)
                            non_negative(g_max_hump_dmm), BITS_HUMP);
             codec_put_int(&w, CODEC_KEY("turn_dps"), terrain.turn_dps,
                           BITS_TURN);
-            codec_put_uint(&w, CODEC_KEY("impact_count"),
-                           non_negative(terrain.impact_count), BITS_IMPACT);
             codec_end(&w);
             snapshot_sent(&g_terrain_tx, seq, hash, now);
             b_built = true;

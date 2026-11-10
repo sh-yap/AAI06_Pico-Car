@@ -149,17 +149,20 @@ void bc_rec_add(bc_rec_record_t const * p_record);
  * needs VC_RECORDER=1.  It begins and freezes with the run ring.  Only the
  * Buddy 4 task writes records; the VC task resets and freezes it, so a record
  * torn at the boundary is possible and accepted.  No locks.  Keep
- * tools/run_rec_read.ps1 in step. */
+ * tools/run_rec_read.ps1 in step. The JOLT flag is the learned guard
+ * window, not the raw step field; the step itself is not recorded.  The CUE
+ * flag is the latched lift cue from b4_proc, not a single sharp change. */
 
 #define B4_REC_MAGIC        (0x31523442UL)  /* "B4R1" little endian.        */
 #define B4_REC_CAPACITY     (1500U)         /* 15 s at 10 ms.               */
 #define B4_REC_FLAG_VALID   (0x01U)         /* Accelerometer sample valid.  */
 #define B4_REC_FLAG_MAG_NEW (0x02U)         /* Mag sample new and valid.    */
 #define B4_REC_FLAG_HEIGHT  (0x04U)         /* Hump height valid.           */
-#define B4_REC_FLAG_IMPACT  (0x08U)         /* Impact event this cycle.     */
+#define B4_REC_FLAG_CUE     (0x08U)         /* Lift cue is latched.         */
 #define B4_REC_FLAG_STARTED (0x10U)         /* Hump started this cycle.     */
 #define B4_REC_FLAG_DONE    (0x20U)         /* Hump completed this cycle.   */
 #define B4_REC_FLAG_STALE   (0x40U)         /* Sample stale.                */
+#define B4_REC_FLAG_JOLT    (0x80U)         /* Jolt guard window is open.   */
 
 /* One Buddy 4 cycle, 40 bytes, no padding. */
 typedef struct

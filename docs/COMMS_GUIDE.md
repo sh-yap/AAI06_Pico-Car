@@ -148,7 +148,7 @@ t.hump_height_mm = current_height;   /* 0 on flat ground */
 comms_report_terrain(&t);
 
 (void) comms_event_hump(peak_mm);    /* once per hump, at its peak */
-(void) comms_event_motion(COMMS_MOTION_IMPACT);
+(void) comms_event_motion(COMMS_MOTION_LIFTED);
 ```
 
 The run summary's `max_hump_mm` is worked out from the hump events.

@@ -56,7 +56,9 @@
 # (65535 = that or more); hump_state = b4_types_hump_state_t; motion / turn =
 # b4_types_motion_t / b4_types_turn_t (from motion_turn); tilt =
 # b4_types_tilt_t; flags = raw byte, then 0/1 columns valid, mag_new,
-# height_valid, impact, started, completed, stale.
+# height_valid, cue, started, completed, stale, jolt (cue is Buddy 4's
+# latched lift cue; jolt is the jolt guard window; the raw target step is
+# not recorded).
 # Event log: if the image also has g_ev_rec (whole-run log of line losses,
 # ramp edges and hump results, 62 events, earliest kept), the same command
 # dumps it to <time>_<name>_events.bin and writes <time>_<name>_events.csv:
@@ -365,7 +367,7 @@ if ($b4Bin -ne "") {
         $dn     = [Math]::Min([uint32]$dCap, $dTotal)
         $dFirst = ([int]$dWr - [int]$dn + $dCap) % $dCap
         $db = New-Object System.Text.StringBuilder
-        [void]$db.AppendLine("row,ms,dt_ms,accel_x_mg,accel_y_mg,accel_z_mg,incline_mg,baseline_mg,delta_mg,noise_mg,active_height_cmm,active_height_mm,final_height_cmm,final_height_mm,mag_x,mag_y,mag_z,left_enc,right_enc,drive_speed_mm_s,dt_us,hump_state,motion,turn,tilt,flags,valid,mag_new,height_valid,impact,started,completed,stale")
+        [void]$db.AppendLine("row,ms,dt_ms,accel_x_mg,accel_y_mg,accel_z_mg,incline_mg,baseline_mg,delta_mg,noise_mg,active_height_cmm,active_height_mm,final_height_cmm,final_height_mm,mag_x,mag_y,mag_z,left_enc,right_enc,drive_speed_mm_s,dt_us,hump_state,motion,turn,tilt,flags,valid,mag_new,height_valid,cue,started,completed,stale,jolt")
         $dPrev  = $null
         $dMaxUs = 0
         for ($i = 0; $i -lt $dn; $i++) {
@@ -384,7 +386,7 @@ if ($b4Bin -ne "") {
             $mt    = $d[$o + 38]
             $act   = [BitConverter]::ToUInt16($d, $o + 18)
             $fin   = [BitConverter]::ToUInt16($d, $o + 20)
-            [void]$db.AppendLine(("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11:0.00},{12},{13:0.00},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27},{28},{29},{30},{31},{32}" -f `
+            [void]$db.AppendLine(("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11:0.00},{12},{13:0.00},{14},{15},{16},{17},{18},{19},{20},{21},{22},{23},{24},{25},{26},{27},{28},{29},{30},{31},{32},{33}" -f `
                 $i, $ms, $dt,
                 [BitConverter]::ToInt16($d, $o + 4), [BitConverter]::ToInt16($d, $o + 6),
                 [BitConverter]::ToInt16($d, $o + 8), [BitConverter]::ToInt16($d, $o + 10),
@@ -398,7 +400,8 @@ if ($b4Bin -ne "") {
                 $d[$o + 36], ($mt -band 15), ($mt -shr 4), $d[$o + 39], $fl,
                 ($fl -band 1), (($fl -shr 1) -band 1), (($fl -shr 2) -band 1),
                 (($fl -shr 3) -band 1), (($fl -shr 4) -band 1),
-                (($fl -shr 5) -band 1), (($fl -shr 6) -band 1)))
+                (($fl -shr 5) -band 1), (($fl -shr 6) -band 1),
+                (($fl -shr 7) -band 1)))
         }
         [System.IO.File]::WriteAllText($b4Csv, $db.ToString(), [System.Text.Encoding]::ASCII)
         Write-Host ("{0} Buddy 4 rows (total {1}, frozen {2}), longest dt_us {3}" -f $dn, $dTotal, $dFrozen, $dMaxUs)

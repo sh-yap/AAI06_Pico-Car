@@ -67,7 +67,10 @@ typedef enum
 /** @brief Motion classifications supported by the accelerometer pipeline.
  *
  * B4_MOTION_QUIET means the raw sample change is below its threshold. It does
- * not prove that the vehicle is stationary.
+ * not prove that the vehicle is stationary. B4_MOTION_LIFTED means the
+ * sharp-change cue is latched: the chassis saw a sharp IMU change in the
+ * last second. The cue is a hint for the Vehicle Controller, which decides
+ * from the line sensors whether the car was lifted.
  */
 typedef enum
 {
@@ -75,7 +78,7 @@ typedef enum
     B4_MOTION_ACCELERATING,
     B4_MOTION_CLIMBING_HUMP,
     B4_MOTION_DESCENDING_HUMP,
-    B4_MOTION_IMPACT
+    B4_MOTION_LIFTED
 } b4_types_motion_t;
 
 /** @brief States in the vertical acceleration hump detector.
@@ -153,9 +156,15 @@ typedef enum
  * saturating, and a hump may start only once it reaches the learning hold.
  * drive_speed_mm_s is the mean of the absolute wheel speeds from the latest
  * drive word, so a pivot counts as travel. The detector uses it with the
- * sample interval to measure that travel.
+ * sample interval to measure that travel. b_jolt_window_active is true
+ * while the learned jolt guard is holding the higher post-jolt thresholds
+ * after a large wheel-target step. b_sharp_change_event is true on the
+ * sample that starts a sharp IMU change; b_lift_cue is latched for one
+ * second after such a change, which is a safety bound, so that the Vehicle
+ * Controller can use it across a both-black spell.
  * Health is READY only after fresh level samples since the last data gap.
- * Event flags describe the latest processed sample and are not latched.
+ * Event flags describe the latest processed sample and are not latched,
+ * except b_lift_cue.
  * Tilt and turn use configured signs.
  */
 typedef struct
@@ -188,9 +197,11 @@ typedef struct
     bool b_hump_height_valid;
     bool b_mag_valid;
     bool b_sample_stale;
-    bool b_impact_event;
+    bool b_sharp_change_event;
+    bool b_lift_cue;
     bool b_hump_started_event;
     bool b_hump_completed_event;
+    bool b_jolt_window_active;
 } b4_types_status_t;
 
 #endif /* B4_TYPES_H */

@@ -46,7 +46,9 @@
  *
  * Processing thresholds are in milli-g. Sample age and event intervals are
  * in milliseconds. Sample counts are consecutive samples. A filter divisor
- * of one passes each input directly. hump_axis selects the sensor axis
+ * of one passes each input directly. sharp_change_refractory_ms is the
+ * least time between two sharp-change events, which feed the lift cue.
+ * hump_axis selects the sensor axis
  * whose inclination a hump changes, the lateral axis when one drive wheel
  * climbs the ramp. hump_lever_um is the distance in micrometres from the
  * pivot to the raised contact, the wheel-contact track for a wheel hump.
@@ -98,7 +100,7 @@ typedef struct
     uint32_t mag_stale_after_ms;
     uint32_t motion_threshold_mg;
     uint32_t tilt_threshold_mg;
-    uint32_t impact_refractory_ms;
+    uint32_t sharp_change_refractory_ms;
     uint32_t hump_start_k_tenths;
     uint32_t hump_complete_k_tenths;
     uint32_t calibration_noise_limit_mg;

@@ -71,15 +71,17 @@ typedef enum
 
 /* Same numbering as Buddy 4's b4_types_motion_t, with TURNING added at the
  * end.  TURNING is a pivot reported by Buddy 4's task; the classifier itself
- * does not produce it.  QUIET means the readings barely changed; it does NOT
- * prove the car is stationary. */
+ * does not produce it.  LIFTED means Buddy 4's sharp-change cue is set; the
+ * Vehicle Controller decides from the line sensors whether the car was
+ * lifted.  QUIET means the readings barely changed; it does NOT prove the car
+ * is stationary. */
 typedef enum
 {
     COMMS_MOTION_QUIET = 0,
     COMMS_MOTION_ACCELERATING,
     COMMS_MOTION_CLIMBING_HUMP,
     COMMS_MOTION_DESCENDING_HUMP,
-    COMMS_MOTION_IMPACT,
+    COMMS_MOTION_LIFTED,
     COMMS_MOTION_TURNING,
     COMMS_MOTION_COUNT
 } comms_motion_class_t;
@@ -143,8 +145,6 @@ typedef struct
     int32_t              turn_dps;   /* yaw rate from the wheel
                                         encoders, deg/s, positive turns
                                         left                            */
-    int32_t              impact_count; /* impacts this run, 0 .. 7,
-                                          wraps like the terrain word */
 } comms_terrain_t;
 
 /* Buddy 5 - obstacle profile (sent as an event). */

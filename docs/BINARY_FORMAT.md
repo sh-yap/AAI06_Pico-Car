@@ -61,14 +61,13 @@ header included.  JSON size = average from the CR1 baseline
 
 | Field | Bits | Range / meaning | Status |
 |---|---:|---|---|
-| `motion` | 3 | 0 QUIET, 1 ACCELERATING, 2 CLIMBING_HUMP, 3 DESCENDING_HUMP, 4 IMPACT, 5 TURNING | Confirmed (Buddy 4) |
+| `motion` | 3 | 0 QUIET, 1 ACCELERATING, 2 CLIMBING_HUMP, 3 DESCENDING_HUMP, 4 LIFTED (Buddy 4's sharp-change cue is latched), 5 TURNING | Confirmed (Buddy 4) |
 | `tilt_mg` | 11 s | pitch, −1000 … +1000 milli-g (clamped) | Confirmed (Buddy 4) |
 | `hump_dmm` | 10 | current hump height, 0 … 800 = 0 … 80.0 mm | Confirmed (Buddy 4) |
 | `max_hump_dmm` | 10 | highest hump this run, same scale | Confirmed (Buddy 4) |
 | `turn_dps` | 11 s | yaw rate from wheel encoders, deg/s, + = left | Proposed (Buddy 4) |
-| `impact_count` | 3 | impacts this run, 0 … 7, then wraps (per run, like `max_hump_dmm`) | Proposed (Buddy 4) |
 
-48 + 34 = 82 bits → **11 bytes** (JSON 99 B).
+45 + 34 = 79 bits → **10 bytes** (JSON ≈ 81 B).
 
 ### robot/heartbeat  (Buddy 1, once per second)
 
@@ -190,7 +189,7 @@ Fixes found while checking each owner's own numbering:
 | Item | Today in `comms.h` | Becomes (owner's code) |
 |---|---|---|
 | Line position | 0 LOST, 1 LEFT, 2 CENTRE, 3 RIGHT, 4 JUNCTION | 0 LEFT, 1 CENTRE, 2 RIGHT, 3 LOST, 4 JUNCTION (Buddy 3) |
-| Motion class | 0 STATIONARY, 1 ACCELERATING, 2 TURNING, 3 CLIMBING, 4 DESCENDING, 5 IMPACT | 0 QUIET, 1 ACCELERATING, 2 CLIMBING_HUMP, 3 DESCENDING_HUMP, 4 IMPACT, 5 TURNING (Buddy 4) |
+| Motion class | 0 STATIONARY, 1 ACCELERATING, 2 TURNING, 3 CLIMBING, 4 DESCENDING, 5 IMPACT | 0 QUIET, 1 ACCELERATING, 2 CLIMBING_HUMP, 3 DESCENDING_HUMP, 4 LIFTED, 5 TURNING (Buddy 4) |
 | Terrain | `pitch_deg`, `roll_deg`, `hump_height_mm` | `tilt_mg` (pitch), `hump_dmm` (Buddy 4's real data) |
 | Hump event | `comms_event_hump(peak_height_mm)` | `comms_event_hump(peak_dmm)` |
 | Line error | "owner's scale" | −127 … +127 |

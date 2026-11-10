@@ -28,30 +28,64 @@
  * running median of the incline amplitude, so they follow the rolling
  * noise of the car while it drives instead of a fixed height. The Vehicle
  * Controller tells this module through b4_proc_set_drive() whether the car
- * is driving. The median learns only on those samples, and only while the
- * hump state is NORMAL or CANDIDATE and there is no impact, so a stop or a
- * confirmed hump never trains it. It takes one step per millimetre of wheel
- * travel, not per sample, so the distance a ramp edge can influence it does
- * not depend on speed. The START sweep seeds the median. No hump may start
- * until the median has had 2^n steps, which is 2^n mm of driving since
- * START, where n is the configured step shift.
+ * is driving. It also reports whether the car drives forward, which needs
+ * the driving and moving bits and both measured wheel speeds above zero on
+ * a fresh word that is not the first. A hump may start, and a candidate may
+ * continue, only while the car drives forward, so a recovery pivot or a
+ * stop in READY cannot raise one. A confirmed hump is not aborted by a
+ * brief dip in wheel speed. The median learns only on the driving samples,
+ * and only while the hump state is NORMAL or CANDIDATE and there is no
+ * sharp change, so a stop or a confirmed hump never trains it. It takes one
+ * step per millimetre of wheel travel, not per sample, so the distance a ramp
+ * edge can influence it does not depend on speed. The START sweep seeds
+ * the median. No hump may start until the median has had 2^n steps, which
+ * is 2^n mm of driving since START, where n is the configured step shift.
  *
  * The multiples remain provisional until flat driving traces set them.
  *
- * An impact is a knock that is extreme on all three accelerometer axes. Each
- * axis is high-pass filtered, and the score of a sample is the smallest, over
- * the three axes, of that axis's largest absolute filtered value in the last
- * 40 ms. The score runs the lean form of SPOT (Siffer et al., KDD 2017,
- * "Anomaly Detection in Streams with Extreme Value Theory") with the shape
- * parameter gamma taken as 0. A streaming 98% quantile t of the score is
- * learned, and the threshold is t plus the mean excess over t times
- * ln((k / n) / q). After a warm-up, a score above the threshold flags an
- * impact and is kept out of learning. The detector learns and judges only
- * while the Vehicle Controller says the car is driving and moving. What it
- * learns survives b4_proc_reset_run_stats() and b4_proc_clear_run_maximum()
- * until power-off. The 200 ms refractory still decides which impacts raise
- * an event. A flag while a hump is DESCENDING raises no event, because the
- * crossing's own exit drop would otherwise count.
+ * A sharp change is a knock that is extreme on all three accelerometer axes.
+ * Each axis is high-pass filtered, and the score of a sample is the
+ * smallest, over the three axes, of that axis's largest absolute filtered
+ * value in the last 40 ms. The score runs the lean form of SPOT (Siffer et
+ * al., KDD 2017, "Anomaly Detection in Streams with Extreme Value Theory")
+ * with the shape parameter gamma taken as 0. A streaming 98% quantile t of
+ * the score is learned, and the threshold is t plus the mean excess over t
+ * times ln((k / n) / q). After a warm-up, a score above the threshold flags
+ * a sharp change and is kept out of learning. The detector learns and judges
+ * only while the Vehicle Controller says the car is driving and moving. What
+ * it learns survives b4_proc_reset_run_stats() and
+ * b4_proc_clear_run_maximum() until power-off. The 200 ms refractory still
+ * decides which changes raise an event. A flag while a hump is DESCENDING
+ * raises no event, because the crossing's own exit drop would otherwise
+ * count.
+ *
+ * The sharp-change event feeds a cue for the Vehicle Controller, which
+ * combines it with the line sensors to decide that the car was lifted. The
+ * cue is set while a sharp change has been seen within the last 1 s. That
+ * hold is a safety bound, not a measured value: Buddy 4 publishes a terrain
+ * word every 20 ms, so 1 s covers the delivery and the rest of a both-black
+ * spell, while a bump cannot mark a spell much later. This module therefore
+ * reports a cue, not an impact count.
+ *
+ * A sudden wheel-target step rocks the chassis without much measured wheel
+ * speed change, so it can look like a hump or a sharp change. The Vehicle
+ * Controller puts the larger target change since its previous cycle in the
+ * drive word, in 8 mm/s units. The processor learns a streaming upper
+ * quantile of that field from the same driving samples, and a step above
+ * the quantile opens a jolt window. The window lasts how long the sharp-
+ * change score or hump amplitude stayed above its normal learned level after
+ * earlier jolts, with a 500 ms cap until enough jolts have been seen. Inside
+ * the window the sharp-change score is judged against a separate SPOT
+ * threshold learned only from in-window samples. While that post-jolt
+ * threshold is warming up, an in-window score must exceed the normal
+ * threshold plus the larger of the normal and post-jolt thresholds; after
+ * warm-up it must exceed the larger of the two. In-window judging still
+ * needs the normal statistics to be warm, and in-window samples advance
+ * that warm-up count without training the normal statistics. A hump must
+ * exceed the highest in-window amplitude seen so far, so a single jolt bump
+ * dies as a candidate while a sustained ramp still confirms. In-window
+ * samples do not train the normal sharp-change statistics or the hump noise
+ * median. The guard raises the bar; it never stops detection.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -80,31 +114,55 @@
  * 256 is then at most 128000, far inside int32_t. */
 #define B4_PROC_MAX_SEED_MG          500U
 
-/* Impact learning. The warm-up is 3 s of driving at 100 Hz, shorter than the
- * calibration size used in the SPOT paper. */
-static const uint32_t b4_proc_impact_warmup_samples = 300U;
+/* Sharp-change learning. The warm-up is 3 s of driving at 100 Hz, shorter
+ * than the calibration size used in the SPOT paper. */
+static const uint32_t b4_proc_sharp_warmup_samples = 300U;
+
+/* Safety bound on how long the Vehicle Controller lift cue stays set after
+ * a sharp change, in milliseconds. It is a bound, not a measured lift
+ * value: 1 s is 50 terrain words at 50 Hz, far beyond the 100 ms freshness
+ * window the VC applies, and short enough that a bump cannot mark a
+ * both-black spell much later in the run. */
+#define B4_PROC_CUE_HOLD_MS        1000U
 
 /* The streaming 98% quantile t is kept in units of 1/50 mg. A step above t
  * moves it up by 49 units and any other step moves it down by 1 unit. It
  * rests where 49 * P(above) = 1 * (1 - P(above)), so P(above) = 1 / 50, which
  * is the 98% quantile the paper uses for t. About 2% of steps are above t. */
-static const uint32_t b4_proc_impact_units_per_mg = 50U;
-static const uint32_t b4_proc_impact_up_step_x50 = 49U;
-static const uint32_t b4_proc_impact_down_step_x50 = 1U;
+static const uint32_t b4_proc_sharp_units_per_mg = 50U;
+static const uint32_t b4_proc_sharp_up_step_x50 = 49U;
+static const uint32_t b4_proc_sharp_down_step_x50 = 1U;
 
 /* threshold = t + mean_excess * ln((k / n) / q), with k / n = 0.02 and
  * q = 1 / 12000 per sample, so ln(0.02 / q) = ln(240) = 5.48. One expected
  * false flag per 2 minutes at 100 Hz is 1 in 12000 samples, which is the
  * rate taken from the M1 gate. The multiplier is kept as 548 / 100. */
-static const uint32_t b4_proc_impact_tail_mult_x100 = 548U;
-static const uint32_t b4_proc_impact_tail_div = 100U;
+static const uint32_t b4_proc_sharp_tail_mult_x100 = 548U;
+static const uint32_t b4_proc_sharp_tail_div = 100U;
+
+/* Jolt learning. The VC step field is an integer from 0 to 15. The learned
+ * level is kept in units of 1/16 step, and a step above it moves the level
+ * up by 63 units while any other step moves it down by 1. It rests where
+ * 63 * P(above) = 1 * (1 - P(above)), so P(above) = 1/64: a 98.4% upper
+ * quantile. The quantile target is a method parameter, like the 98% used
+ * for the sharp-change score. */
+static const uint32_t b4_proc_jolt_units_per_step = 16U;
+static const uint32_t b4_proc_jolt_up_step_x16 = 63U;
+static const uint32_t b4_proc_jolt_down_step_x16 = 1U;
+#define B4_PROC_JOLT_STEP_MAX      15U
+#define B4_PROC_JOLT_LEVEL_MAX     240U  /* 15 steps at 16 units each. */
+
+/* Safety bound on the learned rocking window, milliseconds. It is also the
+ * conservative fallback until this many jolts have supplied a duration. */
+#define B4_PROC_JOLT_WINDOW_MAX_MS 500U
+static const uint8_t b4_proc_jolt_window_warmup = 8U;
 
 /* The high-pass filter of each axis is one pole,
  * y = a * (y + x - x_previous), with a = exp(-2 * pi * fc / fs). The cutoff
  * fc = 4 Hz at fs = 100 Hz gives a = 0.777, which is 199 / 256. The cutoff is
  * an experiment value. The result held from 2 to 8 Hz in replay. */
-static const int32_t b4_proc_impact_hp_coeff = 199;
-static const int32_t b4_proc_impact_hp_scale = 256;
+static const int32_t b4_proc_sharp_hp_coeff = 199;
+static const int32_t b4_proc_sharp_hp_scale = 256;
 
 /* Indices of the accelerometer axes. */
 #define B4_PROC_AXIS_X      0U
@@ -114,12 +172,12 @@ static const int32_t b4_proc_impact_hp_scale = 256;
 
 /* The current sample and the 4 before it, which is 40 ms at 100 Hz. All three
  * axes must have moved within this window. */
-#define B4_PROC_IMPACT_WINDOW_SAMPLES   5U
+#define B4_PROC_SHARP_WINDOW_SAMPLES   5U
 
 /* The raw samples of each axis pass through a median of this many samples
- * before the impact high-pass filter. The size is an experiment value from an
- * offline replay. */
-#define B4_PROC_IMPACT_MEDIAN_SAMPLES   5U
+ * before the sharp-change high-pass filter. The size is an experiment value
+ * from an offline replay. */
+#define B4_PROC_SHARP_MEDIAN_SAMPLES   5U
 
 /* The raw hump-axis samples pass through a median of this many samples before
  * the hump detector sees them. The size is an experiment value. A median
@@ -128,7 +186,7 @@ static const int32_t b4_proc_impact_hp_scale = 256;
  * median helper. */
 #define B4_PROC_HUMP_MEDIAN_SAMPLES    50U
 
-/** @brief Learned statistics of the three-axis impact score.
+/** @brief Learned statistics of the three-axis sharp-change score.
  */
 typedef struct
 {
@@ -136,7 +194,27 @@ typedef struct
     uint32_t excess_sum;
     uint32_t k;
     uint32_t threshold_mg;
-} b4_proc_impact_t;
+} b4_proc_sharp_t;
+
+/** @brief Learned jolt guard state.
+ *
+ * The post-jolt statistics learn only from in-window samples. The window
+ * duration is a running mean of how long those samples stayed above the
+ * normal thresholds after past jolts, so it is learned from driving too.
+ */
+typedef struct
+{
+    b4_proc_sharp_t post_sharp;
+    uint32_t         window_start_ms;
+    uint32_t         last_above_ms;
+    uint16_t         window_ms;
+    uint16_t         post_n;
+    uint16_t         step_level_x16;
+    uint16_t         hump_level_mg;
+    uint8_t          window_count;
+    bool             b_window;
+    bool             b_pending;
+} b4_proc_jolt_t;
 
 /** @brief Private terrain state, including unpublished filter history.
  */
@@ -158,35 +236,43 @@ typedef struct
     uint32_t          cal_count;
     uint32_t          start_threshold_mg;
     uint32_t          complete_threshold_mg;
-    uint32_t          last_impact_timestamp_ms;
-    /* Learned impact score statistics. Only b4_proc_init() clears these, so
-     * what is learned carries across runs until power-off. excess_sum is
-     * multiplied as uint64_t, so the product cannot overflow. */
-    b4_proc_impact_t  impact;
+    uint32_t          last_change_ms;
+    /* Learned sharp-change score statistics. Only b4_proc_init() clears
+     * these, so what is learned carries across runs until power-off.
+     * excess_sum is multiplied as uint64_t, so the product cannot
+     * overflow. */
+    b4_proc_sharp_t  sharp;
+    /* Jolt guard, learned from the wheel-target step field. The step level,
+     * window duration and post-jolt statistics survive a run reset. */
+    b4_proc_jolt_t    jolt;
+    /* Lift cue latch: set while a sharp change was seen within the last
+     * B4_PROC_CUE_HOLD_MS. The run reset clears it. */
+    uint32_t          cue_start_ms;
     /* High-pass filter state of each axis, scaled by 256, and the last
      * absolute filtered values in milli-g. The run reset clears them. */
-    int32_t           impact_hp_x256[B4_PROC_AXIS_COUNT];
-    uint16_t          impact_ring_mg[B4_PROC_AXIS_COUNT]
-                                    [B4_PROC_IMPACT_WINDOW_SAMPLES];
+    int32_t           sharp_hp_x256[B4_PROC_AXIS_COUNT];
+    uint16_t          sharp_ring_mg[B4_PROC_AXIS_COUNT]
+                                    [B4_PROC_SHARP_WINDOW_SAMPLES];
     uint32_t          previous_timestamp_ms;
     uint32_t          mag_last_timestamp_ms;
     int64_t           turn_cross_accum;
     int16_t           mag_previous_x;
     int16_t           mag_previous_y;
-    /* Raw samples ahead of the impact filter, and the median of the previous
-     * sample. The fill count is shared by the three axes. Only the newest
-     * count entries are read, so a restart clears the count, not the data. */
-    int16_t           impact_raw_mg[B4_PROC_AXIS_COUNT]
-                                   [B4_PROC_IMPACT_MEDIAN_SAMPLES];
-    int16_t           impact_median_mg[B4_PROC_AXIS_COUNT];
+    /* Raw samples ahead of the sharp-change filter, and the median of the
+     * previous sample. The fill count is shared by the three axes. Only the
+     * newest count entries are read, so a restart clears the count, not the
+     * data. */
+    int16_t           sharp_raw_mg[B4_PROC_AXIS_COUNT]
+                                   [B4_PROC_SHARP_MEDIAN_SAMPLES];
+    int16_t           sharp_median_mg[B4_PROC_AXIS_COUNT];
     /* Raw hump-axis samples, read the same way. */
     int16_t           hump_raw_mg[B4_PROC_HUMP_MEDIAN_SAMPLES];
-    uint16_t          impact_n;
-    uint8_t           impact_raw_next;
-    uint8_t           impact_raw_count;
+    uint16_t          sharp_n;
+    uint8_t           sharp_raw_next;
+    uint8_t           sharp_raw_count;
     uint8_t           hump_raw_next;
     uint8_t           hump_raw_count;
-    uint8_t           impact_ring_next;
+    uint8_t           sharp_ring_next;
     uint8_t           hump_confirm_count;
     uint8_t           hump_complete_count;
     uint8_t           level_count;
@@ -196,12 +282,14 @@ typedef struct
     bool              b_initialized;
     bool              b_filter_ready;
     bool              b_previous_sample_valid;
-    bool              b_have_last_impact;
+    bool              b_have_last_change;
+    bool              b_cue_active;
     bool              b_incline_baseline_valid;
     bool              b_active_height_measured;
     bool              b_active_height_tainted;
     bool              b_level_since_gap;
     bool              b_learn;
+    bool              b_forward;
     bool              b_mag_previous_valid;
     bool              b_mag_seen;
     bool              b_cal_measuring;
@@ -413,7 +501,7 @@ b4_proc_median_step (int32_t amplitude_q8);
  * amplitude, up when the amplitude
  * is above it and down when below, and only when the drive input says the
  * car is driving, the baseline is valid, the moving mean is full, the
- * hump state is NORMAL or CANDIDATE and there is no impact. The travel
+ * hump state is NORMAL or CANDIDATE and there is no sharp change. The travel
  * comes from the drive speed and the time since the previous sample. The
  * same samples also feed the START sweep mean, whether or not the car
  * drives.
@@ -446,14 +534,15 @@ b4_proc_update_level (uint32_t amplitude_mg);
 static uint32_t
 b4_proc_sample_delta_mg (const b4_types_sample_t * p_sample);
 
-/** @brief Clear the impact filter states and the window of recent values.
+/** @brief Clear the sharp-change filter states and the window of recent
+ *         values.
  *
- * The learned impact statistics are kept.
+ * The learned sharp-change statistics are kept.
  */
 static void
-b4_proc_impact_clear_window (void);
+b4_proc_sharp_clear_window (void);
 
-/** @brief Filter the sample and find the three-axis impact score.
+/** @brief Filter the sample and find the three-axis sharp-change score.
  *
  * The filters run whenever the previous sample is valid. The window holds 0
  * for a sample that is not judged.
@@ -464,28 +553,71 @@ b4_proc_impact_clear_window (void);
  *         filtered value in milli-g.
  */
 static uint32_t
-b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged);
+b4_proc_sharp_score_mg (const b4_types_sample_t * p_sample, bool b_judged);
 
 /** @brief Learn the score statistics from one unflagged score.
  *
- * @param score_mg The three-axis impact score in milli-g.
+ * @param p_sharp The statistics to move, normal or post-jolt.
+ * @param score_mg The three-axis sharp-change score in milli-g.
  */
 static void
-b4_proc_impact_learn (uint32_t score_mg);
+b4_proc_sharp_learn (b4_proc_sharp_t * p_sharp, uint32_t score_mg);
 
-/** @brief Detect an impact and apply the configured refractory interval.
+/** @brief Open or close the jolt window for the current sample time.
+ *
+ * A pending step restarts the window. An expired window updates the running
+ * typical duration from the last sample that exceeded a normal threshold.
+ *
+ * @param now_ms The current sample timestamp in milliseconds.
+ */
+static void
+b4_proc_jolt_update (uint32_t now_ms);
+
+/** @brief Return the hump start threshold for the current sample.
+ *
+ * Outside a jolt window this is the normal learned threshold. Inside one it
+ * is the larger of that and the highest in-window amplitude seen so far, so
+ * a hump must keep making new highs to survive the window.
+ *
+ * @return The start threshold in milli-g.
+ */
+static uint32_t
+b4_proc_jolt_hump_threshold (void);
+
+/** @brief Record one in-window amplitude that is not part of a confirmed
+ *         hump.
+ *
+ * @param amplitude_mg The absolute incline offset in milli-g.
+ */
+static void
+b4_proc_jolt_learn_hump (uint32_t amplitude_mg);
+
+/** @brief Note whether the sample is still above a normal learned level.
+ *
+ * @param score_mg The sharp-change score in milli-g.
+ * @param hump_amplitude_mg The hump amplitude in milli-g.
+ * @param now_ms The sample timestamp in milliseconds.
+ */
+static void
+b4_proc_jolt_measure (uint32_t score_mg, uint32_t hump_amplitude_mg,
+                      uint32_t now_ms);
+
+/** @brief Detect a sharp IMU change and apply the refractory interval.
  *
  * Learns and judges only when the Vehicle Controller says the car is driving
  * and the previous sample is valid. A score above the threshold while the
  * hump state is DESCENDING is still kept out of learning, but it raises no
  * event and does not start the refractory clock, because the crossing's own
- * exit drop would otherwise count.
+ * exit drop would otherwise count. The caller latches the cue for the
+ * Vehicle Controller.
  *
  * @param p_sample The newest calibrated sample.
- * @return True when this sample starts an impact event.
+ * @param p_score_mg The destination for the sharp-change score in milli-g.
+ * @return True when this sample starts a sharp-change event.
  */
 static bool
-b4_proc_detect_impact (const b4_types_sample_t * p_sample);
+b4_proc_detect_sharp_change (const b4_types_sample_t * p_sample,
+                             uint32_t * p_score_mg);
 
 /** @brief Clear the active hump state without changing recorded peak history.
  */
@@ -500,7 +632,7 @@ b4_proc_reset_active_hump (void);
 static void
 b4_proc_advance_hump (uint32_t amplitude_mg, bool b_settled);
 
-/** @brief Classify motion from impact, hump state, and sample change.
+/** @brief Classify motion from the lift cue, hump state, and sample change.
  *
  * @param sample_delta_mg The largest raw axis change in milli-g.
  */
@@ -509,8 +641,9 @@ b4_proc_update_motion (uint32_t sample_delta_mg);
 
 /** @brief Start a hump candidate above the threshold from level ground.
  *
- * The median must also have had its learning hold since START, so the
- * roll of a launch cannot pass for a ramp.
+ * The car must be driving forward. The median must also have had its
+ * learning hold since START, so the roll of a launch cannot pass for a
+ * ramp.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -519,8 +652,9 @@ b4_proc_start_hump (uint32_t amplitude_mg);
 
 /** @brief Confirm or cancel a candidate hump.
  *
- * A sample below the threshold cancels the candidate, so confirmation
- * needs consecutive samples above the threshold.
+ * A sample below the threshold, or one taken while the car is not driving
+ * forward, cancels the candidate, so confirmation needs consecutive samples
+ * above the threshold while the car drives forward.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
@@ -627,10 +761,12 @@ b4_proc_process (const b4_types_sample_t * p_sample)
     uint32_t sample_delta_mg = 0U;
     uint32_t amplitude_mg = 0U;
     uint32_t hump_amplitude_mg = 0U;
+    uint32_t sharp_score_mg = 0U;
     int32_t vertical_mg = 0;
     int32_t incline_mg = 0;
     int32_t incline_delta_mg = 0;
     bool b_settled = false;
+    bool b_sharp_change = false;
 
     if (NULL == p_sample)
     {
@@ -647,11 +783,15 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         g_b4_proc_state.status.fault = B4_FAULT_INVALID_SAMPLE;
         g_b4_proc_state.status.sample.b_valid = false;
         g_b4_proc_state.status.b_sample_stale = true;
-        g_b4_proc_state.status.b_impact_event = false;
+        g_b4_proc_state.status.b_sharp_change_event = false;
+        g_b4_proc_state.status.b_lift_cue = false;
         g_b4_proc_state.status.b_hump_started_event = false;
         g_b4_proc_state.status.b_hump_completed_event = false;
+        g_b4_proc_state.status.b_jolt_window_active = false;
         g_b4_proc_state.status.tilt = B4_TILT_UNKNOWN;
         g_b4_proc_state.status.motion = B4_MOTION_QUIET;
+        g_b4_proc_state.jolt.b_window = false;
+        g_b4_proc_state.jolt.b_pending = false;
         b4_proc_abort_hump();
         g_b4_proc_state.b_previous_sample_valid = false;
     }
@@ -665,6 +805,8 @@ b4_proc_process (const b4_types_sample_t * p_sample)
              g_b4_proc_state.config.stale_after_ms))
         {
             b4_proc_abort_hump();
+            g_b4_proc_state.jolt.b_window = false;
+            g_b4_proc_state.jolt.b_pending = false;
             g_b4_proc_state.b_previous_sample_valid = false;
         }
 
@@ -673,13 +815,38 @@ b4_proc_process (const b4_types_sample_t * p_sample)
             g_b4_proc_state.drive_speed_mm_s;
         g_b4_proc_state.status.fault = B4_FAULT_NONE;
         g_b4_proc_state.status.b_sample_stale = false;
-        g_b4_proc_state.status.b_impact_event = false;
+        g_b4_proc_state.status.b_sharp_change_event = false;
         g_b4_proc_state.status.b_hump_started_event = false;
         g_b4_proc_state.status.b_hump_completed_event = false;
+        b4_proc_jolt_update(p_sample->timestamp_ms);
+        g_b4_proc_state.status.b_jolt_window_active =
+            g_b4_proc_state.jolt.b_window;
 
         sample_delta_mg = b4_proc_sample_delta_mg(p_sample);
-        g_b4_proc_state.status.b_impact_event =
-            b4_proc_detect_impact(p_sample);
+        b_sharp_change =
+            b4_proc_detect_sharp_change(p_sample, &sharp_score_mg);
+        g_b4_proc_state.status.b_sharp_change_event = b_sharp_change;
+
+        /* Latch the cue for the Vehicle Controller and let it expire on the
+         * sample clock, so a dropped word cannot keep it set. */
+        if (true == b_sharp_change)
+        {
+            g_b4_proc_state.cue_start_ms = p_sample->timestamp_ms;
+            g_b4_proc_state.b_cue_active = true;
+        }
+
+        if ((true == g_b4_proc_state.b_cue_active) &&
+            ((p_sample->timestamp_ms - g_b4_proc_state.cue_start_ms) <
+             B4_PROC_CUE_HOLD_MS))
+        {
+            g_b4_proc_state.status.b_lift_cue = true;
+        }
+        else
+        {
+            g_b4_proc_state.b_cue_active = false;
+            g_b4_proc_state.status.b_lift_cue = false;
+        }
+
         b4_proc_update_filter(p_sample);
         b4_proc_update_tilt();
 
@@ -713,10 +880,21 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         hump_amplitude_mg = b4_proc_hump_amplitude_mg(p_sample);
         b4_proc_update_noise(amplitude_mg);
 
-        if (false == g_b4_proc_state.status.b_impact_event)
+        if (false == b_sharp_change)
         {
             b4_proc_advance_hump(hump_amplitude_mg, b_settled);
             b4_proc_update_height();
+
+            /* A candidate may be a real ramp, so only NORMAL and CANDIDATE
+             * samples raise the in-window level. The sample that confirms
+             * a hump is already part of it and does not train the level. */
+            if ((true == g_b4_proc_state.jolt.b_window) &&
+                ((B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state) ||
+                 (B4_HUMP_CANDIDATE ==
+                  g_b4_proc_state.status.hump_state)))
+            {
+                b4_proc_jolt_learn_hump(hump_amplitude_mg);
+            }
         }
         else if ((B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
                  (B4_HUMP_COMPLETE != g_b4_proc_state.status.hump_state))
@@ -730,6 +908,8 @@ b4_proc_process (const b4_types_sample_t * p_sample)
             /* No hump in progress: the spike only delays the next one. */
         }
 
+        b4_proc_jolt_measure(sharp_score_mg, hump_amplitude_mg,
+                             p_sample->timestamp_ms);
         b4_proc_update_level(amplitude_mg);
         b4_proc_update_motion(sample_delta_mg);
         g_b4_proc_state.previous_timestamp_ms = p_sample->timestamp_ms;
@@ -910,19 +1090,30 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.status.b_hump_height_valid = false;
         g_b4_proc_state.status.sample.b_valid = false;
         g_b4_proc_state.status.b_sample_stale = true;
-        g_b4_proc_state.status.b_impact_event = false;
+        g_b4_proc_state.status.b_sharp_change_event = false;
+        g_b4_proc_state.status.b_lift_cue = false;
         g_b4_proc_state.status.b_hump_started_event = false;
         g_b4_proc_state.status.b_hump_completed_event = false;
+        g_b4_proc_state.status.b_jolt_window_active = false;
         g_b4_proc_state.status.fault = B4_FAULT_NONE;
         g_b4_proc_state.status.health = B4_HEALTH_READY;
         g_b4_proc_state.status.tilt = B4_TILT_UNKNOWN;
         g_b4_proc_state.status.motion = B4_MOTION_QUIET;
         g_b4_proc_state.b_filter_ready = false;
         g_b4_proc_state.b_previous_sample_valid = false;
-        g_b4_proc_state.b_have_last_impact = false;
-        g_b4_proc_state.last_impact_timestamp_ms = 0U;
-        b4_proc_impact_clear_window();
+        g_b4_proc_state.b_have_last_change = false;
+        g_b4_proc_state.last_change_ms = 0U;
+        b4_proc_sharp_clear_window();
         b4_proc_reset_active_hump();
+
+        g_b4_proc_state.b_cue_active = false;
+        g_b4_proc_state.cue_start_ms = 0U;
+
+        /* A jolt in progress belongs to the old run. The learned level,
+         * typical duration and post-jolt statistics are kept. */
+        g_b4_proc_state.jolt.b_window = false;
+        g_b4_proc_state.jolt.b_pending = false;
+        g_b4_proc_state.jolt.hump_level_mg = 0U;
 
         /* A reset also discards the attitude reference and the settled
          * window, because a calibration between runs changes the sensor
@@ -949,6 +1140,7 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.status.learn_count = 0U;
         g_b4_proc_state.status.drive_speed_mm_s = 0;
         g_b4_proc_state.b_learn = false;
+        g_b4_proc_state.b_forward = false;
         g_b4_proc_state.drive_speed_mm_s = 0;
         g_b4_proc_state.status.turn_cross = 0;
         g_b4_proc_state.status.turn = B4_TURN_UNKNOWN;
@@ -984,11 +1176,20 @@ b4_proc_clear_run_maximum (void)
         g_b4_proc_state.learn_count = 0U;
         g_b4_proc_state.travel_um = 0U;
         g_b4_proc_state.status.learn_count = 0U;
-        /* The impact filters, window and refractory clock restart, but the
-         * learned impact statistics are kept. */
-        b4_proc_impact_clear_window();
-        g_b4_proc_state.b_have_last_impact = false;
-        g_b4_proc_state.last_impact_timestamp_ms = 0U;
+        /* The sharp-change filters, window and refractory clock restart,
+         * and the cue latch is dropped, but the learned sharp-change
+         * statistics are kept. */
+        b4_proc_sharp_clear_window();
+        g_b4_proc_state.b_have_last_change = false;
+        g_b4_proc_state.last_change_ms = 0U;
+        g_b4_proc_state.b_cue_active = false;
+        g_b4_proc_state.cue_start_ms = 0U;
+        g_b4_proc_state.status.b_sharp_change_event = false;
+        g_b4_proc_state.status.b_lift_cue = false;
+        g_b4_proc_state.jolt.b_window = false;
+        g_b4_proc_state.jolt.b_pending = false;
+        g_b4_proc_state.jolt.hump_level_mg = 0U;
+        g_b4_proc_state.status.b_jolt_window_active = false;
     }
 
     return (result);
@@ -1020,6 +1221,10 @@ b4_proc_calibrate_level (void)
         g_b4_proc_state.cal_sum_mg = 0U;
         g_b4_proc_state.cal_count = 0U;
         g_b4_proc_state.b_cal_measuring = false;
+        g_b4_proc_state.jolt.b_window = false;
+        g_b4_proc_state.jolt.b_pending = false;
+        g_b4_proc_state.jolt.hump_level_mg = 0U;
+        g_b4_proc_state.status.b_jolt_window_active = false;
     }
 
     return (result);
@@ -1105,10 +1310,52 @@ b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg)
 }
 
 void
-b4_proc_set_drive (bool b_learn, int32_t speed_mm_s)
+b4_proc_set_drive (bool b_learn, int32_t speed_mm_s, bool b_forward)
 {
     g_b4_proc_state.b_learn = b_learn;
+    g_b4_proc_state.b_forward = b_forward;
     g_b4_proc_state.drive_speed_mm_s = speed_mm_s;
+}
+
+void
+b4_proc_set_target_step (uint8_t target_step)
+{
+    uint32_t step = target_step;
+    uint32_t level = 0U;
+
+    if (step > B4_PROC_JOLT_STEP_MAX)
+    {
+        step = B4_PROC_JOLT_STEP_MAX;
+    }
+
+    /* The step field is part of the drive word, so a new word that is not
+     * a driving sample does not train the guard. */
+    if (true == g_b4_proc_state.b_learn)
+    {
+        level = (uint32_t)g_b4_proc_state.jolt.step_level_x16;
+
+        if ((step * b4_proc_jolt_units_per_step) > level)
+        {
+            /* The level is in 1/16 step units and cannot exceed the largest
+             * encodable step, so the addition is bounded. */
+            level += b4_proc_jolt_up_step_x16;
+            if (level > B4_PROC_JOLT_LEVEL_MAX)
+            {
+                level = B4_PROC_JOLT_LEVEL_MAX;
+            }
+            g_b4_proc_state.jolt.b_pending = true;
+        }
+        else if (level > 0U)
+        {
+            level -= b4_proc_jolt_down_step_x16;
+        }
+        else
+        {
+            /* The level is already at zero. */
+        }
+
+        g_b4_proc_state.jolt.step_level_x16 = (uint16_t)level;
+    }
 }
 
 static uint32_t
@@ -1755,12 +2002,14 @@ b4_proc_update_noise (uint32_t amplitude_mg)
      * Excluding it pulled the median low, which lowered the threshold and
      * made more false candidates, a feedback loop. Learning stops once a
      * hump is confirmed (ASCENDING and later), so a real ramp cannot drag
-     * the threshold up. The sweep mean uses the same condition. */
+     * the threshold up. A jolt window is excluded as well, because its
+     * samples must not train the normal noise median; the sweep mean still
+     * uses the same condition. */
     if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
         (g_b4_proc_state.incline_window_count >= mean_samples) &&
         ((B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state) ||
          (B4_HUMP_CANDIDATE == g_b4_proc_state.status.hump_state)) &&
-        (false == g_b4_proc_state.status.b_impact_event))
+        (false == g_b4_proc_state.status.b_sharp_change_event))
     {
         int32_t  amplitude_q8 = 0;
         int32_t  speed_mm_s = g_b4_proc_state.drive_speed_mm_s;
@@ -1779,7 +2028,8 @@ b4_proc_update_noise (uint32_t amplitude_mg)
         }
 
         if ((true == g_b4_proc_state.b_learn) &&
-            (true == g_b4_proc_state.b_previous_sample_valid))
+            (true == g_b4_proc_state.b_previous_sample_valid) &&
+            (false == g_b4_proc_state.jolt.b_window))
         {
             elapsed_ms = g_b4_proc_state.status.sample.timestamp_ms -
                          g_b4_proc_state.previous_timestamp_ms;
@@ -1900,36 +2150,36 @@ b4_proc_sample_delta_mg (const b4_types_sample_t * p_sample)
 }
 
 static void
-b4_proc_impact_clear_window (void)
+b4_proc_sharp_clear_window (void)
 {
     uint32_t axis = 0U;
     uint32_t slot = 0U;
 
     for (axis = 0U; axis < B4_PROC_AXIS_COUNT; axis++)
     {
-        g_b4_proc_state.impact_hp_x256[axis] = 0;
+        g_b4_proc_state.sharp_hp_x256[axis] = 0;
 
-        for (slot = 0U; slot < B4_PROC_IMPACT_WINDOW_SAMPLES; slot++)
+        for (slot = 0U; slot < B4_PROC_SHARP_WINDOW_SAMPLES; slot++)
         {
-            g_b4_proc_state.impact_ring_mg[axis][slot] = 0U;
+            g_b4_proc_state.sharp_ring_mg[axis][slot] = 0U;
         }
     }
 
-    g_b4_proc_state.impact_ring_next = 0U;
+    g_b4_proc_state.sharp_ring_next = 0U;
 
     /* The next median starts a new history and is its own previous, so the
      * restart cannot look like a step. */
-    g_b4_proc_state.impact_raw_next = 0U;
-    g_b4_proc_state.impact_raw_count = 0U;
+    g_b4_proc_state.sharp_raw_next = 0U;
+    g_b4_proc_state.sharp_raw_count = 0U;
 
     for (axis = 0U; axis < B4_PROC_AXIS_COUNT; axis++)
     {
-        g_b4_proc_state.impact_median_mg[axis] = 0;
+        g_b4_proc_state.sharp_median_mg[axis] = 0;
     }
 }
 
 static uint32_t
-b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
+b4_proc_sharp_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
 {
     int32_t  accel_mg[B4_PROC_AXIS_COUNT] = {0, 0, 0};
     int32_t  median_mg = 0;
@@ -1946,17 +2196,17 @@ b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
     accel_mg[B4_PROC_AXIS_Z] = p_sample->accel_z_mg;
 
     /* A break in the stream starts the raw history again. Only the newest
-     * impact_raw_count entries are read, so the old data needs no clearing. */
+     * sharp_raw_count entries are read, so the old data needs no clearing. */
     if (false == g_b4_proc_state.b_previous_sample_valid)
     {
-        g_b4_proc_state.impact_raw_next = 0U;
-        g_b4_proc_state.impact_raw_count = 0U;
+        g_b4_proc_state.sharp_raw_next = 0U;
+        g_b4_proc_state.sharp_raw_count = 0U;
     }
 
-    b_restart = (0U == g_b4_proc_state.impact_raw_count);
-    filled = g_b4_proc_state.impact_raw_count;
+    b_restart = (0U == g_b4_proc_state.sharp_raw_count);
+    filled = g_b4_proc_state.sharp_raw_count;
 
-    if (filled < B4_PROC_IMPACT_MEDIAN_SAMPLES)
+    if (filled < B4_PROC_SHARP_MEDIAN_SAMPLES)
     {
         filled++;
     }
@@ -1966,16 +2216,16 @@ b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
         value_mg = 0U;
 
         /* The sample is validated to within +-4000 mg, so it fits int16_t. */
-        g_b4_proc_state.impact_raw_mg[axis][g_b4_proc_state.impact_raw_next]
+        g_b4_proc_state.sharp_raw_mg[axis][g_b4_proc_state.sharp_raw_next]
             = (int16_t)accel_mg[axis];
         median_mg = (int32_t)b4_proc_median_mg(
-            g_b4_proc_state.impact_raw_mg[axis], filled);
+            g_b4_proc_state.sharp_raw_mg[axis], filled);
 
         if (true == b_restart)
         {
             /* The median of validated samples is within +-4000 mg too, so it
              * fits int16_t. */
-            g_b4_proc_state.impact_median_mg[axis] = (int16_t)median_mg;
+            g_b4_proc_state.sharp_median_mg[axis] = (int16_t)median_mg;
         }
 
         if (true == g_b4_proc_state.b_previous_sample_valid)
@@ -1985,28 +2235,28 @@ b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
              * 2.05e6 scaled by 256. The filter state then stays within
              * 199 / 57 of that, about 7.2e6. The sum before the product is
              * at most 9.2e6, and 199 times it is 1.83e9, inside int32_t. */
-            g_b4_proc_state.impact_hp_x256[axis] =
-                (b4_proc_impact_hp_coeff *
-                 (g_b4_proc_state.impact_hp_x256[axis] +
-                  (b4_proc_impact_hp_scale *
+            g_b4_proc_state.sharp_hp_x256[axis] =
+                (b4_proc_sharp_hp_coeff *
+                 (g_b4_proc_state.sharp_hp_x256[axis] +
+                  (b4_proc_sharp_hp_scale *
                    (median_mg -
-                    (int32_t)g_b4_proc_state.impact_median_mg[axis])))) /
-                b4_proc_impact_hp_scale;
+                    (int32_t)g_b4_proc_state.sharp_median_mg[axis])))) /
+                b4_proc_sharp_hp_scale;
 
             if (true == b_judged)
             {
                 value_mg = b4_proc_abs_mg(
-                    g_b4_proc_state.impact_hp_x256[axis]) /
-                    (uint32_t)b4_proc_impact_hp_scale;
+                    g_b4_proc_state.sharp_hp_x256[axis]) /
+                    (uint32_t)b4_proc_sharp_hp_scale;
             }
         }
         else
         {
-            g_b4_proc_state.impact_hp_x256[axis] = 0;
+            g_b4_proc_state.sharp_hp_x256[axis] = 0;
         }
 
         /* Within +-4000 mg as above, so the narrowing is exact. */
-        g_b4_proc_state.impact_median_mg[axis] = (int16_t)median_mg;
+        g_b4_proc_state.sharp_median_mg[axis] = (int16_t)median_mg;
 
         if (value_mg > 0xFFFFU)
         {
@@ -2014,16 +2264,16 @@ b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
         }
 
         /* The value is at most 65535 here, so it fits uint16_t. */
-        g_b4_proc_state.impact_ring_mg[axis][g_b4_proc_state.impact_ring_next]
+        g_b4_proc_state.sharp_ring_mg[axis][g_b4_proc_state.sharp_ring_next]
             = (uint16_t)value_mg;
 
         window_max_mg = 0U;
 
-        for (slot = 0U; slot < B4_PROC_IMPACT_WINDOW_SAMPLES; slot++)
+        for (slot = 0U; slot < B4_PROC_SHARP_WINDOW_SAMPLES; slot++)
         {
-            if (g_b4_proc_state.impact_ring_mg[axis][slot] > window_max_mg)
+            if (g_b4_proc_state.sharp_ring_mg[axis][slot] > window_max_mg)
             {
-                window_max_mg = g_b4_proc_state.impact_ring_mg[axis][slot];
+                window_max_mg = g_b4_proc_state.sharp_ring_mg[axis][slot];
             }
         }
 
@@ -2033,98 +2283,305 @@ b4_proc_impact_score_mg (const b4_types_sample_t * p_sample, bool b_judged)
         }
     }
 
-    g_b4_proc_state.impact_ring_next++;
+    g_b4_proc_state.sharp_ring_next++;
 
-    if (g_b4_proc_state.impact_ring_next >= B4_PROC_IMPACT_WINDOW_SAMPLES)
+    if (g_b4_proc_state.sharp_ring_next >= B4_PROC_SHARP_WINDOW_SAMPLES)
     {
-        g_b4_proc_state.impact_ring_next = 0U;
+        g_b4_proc_state.sharp_ring_next = 0U;
     }
 
-    g_b4_proc_state.impact_raw_count = filled;
-    g_b4_proc_state.impact_raw_next++;
+    g_b4_proc_state.sharp_raw_count = filled;
+    g_b4_proc_state.sharp_raw_next++;
 
-    if (g_b4_proc_state.impact_raw_next >= B4_PROC_IMPACT_MEDIAN_SAMPLES)
+    if (g_b4_proc_state.sharp_raw_next >= B4_PROC_SHARP_MEDIAN_SAMPLES)
     {
-        g_b4_proc_state.impact_raw_next = 0U;
+        g_b4_proc_state.sharp_raw_next = 0U;
     }
 
     return (score_mg);
 }
 
 static void
-b4_proc_impact_learn (uint32_t score_mg)
+b4_proc_sharp_learn (b4_proc_sharp_t * p_sharp, uint32_t score_mg)
 {
-    b4_proc_impact_t * p_impact = &g_b4_proc_state.impact;
-    uint32_t t_mg = p_impact->t_x50 / b4_proc_impact_units_per_mg;
+    uint32_t t_mg = p_sharp->t_x50 / b4_proc_sharp_units_per_mg;
 
     if (score_mg > t_mg)
     {
-        p_impact->t_x50 += b4_proc_impact_up_step_x50;
-        p_impact->k++;
-        p_impact->excess_sum += score_mg - t_mg;
+        p_sharp->t_x50 += b4_proc_sharp_up_step_x50;
+        p_sharp->k++;
+        p_sharp->excess_sum += score_mg - t_mg;
     }
-    else if (p_impact->t_x50 > 0U)
+    else if (p_sharp->t_x50 > 0U)
     {
-        p_impact->t_x50 -= b4_proc_impact_down_step_x50;
+        p_sharp->t_x50 -= b4_proc_sharp_down_step_x50;
     }
     else
     {
         /* The estimate is already at zero. */
     }
 
-    if (p_impact->k > 0U)
+    if (p_sharp->k > 0U)
     {
         /* The 64-bit product cannot overflow, and the quotient is the mean
          * excess times 5.48, which is no larger than excess_sum times 5.48
          * and so fits uint32_t for any realistic excess_sum. */
-        p_impact->threshold_mg =
-            (p_impact->t_x50 / b4_proc_impact_units_per_mg) +
-            (uint32_t)(((uint64_t)p_impact->excess_sum *
-                        b4_proc_impact_tail_mult_x100) /
-                       ((uint64_t)b4_proc_impact_tail_div *
-                        (uint64_t)p_impact->k));
+        p_sharp->threshold_mg =
+            (p_sharp->t_x50 / b4_proc_sharp_units_per_mg) +
+            (uint32_t)(((uint64_t)p_sharp->excess_sum *
+                        b4_proc_sharp_tail_mult_x100) /
+                       ((uint64_t)b4_proc_sharp_tail_div *
+                        (uint64_t)p_sharp->k));
+    }
+}
+
+/** @brief Return the window length currently in force.
+ *
+ * @return The learned duration, or the safety cap before enough jolts.
+ */
+static uint32_t
+b4_proc_jolt_window_ms (void)
+{
+    uint32_t window_ms = B4_PROC_JOLT_WINDOW_MAX_MS;
+
+    if (g_b4_proc_state.jolt.window_count >=
+        b4_proc_jolt_window_warmup)
+    {
+        window_ms = g_b4_proc_state.jolt.window_ms;
+        if (window_ms > B4_PROC_JOLT_WINDOW_MAX_MS)
+        {
+            window_ms = B4_PROC_JOLT_WINDOW_MAX_MS;
+        }
+    }
+
+    return (window_ms);
+}
+
+/** @brief Fold the observed settle time of a closing window into the mean.
+ *
+ * A window with no sample above a normal level teaches nothing. The sample
+ * timestamp subtraction is unsigned, so it is wrap-safe.
+ */
+static void
+b4_proc_jolt_close_window (void)
+{
+    uint32_t settle_ms = g_b4_proc_state.jolt.last_above_ms -
+                         g_b4_proc_state.jolt.window_start_ms;
+    uint32_t count = g_b4_proc_state.jolt.window_count;
+
+    if (settle_ms > B4_PROC_JOLT_WINDOW_MAX_MS)
+    {
+        settle_ms = B4_PROC_JOLT_WINDOW_MAX_MS;
+    }
+
+    if ((settle_ms > 0U) &&
+        (count < B4_PROC_MAX_COUNTER))
+    {
+        if (0U == count)
+        {
+            g_b4_proc_state.jolt.window_ms = (uint16_t)settle_ms;
+        }
+        else
+        {
+            uint32_t sum_ms = ((uint32_t)g_b4_proc_state.jolt.window_ms *
+                               count) + settle_ms;
+
+            g_b4_proc_state.jolt.window_ms =
+                (uint16_t)(sum_ms / (count + 1U));
+        }
+        g_b4_proc_state.jolt.window_count = (uint8_t)(count + 1U);
+    }
+
+    g_b4_proc_state.jolt.b_window = false;
+}
+
+static void
+b4_proc_jolt_update (uint32_t now_ms)
+{
+    uint32_t window_ms = 0U;
+
+    if (true == g_b4_proc_state.jolt.b_pending)
+    {
+        if (true == g_b4_proc_state.jolt.b_window)
+        {
+            b4_proc_jolt_close_window();
+        }
+
+        g_b4_proc_state.jolt.b_window = true;
+        g_b4_proc_state.jolt.b_pending = false;
+        g_b4_proc_state.jolt.window_start_ms = now_ms;
+        g_b4_proc_state.jolt.last_above_ms = now_ms;
+    }
+
+    if (true == g_b4_proc_state.jolt.b_window)
+    {
+        window_ms = b4_proc_jolt_window_ms();
+        if ((now_ms - g_b4_proc_state.jolt.window_start_ms) >= window_ms)
+        {
+            b4_proc_jolt_close_window();
+        }
+    }
+}
+
+static uint32_t
+b4_proc_jolt_hump_threshold (void)
+{
+    uint32_t threshold_mg = g_b4_proc_state.start_threshold_mg;
+
+    if ((true == g_b4_proc_state.jolt.b_window) &&
+        ((uint32_t)g_b4_proc_state.jolt.hump_level_mg > threshold_mg))
+    {
+        threshold_mg = (uint32_t)g_b4_proc_state.jolt.hump_level_mg;
+    }
+
+    return (threshold_mg);
+}
+
+static void
+b4_proc_jolt_learn_hump (uint32_t amplitude_mg)
+{
+    if (amplitude_mg > (uint32_t)g_b4_proc_state.jolt.hump_level_mg)
+    {
+        if (amplitude_mg > (uint32_t)UINT16_MAX)
+        {
+            amplitude_mg = (uint32_t)UINT16_MAX;
+        }
+        g_b4_proc_state.jolt.hump_level_mg = (uint16_t)amplitude_mg;
+    }
+    else if (amplitude_mg < (uint32_t)g_b4_proc_state.jolt.hump_level_mg)
+    {
+        /* The level is a peak with a slow decay, one milli-g per eligible
+         * sample, so an old jolt excursion cannot hold the bar up forever.
+         * An equal amplitude does not decay, so a plateau cancels. */
+        g_b4_proc_state.jolt.hump_level_mg--;
+    }
+    else
+    {
+        /* The level is already at zero. */
+    }
+}
+
+static void
+b4_proc_jolt_measure (uint32_t score_mg, uint32_t hump_amplitude_mg,
+                      uint32_t now_ms)
+{
+    if ((true == g_b4_proc_state.jolt.b_window) &&
+        (true == g_b4_proc_state.b_learn))
+    {
+        if ((score_mg > g_b4_proc_state.sharp.threshold_mg) ||
+            (hump_amplitude_mg > g_b4_proc_state.start_threshold_mg))
+        {
+            g_b4_proc_state.jolt.last_above_ms = now_ms;
+        }
+    }
+    else if ((false == g_b4_proc_state.jolt.b_window) &&
+             (true == g_b4_proc_state.b_learn) &&
+             (0U < g_b4_proc_state.jolt.hump_level_mg))
+    {
+        /* The in-window amplitude level is learned from jolt windows only,
+         * so outside them it slowly forgets. */
+        g_b4_proc_state.jolt.hump_level_mg--;
+    }
+    else
+    {
+        /* Nothing to measure or decay. */
     }
 }
 
 static bool
-b4_proc_detect_impact (const b4_types_sample_t * p_sample)
+b4_proc_detect_sharp_change (const b4_types_sample_t * p_sample,
+                             uint32_t * p_score_mg)
 {
     bool b_detected = false;
     bool b_flagged = false;
     bool b_refractory_elapsed = false;
     uint32_t score_mg = 0U;
     bool b_judged = false;
+    bool b_in_window = g_b4_proc_state.jolt.b_window;
+    b4_proc_sharp_t * p_sharp = &g_b4_proc_state.sharp;
+    uint32_t threshold_mg = 0U;
+    uint32_t normal_threshold_mg = g_b4_proc_state.sharp.threshold_mg;
+    uint32_t post_threshold_mg = g_b4_proc_state.jolt.post_sharp.threshold_mg;
+    uint32_t larger_threshold_mg = 0U;
+    bool b_normal_ready = (g_b4_proc_state.sharp_n >=
+                           b4_proc_sharp_warmup_samples);
+    bool b_post_ready = (g_b4_proc_state.jolt.post_n >=
+                         b4_proc_sharp_warmup_samples);
+    bool b_ready = false;
 
     b_judged = ((true == g_b4_proc_state.b_learn) &&
                 (true == g_b4_proc_state.b_previous_sample_valid));
-    score_mg = b4_proc_impact_score_mg(p_sample, b_judged);
+    score_mg = b4_proc_sharp_score_mg(p_sample, b_judged);
+    *p_score_mg = score_mg;
+
+    if (true == b_in_window)
+    {
+        p_sharp = &g_b4_proc_state.jolt.post_sharp;
+    }
 
     if (true == b_judged)
     {
-        if ((g_b4_proc_state.impact_n >= b4_proc_impact_warmup_samples) &&
-            (score_mg > g_b4_proc_state.impact.threshold_mg))
+        if (true == b_in_window)
+        {
+            /* In-window judging needs the normal statistics to be warm.
+             * While the post-jolt statistics warm up, both learned bars must
+             * be cleared together. After warm-up the larger one is enough. */
+            if (true == b_normal_ready)
+            {
+                larger_threshold_mg = normal_threshold_mg;
+                if (post_threshold_mg > larger_threshold_mg)
+                {
+                    larger_threshold_mg = post_threshold_mg;
+                }
+
+                if (true == b_post_ready)
+                {
+                    threshold_mg = larger_threshold_mg;
+                }
+                else
+                {
+                    threshold_mg = normal_threshold_mg + larger_threshold_mg;
+                }
+                b_ready = true;
+            }
+        }
+        else
+        {
+            threshold_mg = normal_threshold_mg;
+            b_ready = b_normal_ready;
+        }
+
+        if ((true == b_ready) && (score_mg > threshold_mg))
         {
             /* Not learned from. */
             b_flagged = true;
         }
         else
         {
-            b4_proc_impact_learn(score_mg);
+            b4_proc_sharp_learn(p_sharp, score_mg);
         }
 
-        if (g_b4_proc_state.impact_n < b4_proc_impact_warmup_samples)
+        /* The normal count keeps its old meaning, every judged driving
+         * sample, so an open jolt window cannot starve normal warm-up. */
+        if (g_b4_proc_state.sharp_n < b4_proc_sharp_warmup_samples)
         {
-            g_b4_proc_state.impact_n++;
+            g_b4_proc_state.sharp_n++;
+        }
+
+        if ((true == b_in_window) &&
+            (g_b4_proc_state.jolt.post_n < b4_proc_sharp_warmup_samples))
+        {
+            g_b4_proc_state.jolt.post_n++;
         }
     }
 
-    if (false == g_b4_proc_state.b_have_last_impact)
+    if (false == g_b4_proc_state.b_have_last_change)
     {
         b_refractory_elapsed = true;
     }
     else if ((p_sample->timestamp_ms -
-              g_b4_proc_state.last_impact_timestamp_ms) >=
-             g_b4_proc_state.config.impact_refractory_ms)
+              g_b4_proc_state.last_change_ms) >=
+             g_b4_proc_state.config.sharp_change_refractory_ms)
     {
         b_refractory_elapsed = true;
     }
@@ -2137,8 +2594,8 @@ b4_proc_detect_impact (const b4_types_sample_t * p_sample)
         (B4_HUMP_DESCENDING != g_b4_proc_state.status.hump_state))
     {
         b_detected = true;
-        g_b4_proc_state.last_impact_timestamp_ms = p_sample->timestamp_ms;
-        g_b4_proc_state.b_have_last_impact = true;
+        g_b4_proc_state.last_change_ms = p_sample->timestamp_ms;
+        g_b4_proc_state.b_have_last_change = true;
     }
 
     return (b_detected);
@@ -2193,24 +2650,38 @@ b4_proc_advance_hump (uint32_t amplitude_mg, bool b_settled)
 
 /** @brief Start a hump candidate above the threshold from level ground.
  *
- * The median must also have had its learning hold since START, so the
- * roll of a launch cannot pass for a ramp.
+ * The car must be driving forward. The median must also have had its
+ * learning hold since START, so the roll of a launch cannot pass for a
+ * ramp. Inside a jolt window the threshold includes the highest amplitude
+ * already seen in that window.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
 static void
 b4_proc_start_hump (uint32_t amplitude_mg)
 {
+    uint32_t threshold_mg = b4_proc_jolt_hump_threshold();
+    bool b_above = (amplitude_mg >= threshold_mg);
+
+    /* Inside a jolt window the level is the last amplitude seen, so a
+     * plateau cannot start a new candidate after one was cancelled. */
+    if ((true == g_b4_proc_state.jolt.b_window) &&
+        (amplitude_mg <= (uint32_t)g_b4_proc_state.jolt.hump_level_mg))
+    {
+        b_above = false;
+    }
+
     /* NOTE: After a data gap the car may already be partway over a ramp,
      * so a hump may start only from confirmed level ground. Otherwise the
      * rest of the crossing would publish a partial height as valid. */
     /* The learning hold is one time constant of the median, 2^n learning
      * samples. The shift is validated to at most 12, so the shift of one
      * stays within uint32_t. */
-    if ((true == g_b4_proc_state.b_level_since_gap) &&
+    if ((true == g_b4_proc_state.b_forward) &&
+        (true == g_b4_proc_state.b_level_since_gap) &&
         (g_b4_proc_state.learn_count >=
          ((uint32_t)1U << g_b4_proc_state.config.noise_step_shift)) &&
-        (amplitude_mg >= g_b4_proc_state.start_threshold_mg))
+        (true == b_above))
     {
         g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
         g_b4_proc_state.b_active_height_measured = false;
@@ -2223,15 +2694,35 @@ b4_proc_start_hump (uint32_t amplitude_mg)
 
 /** @brief Confirm or cancel a candidate hump.
  *
- * A sample below the threshold cancels the candidate, so confirmation
- * needs consecutive samples above the threshold.
+ * A sample below the threshold, or one taken while the car is not driving
+ * forward, cancels the candidate, so confirmation needs consecutive samples
+ * above the threshold while the car drives forward. Inside a jolt window
+ * the threshold also includes the highest in-window amplitude, so a single
+ * jolt bump cancels while a rising ramp keeps setting new highs.
  *
  * @param amplitude_mg The absolute incline offset in milli-g.
  */
 static void
 b4_proc_update_hump_candidate (uint32_t amplitude_mg)
 {
-    if (amplitude_mg >= g_b4_proc_state.start_threshold_mg)
+    uint32_t threshold_mg = b4_proc_jolt_hump_threshold();
+    bool b_continue = (amplitude_mg >= threshold_mg);
+
+    /* Inside a jolt window the candidate must make a new high, so a bump
+     * that only holds its level cancels instead of confirming. */
+    if ((true == g_b4_proc_state.jolt.b_window) &&
+        (amplitude_mg <= (uint32_t)g_b4_proc_state.jolt.hump_level_mg))
+    {
+        b_continue = false;
+    }
+
+    if (false == g_b4_proc_state.b_forward)
+    {
+        /* A stop or a pivot breaks the candidate, but a confirmed hump
+         * keeps going through a brief dip in wheel speed. */
+        b4_proc_reset_active_hump();
+    }
+    else if (true == b_continue)
     {
         if (amplitude_mg >
             g_b4_proc_state.status.current_hump_peak_mg)
@@ -2420,9 +2911,9 @@ b4_proc_clamp_cross (int64_t value)
 static void
 b4_proc_update_motion (uint32_t sample_delta_mg)
 {
-    if (true == g_b4_proc_state.status.b_impact_event)
+    if (true == g_b4_proc_state.status.b_lift_cue)
     {
-        g_b4_proc_state.status.motion = B4_MOTION_IMPACT;
+        g_b4_proc_state.status.motion = B4_MOTION_LIFTED;
     }
     else if ((B4_HUMP_CANDIDATE ==
               g_b4_proc_state.status.hump_state) ||

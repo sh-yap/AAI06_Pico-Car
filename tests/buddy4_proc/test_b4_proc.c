@@ -35,8 +35,16 @@ typedef struct
     int      started;
     int      completed;
     int      valid;
+    int      cue_rises;
+    int      window_opens;
     double   height_mm;   /* first valid hump */
 } result_t;
+
+typedef struct
+{
+    int     at;           /* sample index for the new drive word */
+    uint8_t step;         /* B4 target-step field, 8 mm/s units */
+} jolt_event_t;
 
 static uint32_t g_seed = 12345U;
 static uint32_t g_lcg = 12345U;
@@ -102,9 +110,9 @@ trace_cross (trace_t * t, double h, int side, int rise, int crest, int fall)
 }
 
 static void
-add_vibration (trace_t * t, int from, int amp, int mode)
+add_vibration_range (trace_t * t, int from, int to, int amp, int mode)
 {
-    for (int i = from; i < t->n; i++)
+    for (int i = from; (i < to) && (i < t->n); i++)
     {
         int s = ((i & 1) != 0) ? 1 : -1;
         int dx = (mode == 0) ? rnd(amp) : (s * amp);
@@ -117,11 +125,33 @@ add_vibration (trace_t * t, int from, int amp, int mode)
 }
 
 static void
-run_trace (const trace_t * t, result_t * r)
+add_vibration (trace_t * t, int from, int amp, int mode)
+{
+    add_vibration_range(t, from, t->n, amp, mode);
+}
+
+/* A flat-topped pulse on all three axes, long enough to pass the
+ * sharp-change median. */
+static void
+add_pulse (trace_t * t, int from, int width, int amp)
+{
+    for (int i = from; (i < (from + width)) && (i < t->n); i++)
+    {
+        t->x[i] += amp;
+        t->y[i] += amp;
+        t->z[i] += amp;
+    }
+}
+
+static void
+run_trace_script (const trace_t * t, result_t * r, bool b_forward,
+                  const jolt_event_t * events, int event_count)
 {
     b4_cfg_config_t cfg = b4_cfg_default();
     b4_types_status_t st;
     b4_types_sample_t s = {0};
+    bool window_prev = false;
+    bool cue_prev = false;
 
     *r = (result_t){0};
     b4_proc_init(&cfg);
@@ -129,7 +159,14 @@ run_trace (const trace_t * t, result_t * r)
     for (int i = 0; i < t->n; i++)
     {
         /* The car drives for the whole trace: the learning input is on. */
-        b4_proc_set_drive(true, DRIVE_SPEED_MM_S);
+        b4_proc_set_drive(true, DRIVE_SPEED_MM_S, b_forward);
+        for (int e = 0; e < event_count; e++)
+        {
+            if (events[e].at == i)
+            {
+                b4_proc_set_target_step(events[e].step);
+            }
+        }
         s.timestamp_ms = (uint32_t)(1000 + (i * SAMPLE_MS));
         s.accel_x_mg = t->x[i];
         s.accel_y_mg = t->y[i];
@@ -137,6 +174,22 @@ run_trace (const trace_t * t, result_t * r)
         s.b_valid = true;
         b4_proc_process(&s);
         b4_proc_get_status(s.timestamp_ms, &st);
+        if (st.b_jolt_window_active != window_prev)
+        {
+            if (st.b_jolt_window_active)
+            {
+                r->window_opens++;
+            }
+            window_prev = st.b_jolt_window_active;
+        }
+        if (st.b_lift_cue != cue_prev)
+        {
+            if (st.b_lift_cue)
+            {
+                r->cue_rises++;
+            }
+            cue_prev = st.b_lift_cue;
+        }
         if (st.b_hump_started_event)
         {
             r->started++;
@@ -157,6 +210,18 @@ run_trace (const trace_t * t, result_t * r)
 }
 
 static void
+run_trace_drive (const trace_t * t, result_t * r, bool b_forward)
+{
+    run_trace_script(t, r, b_forward, NULL, 0);
+}
+
+static void
+run_trace (const trace_t * t, result_t * r)
+{
+    run_trace_drive(t, r, true);
+}
+
+static void
 check_known (const char * name, bool ok, bool known_limit,
              const result_t * r)
 {
@@ -165,9 +230,11 @@ check_known (const char * name, bool ok, bool known_limit,
     {
         g_failed++;
     }
-    printf("%s %-42s started=%d completed=%d valid=%d height=%.2f mm\n",
+    printf("%s %-42s started=%d completed=%d valid=%d cue=%d "
+           "windows=%d height=%.2f mm\n",
            ok ? "PASS" : (known_limit ? "KNOWN" : "FAIL"), name, r->started,
-           r->completed, r->valid, r->height_mm);
+           r->completed, r->valid, r->cue_rises, r->window_opens,
+           r->height_mm);
 }
 
 static void
@@ -189,7 +256,7 @@ case_flat (const char * name, int amp, int mode)
         add_vibration(&g_t, 80, amp, mode);
     }
     run_trace(&g_t, &r);
-    check(name, r.started == 0 && r.completed == 0, &r);
+    check(name, r.started == 0 && r.completed == 0 && r.cue_rises == 0, &r);
 }
 
 /* Returns the crossing height. A positive ref_mm adds a tolerance_mm check. */
@@ -217,6 +284,132 @@ case_cross (const char * name, int side, int amp, int mode, double ref_mm,
     }
     check(name, ok, &r);
     return r.height_mm;
+}
+
+/* A clear crossing while the car does not drive forward, such as during a
+ * recovery pivot. No hump may start. */
+static void
+case_cross_not_forward (const char * name)
+{
+    result_t r;
+    g_t.n = 0;
+    g_lcg = g_seed;
+    trace_flat(&g_t, 80);
+    trace_flat(&g_t, LEAD_IN_SAMPLES);
+    trace_cross(&g_t, 11.0, 1, 40, 20, 40);
+    trace_flat(&g_t, 100);
+    run_trace_drive(&g_t, &r, false);
+    check(name, r.started == 0 && r.completed == 0, &r);
+}
+
+/* Jolt guard: learn normal sharp-change statistics on gentle random noise,
+ * then train the in-window statistics with eight jolt windows. A
+ * motor-jolt-sized pulse in a later window must stay below the post-jolt
+ * bar, while a much larger tap-like pulse in the same window must still
+ * raise the lift cue. */
+static void
+case_jolt_cue (const char * name)
+{
+    static const int jolts[8] = {300, 360, 420, 480, 540, 600, 660, 720};
+    jolt_event_t events[9];
+    result_t r;
+
+    g_t.n = 0;
+    g_lcg = g_seed;
+    trace_flat(&g_t, 300);
+    add_vibration_range(&g_t, 0, 300, 500, 0);
+    trace_flat(&g_t, 500);
+    for (int k = 0; k < 8; k++)
+    {
+        events[k].at = jolts[k];
+        events[k].step = 15U;
+        add_vibration_range(&g_t, jolts[k], jolts[k] + 50, 200, 1);
+    }
+    trace_flat(&g_t, 300);
+    add_pulse(&g_t, 1005, 7, 300);
+    add_pulse(&g_t, 1030, 7, 3000);
+    events[8].at = 1000;
+    events[8].step = 15U;
+
+    run_trace_script(&g_t, &r, true, events, 9);
+    check(name, (r.window_opens > 0) && (r.cue_rises == 1), &r);
+}
+
+/* The same tap pulses with post-jolt statistics cold: the normal statistics
+ * are warm, but no earlier jolt window has trained post_n. The motor-jolt
+ * pulse must be suppressed by the warm-up rule while the much larger tap
+ * still flags. */
+static void
+case_jolt_cue_warmup (const char * name)
+{
+    jolt_event_t event;
+    result_t r;
+
+    g_t.n = 0;
+    g_lcg = g_seed;
+    trace_flat(&g_t, 300);
+    add_vibration_range(&g_t, 0, 300, 100, 0);
+    trace_flat(&g_t, 700);
+    trace_flat(&g_t, 100);
+    add_pulse(&g_t, 1005, 7, 250);
+    add_pulse(&g_t, 1030, 7, 3000);
+    event.at = 1000;
+    event.step = 15U;
+
+    run_trace_script(&g_t, &r, true, &event, 1);
+    check(name, (r.window_opens > 0) && (r.cue_rises >= 1), &r);
+}
+
+/* A jolt-sized transient of hump height must not confirm, but a sustained
+ * crossing that keeps making new highs in the same window must. */
+static void
+case_jolt_hump (const char * name, bool b_sustained)
+{
+    jolt_event_t event;
+    result_t r;
+
+    g_t.n = 0;
+    g_lcg = g_seed;
+    trace_flat(&g_t, 80);
+    trace_flat(&g_t, LEAD_IN_SAMPLES);
+    event.at = g_t.n;
+    event.step = 15U;
+    if (true == b_sustained)
+    {
+        trace_cross(&g_t, 11.0, 1, 40, 20, 40);
+    }
+    else
+    {
+        trace_cross(&g_t, 11.0, 1, 1, 30, 1);
+    }
+    trace_flat(&g_t, 100);
+
+    run_trace_script(&g_t, &r, true, &event, 1);
+    if (true == b_sustained)
+    {
+        check(name, (r.started == 1) && (r.completed == 1), &r);
+    }
+    else
+    {
+        check(name, (r.started == 0) && (r.completed == 0), &r);
+    }
+}
+
+/* No jolt word means the old detector rules, with no window opened. */
+static void
+case_no_jolt (const char * name)
+{
+    result_t r;
+
+    g_t.n = 0;
+    g_lcg = g_seed;
+    trace_flat(&g_t, 80);
+    trace_flat(&g_t, LEAD_IN_SAMPLES);
+    trace_cross(&g_t, 11.0, 1, 40, 20, 40);
+    trace_flat(&g_t, 100);
+    run_trace(&g_t, &r);
+    check(name, (r.started == 1) && (r.completed == 1) &&
+                (r.window_opens == 0), &r);
 }
 
 /* Launch: 50 mg forward step for 300 ms plus a 60 mg half-sine roll rock. */
@@ -281,6 +474,12 @@ main (int argc, char ** argv)
     case_flat("flat clean", 0, 0);
     clean_r = case_cross("right crossing clean", 1, 0, 0, 0.0, 0.0);
     clean_l = case_cross("left crossing clean", -1, 0, 0, 0.0, 0.0);
+    case_cross_not_forward("right crossing not forward");
+    case_jolt_cue("jolt cue bar raised, big tap still raises the cue");
+    case_jolt_cue_warmup("jolt cue warm-up bar, big tap still raises the cue");
+    case_jolt_hump("jolt short bump rejected", false);
+    case_jolt_hump("jolt sustained ramp still confirms", true);
+    case_no_jolt("no jolt keeps old crossover behaviour");
     case_wobble("slow roll wobble 2Hz +-40 +-60 rnd");
 
     case_flat("vib flat random +-60", 60, 0);

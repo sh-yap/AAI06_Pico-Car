@@ -108,7 +108,7 @@
   .ev:last-child{border-bottom:none}
   .ev .t{font-family:var(--mono);color:var(--muted);font-size:12px}
   .ev .tag{font-family:var(--mono);font-size:11px;font-weight:600;text-transform:uppercase;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--muted);text-align:center}
-  .ev .tag.state{color:var(--accent)} .ev .tag.fault{color:var(--bad)} .ev .tag.obst{color:var(--warn)} .ev .tag.bcode{color:var(--err)} .ev .tag.hump{color:var(--dist)} .ev .tag.impact{color:var(--bad)} .ev .tag.motion{color:var(--accent)}
+  .ev .tag.state{color:var(--accent)} .ev .tag.fault{color:var(--bad)} .ev .tag.obst{color:var(--warn)} .ev .tag.bcode{color:var(--err)} .ev .tag.hump{color:var(--dist)} .ev .tag.motion{color:var(--accent)}
   .ev .d{min-width:0;overflow-wrap:anywhere} .ev .d b{font-family:var(--mono)}
   .foot{font-size:12px;color:var(--muted);margin-top:18px}
 
@@ -233,7 +233,7 @@
 const STATES=['INIT','READY','LINE_FOLLOW','EXECUTE_NAV','OBSTACLE_STOP','OBSTACLE_SCAN','BYPASS','LINE_RECOVERY','FINISHED','SAFE_STOP'];
 const NAV=['NONE','LEFT','RIGHT','STRAIGHT','UTURN'];
 const LINE=['LEFT','CENTRE','RIGHT','LOST','JUNCTION'];
-const MOTION=['QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IMPACT','TURNING'];
+const MOTION=['QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','LIFTED','TURNING'];
 const AVOID=['STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY'];
 const CMD=['unknown','start','stop','status'];
 const RUN=['END','BEGIN'];
@@ -243,7 +243,7 @@ const F=(k,kind,bits,names)=>({k,kind,bits,names});
 const FMT={
   'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16),F('tgt_l_mm_s','s',10),F('tgt_r_mm_s','s',10),F('slew_l_mm_s','s',10),F('slew_r_mm_s','s',10),F('pwm_l','s',11),F('pwm_r','s',11)],
   'robot/telemetry/line':[F('pos','n',3,LINE),F('err','s',8),F('sensors','u',2),F('centre_adc','u',12),F('right_adc','u',12)],
-  'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10),F('turn_dps','s',11),F('impact_count','u',3)],
+  'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10),F('turn_dps','s',11)],
   'robot/heartbeat':[F('seq','u',16),F('state','n',4,STATES),F('fault','u',10),F('ev_drop','u',8)],
   'robot/state':[F('state','n',4,STATES),F('fault','u',10)],
   'robot/event/barcode':[F('code','n',3,BARCODE),F('command','n',3,NAV)],
@@ -298,7 +298,7 @@ const CAP_PATH=20000, CAP_HITS=8000;
 const STATE_COL={LINE_FOLLOW:'--ok',LINE_RECOVERY:'--warn',OBSTACLE_SCAN:'--right',OBSTACLE_STOP:'--right',BYPASS:'--err',EXECUTE_NAV:'--accent',SAFE_STOP:'--bad',FINISHED:'--ok'};
 const stateCol=s=>css(STATE_COL[s]||'--muted');
 
-function newModel(){return{build:'',first:null,last:null,motion:[],line:[],states:[],events:[],drops:0,pos:{},faults:[],finalState:null,peakSpeed:0,distance:0,runs:0,humps:0,maxHumpDmm:null,tilt:null,turnDps:null,motionName:null,impactCount:null,impactEvents:0,t0:null,prevState:null,prevFault:-1,
+function newModel(){return{build:'',first:null,last:null,motion:[],line:[],states:[],events:[],drops:0,pos:{},faults:[],finalState:null,peakSpeed:0,distance:0,runs:0,humps:0,maxHumpDmm:null,tilt:null,turnDps:null,motionName:null,t0:null,prevState:null,prevFault:-1,
   paths:[],cur:null,pose:null,allowJoin:false,lastLine:null,lastMotion:null,cal:null,calB:null,scans:[],barcodes:[],bscans:[]};}
 
 /* Path map: one path per run, dead-reckoned from the encoder counts. */
@@ -347,7 +347,7 @@ function handle(M,ts,topic,j){
   else if(topic==='robot/event/calibration'){if(j.result==='OK')M.cal={c:+j.centre_thr,r:+j.right_thr};if(j.barcode_thr!=null)M.calB={low:+j.barcode_low,high:+j.barcode_high,thr:+j.barcode_thr,learned:!!+j.barcode_learned,ok:j.result==='OK'};M.events.push({ts,t:tt,tag:'state',txt:'Calibration '+j.result+' — centre thr '+j.centre_thr+' ('+j.centre_low+'-'+j.centre_high+'), right thr '+j.right_thr+' ('+j.right_low+'-'+j.right_high+'), barcode thr '+j.barcode_thr+(+j.barcode_learned?' learned':' fallback')+' ('+j.barcode_low+'-'+j.barcode_high+'), B4 floor '+j.b4_floor_mg+' mg ('+j.b4_samples+' samples), swept '+j.sweep_deg+'° ('+(+j.first_right?'right':'left')+' first), sensors '+(+j.overlap===-256?'overlap not measured':(+j.overlap<0?'gap '+(-j.overlap)+' samples':'overlap '+j.overlap+' samples'))});trim(M);}
   else if(topic==='robot/debug'){const tx=String(j._text||'');const sc=parseBarScan(tx);if(sc){sc.ts=ts;M.bscans.push(sc);if(M.bscans.length>50)M.bscans.shift();}M.events.push({ts,t:tt,tag:'bcode',txt:(sc?'Barcode scan — ':'Debug — ')+tx});trim(M);}
   else if(topic==='robot/event/hump'){M.humps++;M.events.push({ts,t:tt,tag:'hump',txt:'Hump — peak '+(+j.peak_dmm||0)+' dmm (max '+(+j.max_dmm||0)+')'});trim(M);}
-  else if(topic==='robot/event/motion'){const nm=j.motion||'?';if(nm==='IMPACT')M.impactEvents++;M.events.push({ts,t:tt,tag:nm==='IMPACT'?'impact':'motion',txt:'Motion — '+nm});trim(M);}
+  else if(topic==='robot/event/motion'){const nm=j.motion||'?';M.events.push({ts,t:tt,tag:'motion',txt:'Motion — '+nm});trim(M);}
 }
 function trim(M){if(M.motion.length>CAP_PTS)M.motion.splice(0,M.motion.length-CAP_PTS);if(M.line.length>CAP_PTS)M.line.splice(0,M.line.length-CAP_PTS);if(M.events.length>CAP_EV)M.events.splice(0,M.events.length-CAP_EV);}
 
@@ -386,7 +386,6 @@ function render(M,live){
     {l:'Turn rate',v:M.turnDps==null?'—':`${M.turnDps}<small> °/s · + = left</small>`,t:'Latest turn_dps from terrain telemetry: yaw rate from the wheel encoders, positive = turning left.'},
     {l:'Max height',v:M.maxHumpDmm==null?'—':`${(M.maxHumpDmm/10).toFixed(1)}<small> mm</small>`,t:'Latest max_hump_dmm of this run, in mm. The robot resets it at every run start, so this is not a session maximum.'},
     {l:'Motion state',v:M.motionName==null?'—':`<span class="pill">${esc(M.motionName)}</span>`,cls:'state',t:'Latest motion class from terrain telemetry.'},
-    {l:'Impacts',v:`${M.impactCount==null?'—':M.impactCount}<small> per run · ${M.impactEvents} event${M.impactEvents===1?'':'s'}</small>`,t:'impact_count from terrain telemetry (per run, wraps after 7), plus the robot/event/motion IMPACT events received this session.'},
     {l:'Humps',v:String(M.humps)+(M.tilt!=null?` <small>tilt ${M.tilt} mg (diag)</small>`:''),t:'tilt_mg is a diagnostic value while B4_TASK_DIAG_TERRAIN is 1, so it is not the real pitch.'},
     {l:'WiFi drops',v:String(M.drops)},
   ];

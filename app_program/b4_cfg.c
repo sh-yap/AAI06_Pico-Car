@@ -146,7 +146,7 @@ b4_cfg_default (void)
     config.mag_stale_after_ms = 500U;
     config.motion_threshold_mg = 120U;
     config.tilt_threshold_mg = 250U;
-    config.impact_refractory_ms = 200U;
+    config.sharp_change_refractory_ms = 200U;
     /* NOTE: The noise estimate is a running median of the incline
      * amplitude. It takes one step per millimetre of wheel travel, so the
      * bound depends on distance and not on speed or time. Each step moves
@@ -261,7 +261,7 @@ b4_cfg_validate (const b4_cfg_config_t * p_config)
             (0U == p_config->tilt_threshold_mg) ||
             (p_config->tilt_threshold_mg >
              B4_CFG_MAX_THRESHOLD_MG) ||
-            (0U == p_config->impact_refractory_ms) ||
+            (0U == p_config->sharp_change_refractory_ms) ||
             (p_config->noise_step_shift < B4_CFG_MIN_NOISE_STEP_SHIFT) ||
             (p_config->noise_step_shift > B4_CFG_MAX_NOISE_STEP_SHIFT) ||
             (0U == p_config->hump_complete_k_tenths) ||

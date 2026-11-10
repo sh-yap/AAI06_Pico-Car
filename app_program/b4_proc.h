@@ -24,10 +24,23 @@ b4_proc_init (const b4_cfg_config_t * p_config);
  * samples only, one step per millimetre of wheel travel. speed_mm_s is the
  * mean of the absolute wheel speeds in millimetres per second, so a pivot
  * counts as travel. With the time since the previous sample it gives the
- * travel, and it is reported in the status.
+ * travel, and it is reported in the status. b_forward is true only while
+ * the car drives forward: the same fresh word after the first one, with
+ * both measured wheel speeds strictly positive. A hump may start and a
+ * candidate may continue only while it is true.
  * Call it before each b4_proc_process(). */
 void
-b4_proc_set_drive (bool b_learn, int32_t speed_mm_s);
+b4_proc_set_drive (bool b_learn, int32_t speed_mm_s, bool b_forward);
+
+/** Set the wheel-target step from one new drive word.
+ *
+ * The field is the larger of the two target changes since the previous
+ * publish, in units of 8 mm/s, saturating at 15. It is wire data only: the
+ * processor learns what counts as a jolt from the driving samples. Call it
+ * once per new drive word, after b4_proc_set_drive(), including when the
+ * step is zero. Do not call it for a word whose sequence has not changed. */
+void
+b4_proc_set_target_step (uint8_t target_step);
 
 /** Process one calibrated accelerometer sample. */
 b4_types_result_t

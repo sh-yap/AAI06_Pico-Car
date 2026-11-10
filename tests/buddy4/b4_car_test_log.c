@@ -57,7 +57,7 @@ static const UB g_motion_names[][16] = {
     "ACCELERATING",
     "CLIMBING_HUMP",
     "DESCENDING_HUMP",
-    "IMPACT",
+    "LIFTED",
     "UNKNOWN_MOTION",
 };
 
@@ -129,9 +129,9 @@ b4_car_test_log_tilt_name (b4_types_tilt_t tilt)
 const UB *
 b4_car_test_log_motion_name (b4_types_motion_t motion)
 {
-    const UB * p_name = g_motion_names[B4_MOTION_IMPACT + 1];
+    const UB * p_name = g_motion_names[B4_MOTION_LIFTED + 1];
 
-    if (B4_MOTION_IMPACT >= motion)
+    if (B4_MOTION_LIFTED >= motion)
     {
         p_name = g_motion_names[motion];
     }

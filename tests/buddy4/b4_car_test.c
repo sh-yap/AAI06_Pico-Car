@@ -125,7 +125,7 @@ typedef struct
     uint32_t read_fail;
     uint32_t consecutive_fail;
     uint32_t max_consecutive_fail;
-    uint32_t impact;
+    uint32_t sharp_change;
     uint32_t hump_start;
     uint32_t hump_complete;
     uint32_t stale;
@@ -1184,10 +1184,10 @@ car_test_report_events (const b4_types_status_t * p_status,
      * failing would repeat the last sample's events. */
     if (true == b_processed)
     {
-        if (true == p_status->b_impact_event)
+        if (true == p_status->b_sharp_change_event)
         {
-            g_car_test_counter.impact++;
-            tm_printf((UB *)"B4E t=%u event=impact motion=%s x=%d y=%d"
+            g_car_test_counter.sharp_change++;
+            tm_printf((UB *)"B4E t=%u event=sharp_change motion=%s x=%d y=%d"
                       " z=%d dx=%d dy=%d dz=%d\n",
                       p_status->sample.timestamp_ms,
                       b4_car_test_log_motion_name(p_status->motion),
@@ -1275,10 +1275,10 @@ car_test_report_summary (void)
               g_car_test_counter.consecutive_fail,
               g_car_test_counter.max_consecutive_fail,
               g_car_test_counter.stale);
-    tm_printf((UB *)"B4R impact_events=%u hump_start_events=%u"
+    tm_printf((UB *)"B4R sharp_change_events=%u hump_start_events=%u"
               " hump_complete_events=%u highest_hump_peak_mg=%u"
               " console_dropped_bytes=%u\n",
-              g_car_test_counter.impact,
+              g_car_test_counter.sharp_change,
               g_car_test_counter.hump_start,
               g_car_test_counter.hump_complete,
               g_car_test_counter.highest_peak_mg,

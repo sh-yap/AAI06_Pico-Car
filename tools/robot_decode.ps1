@@ -20,7 +20,7 @@ $script:States  = @('INIT','READY','LINE_FOLLOW','EXECUTE_NAV','OBSTACLE_STOP',
                     'OBSTACLE_SCAN','BYPASS','LINE_RECOVERY','FINISHED','SAFE_STOP')
 $script:Nav     = @('NONE','LEFT','RIGHT','STRAIGHT','UTURN')
 $script:Line    = @('LEFT','CENTRE','RIGHT','LOST','JUNCTION')
-$script:Motion  = @('QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','IMPACT','TURNING')
+$script:Motion  = @('QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','LIFTED','TURNING')
 $script:Avoid   = @('STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY')
 $script:Cmd     = @('unknown','start','stop','status')
 $script:Run     = @('END','BEGIN')
@@ -45,7 +45,7 @@ $script:RobotFormat = @{
                                   (F centre_adc u 12), (F right_adc u 12))
     'robot/telemetry/terrain' = @((F motion n 3 $script:Motion), (F tilt_mg s 11),
                                   (F hump_dmm u 10), (F max_hump_dmm u 10),
-                                  (F turn_dps s 11), (F impact_count u 3))
+                                  (F turn_dps s 11))
     'robot/heartbeat'         = @((F seq u 16), (F state n 4 $script:States),
                                   (F fault u 10), (F ev_drop u 8))
     'robot/state'             = @((F state n 4 $script:States), (F fault u 10))

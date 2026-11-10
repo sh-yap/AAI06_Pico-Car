@@ -13,7 +13,9 @@
  *   bits 14-23  highest valid hump height this run, 0.1 mm steps
  *   bit  24     height valid
  *   bits 25-28  hump count, wraps
- *   bits 29-31  impact count, wraps
+ *   bit  29     lift cue, set while Buddy 4 saw a sharp IMU change in the
+ *               last second (a safety bound; see b4_proc.c)
+ *   bits 30-31  reserved, zero
  *
  * NOTE: The layout has no ramp-active bit, so its meaning is carried by
  * the existing fields. While a hump is in progress the current height is
@@ -32,7 +34,8 @@
  *   bits 2-12   left wheel speed, signed 11 bits, mm/s, saturated +-1023
  *   bits 13-23  right wheel speed, same format
  *   bits 24-27  sequence, counts up each VC cycle and wraps
- *   bits 28-31  reserved, zero
+ *   bits 28-31  wheel-target step, larger of the two target changes since
+ *               the previous publish in 8 mm/s units, saturating at 15
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -55,6 +58,10 @@
 #define B4_TASK_DRIVE_SPEED_LIMIT   (1023)      /* mm/s, saturation.  */
 #define B4_TASK_DRIVE_SEQ_SHIFT     (24U)
 #define B4_TASK_DRIVE_SEQ_MASK      (0xFU)
+#define B4_TASK_DRIVE_STEP_SHIFT    (28U)
+#define B4_TASK_DRIVE_STEP_MASK     (0xFU)
+#define B4_TASK_DRIVE_STEP_MM_S     (8U)        /* Wire unit, mm/s.     */
+#define B4_TASK_DRIVE_STEP_LIMIT    (15U)       /* Field saturation.   */
 
 /** @brief One decoded terrain word.
  */
@@ -66,7 +73,7 @@ typedef struct
     uint16_t          highest_height_dmm;
     bool              b_height_valid;
     uint8_t           hump_count;
-    uint8_t           impact_count;
+    bool              b_lift_cue;
 } b4_task_terrain_t;
 
 /** @brief Create the word buffer and request flag, then start the task.

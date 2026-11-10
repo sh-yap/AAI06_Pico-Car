@@ -201,11 +201,11 @@ static int32_t  g_manoeuvre_mm;        /* Motion's distance in its current
                                           command (bypass leg progress).  */
 static bool     g_b_line_black;        /* A line sensor sees black now
                                           (not Buddy 3's last-seen side). */
+static int32_t  g_target_left_mm_s;    /* Motion wheel targets, for the    */
+static int32_t  g_target_right_mm_s;   /* drive word and the recorder.    */
 #if VC_RECORDER
 static bool     g_b_rec_active;        /* Recording: CALIBRATE to run end. */
 static uint8_t  g_rec_sensors;        /* Line sensor bits, for the recorder.*/
-static int32_t  g_rec_target_left;     /* Motion wheel targets, likewise.  */
-static int32_t  g_rec_target_right;
 static int32_t  g_rec_pwm_left;        /* Signed PWM applied, permille.    */
 static int32_t  g_rec_pwm_right;
 #endif
@@ -342,9 +342,9 @@ read_motion (vc_inputs_t * p_in)
 
         g_left_mm_s             = status.left_speed_mm_s;
         g_right_mm_s            = status.right_speed_mm_s;
+        g_target_left_mm_s      = status.left_target_mm_s;
+        g_target_right_mm_s     = status.right_target_mm_s;
 #if VC_RECORDER
-        g_rec_target_left       = status.left_target_mm_s;
-        g_rec_target_right      = status.right_target_mm_s;
         g_rec_pwm_left          = status.left_drive_permille;
         g_rec_pwm_right         = status.right_drive_permille;
 #endif
@@ -614,20 +614,6 @@ read_line (vc_inputs_t * p_in, uint32_t now)
  * cleared in read_terrain(); both run in the VC task. */
 static bool s_b_hump_reset_pending = false;
 
-#if VC_RECORDER
-/* The same for the impact count, which also resets with the run. */
-static bool s_b_impact_reset_pending = false;
-
-#if B4_REC_IMPACT_STOP
-#define VC_IMPACT_STOP_ROWS (100U)  /* 2 s at 20 ms per row. */
-
-/* Test-only: the first impact of a run starts a countdown of ring rows, and
- * the ring stops adding when it runs out.  Set in read_terrain(), used in
- * record_cycle() and rearmed in report_state(); all run in the VC task. */
-static bool    s_b_impact_stop_started = false;
-static uint8_t s_impact_stop_left      = 0U;
-#endif
-#endif
 
 /* A completed hump: report a valid height to the laptop, log either way. */
 static void
@@ -660,9 +646,6 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
     static uint32_t          s_seen_ms = 0U;
     static bool              s_b_seen  = false;
     static uint8_t           s_humps   = 0U;
-#if VC_RECORDER
-    static uint8_t           s_impacts = 0U;
-#endif
     uint32_t                 word;
     uint32_t                 i;
     bool                     b_more = true;
@@ -693,30 +676,6 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
             }
 #if VC_RECORDER
             ev_rec_max(now, s_terrain.highest_height_dmm);
-
-            /* The count marks an impact, as for humps.  It wraps at 8, and
-             * that wrap is logged. */
-            if (s_b_impact_reset_pending && (0U == s_terrain.impact_count))
-            {
-                s_b_impact_reset_pending = false;   /* Reset, not impact. */
-            }
-            else if (s_b_seen && (s_terrain.impact_count != s_impacts))
-            {
-                ev_rec_impact(now, s_terrain.impact_count);
-#if B4_REC_IMPACT_STOP
-                if (!s_b_impact_stop_started)
-                {
-                    s_b_impact_stop_started = true;
-                    s_impact_stop_left      = (uint8_t) VC_IMPACT_STOP_ROWS;
-                }
-#endif
-            }
-            else
-            {
-                /* No new impact. */
-            }
-
-            s_impacts = s_terrain.impact_count;
 #endif
 
             s_humps   = s_terrain.hump_count;
@@ -780,12 +739,20 @@ pack_speed (int32_t speed_mm_s, uint32_t shift)
 
 /* Hand Buddy 4 the drive word (layout in b4_task.h), once per VC cycle.
  * Buddy 4 learns its noise only while the word says the car is driving and
- * moving, and treats a word whose sequence stops changing as stale. */
+ * moving, and treats a word whose sequence stops changing as stale. The
+ * step field is wire data only: it is the larger target change since the
+ * previous publish, in 8 mm/s units, and Buddy 4 decides what is a jolt. */
 static void
 publish_drive (vc_state_t state, bool b_stationary)
 {
     static uint32_t s_seq = 0U;
+    static int32_t  s_target_left_mm_s = 0;
+    static int32_t  s_target_right_mm_s = 0;
+    static bool     s_have_target = false;
     uint32_t        word  = 0U;
+    uint32_t        step  = 0U;
+    int64_t         delta_left = 0;
+    int64_t         delta_right = 0;
 
     if (is_driving(state))
     {
@@ -797,9 +764,40 @@ publish_drive (vc_state_t state, bool b_stationary)
         word |= B4_TASK_DRIVE_MOVING_BIT;
     }
 
+    if (true == s_have_target)
+    {
+        /* The targets are bounded Motion speeds, so the 64-bit difference
+         * is exact and its magnitude fits the step field after scaling. */
+        delta_left = (int64_t) g_target_left_mm_s -
+                     (int64_t) s_target_left_mm_s;
+        delta_right = (int64_t) g_target_right_mm_s -
+                      (int64_t) s_target_right_mm_s;
+        if (delta_left < 0)
+        {
+            delta_left = -delta_left;
+        }
+        if (delta_right < 0)
+        {
+            delta_right = -delta_right;
+        }
+        if (delta_right > delta_left)
+        {
+            delta_left = delta_right;
+        }
+        step = (uint32_t) (delta_left / (int64_t) B4_TASK_DRIVE_STEP_MM_S);
+        if (step > B4_TASK_DRIVE_STEP_LIMIT)
+        {
+            step = B4_TASK_DRIVE_STEP_LIMIT;
+        }
+    }
+    s_target_left_mm_s  = g_target_left_mm_s;
+    s_target_right_mm_s = g_target_right_mm_s;
+    s_have_target = true;
+
     word |= pack_speed(g_left_mm_s, B4_TASK_DRIVE_LEFT_SHIFT);
     word |= pack_speed(g_right_mm_s, B4_TASK_DRIVE_RIGHT_SHIFT);
     word |= (s_seq & B4_TASK_DRIVE_SEQ_MASK) << B4_TASK_DRIVE_SEQ_SHIFT;
+    word |= (step & B4_TASK_DRIVE_STEP_MASK) << B4_TASK_DRIVE_STEP_SHIFT;
     s_seq++;                                /* Wraps; only 4 bits are sent. */
 
     b4_task_set_drive(word);
@@ -1893,12 +1891,6 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
 #if VC_HAVE_BUDDY4
             b4_task_request_run_reset();    /* New run: clear max and count. */
             s_b_hump_reset_pending = true;
-#if VC_RECORDER
-            s_b_impact_reset_pending = true;
-#if B4_REC_IMPACT_STOP
-            s_b_impact_stop_started  = false;
-#endif
-#endif
 #endif
         }
         else if (g_b_run_active
@@ -1985,8 +1977,8 @@ record_cycle (vc_inputs_t const * p_in, vc_outputs_t const * p_out)
     rec.steer             = p_out->steer;
     rec.flags             = p_in->b_ramp_active ? RUN_REC_FLAG_RAMP : 0U;
     rec.speed_mm_s        = p_out->speed_mm_s;
-    rec.target_left_mm_s  = (int16_t) g_rec_target_left;
-    rec.target_right_mm_s = (int16_t) g_rec_target_right;
+    rec.target_left_mm_s  = (int16_t) g_target_left_mm_s;
+    rec.target_right_mm_s = (int16_t) g_target_right_mm_s;
     rec.left_mm_s         = (int16_t) g_left_mm_s;
     rec.right_mm_s        = (int16_t) g_right_mm_s;
     rec.overruns          = (uint16_t) g_overruns;
@@ -1996,23 +1988,7 @@ record_cycle (vc_inputs_t const * p_in, vc_outputs_t const * p_out)
                                      &rec.right_i_permille);
     motion_get_learned(&rec.learn_fwd_gain, &rec.learn_fwd_offset,
                        &rec.learn_turn_gain, &rec.learn_state);
-#if B4_REC_IMPACT_STOP
-    if (s_b_impact_stop_started && (0U == s_impact_stop_left))
-    {
-        /* Ring stopped 2 s after the first impact. */
-    }
-    else
-    {
-        if (s_b_impact_stop_started)
-        {
-            s_impact_stop_left--;
-        }
-
-        run_rec_add(&rec);
-    }
-#else
     run_rec_add(&rec);
-#endif
     ev_rec_step(p_in->now_ms, (VC_LINE_LOST == p_in->line),
                 (VC_STATE_FOLLOW_LINE == p_out->state), p_out->steer,
                 p_in->b_ramp_active);

@@ -39,19 +39,7 @@
 #define B4_REC_HUMP_STOP            (0)
 #endif
 
-/* 1 does the same after the first impact event of the run (needs
- * B4_RECORDER, not with B4_REC_HUMP_STOP). */
-#ifndef B4_REC_IMPACT_STOP
-#define B4_REC_IMPACT_STOP          (0)
-#endif
-
-#if (B4_REC_HUMP_STOP && B4_REC_IMPACT_STOP)
-#error "B4_REC_HUMP_STOP and B4_REC_IMPACT_STOP cannot both be 1"
-#endif
-
-#define B4_REC_ANY_STOP             (B4_REC_HUMP_STOP || B4_REC_IMPACT_STOP)
-
-#if B4_REC_ANY_STOP
+#if B4_REC_HUMP_STOP
 #define B4_REC_HUMP_STOP_SAMPLES    (200U)  /* 2 s at 10 ms.                */
 #endif
 
@@ -132,8 +120,7 @@
 #define B4_TASK_VALID_SHIFT         (24U)
 #define B4_TASK_HUMPS_SHIFT         (25U)
 #define B4_TASK_HUMPS_MASK          (0xFU)
-#define B4_TASK_IMPACTS_SHIFT       (29U)
-#define B4_TASK_IMPACTS_MASK        (0x7U)
+#define B4_TASK_CUE_BIT             (0x20000000U)
 
 /* The kernel adds a small header to each message, as in Buddy 3. */
 static UW               g_b4_task_word_buf[
@@ -145,7 +132,6 @@ static ID               g_b4_task_flag_id = 0;
 static b4_cfg_config_t  g_b4_task_config;
 static uint32_t         g_b4_task_last_open_ms = 0U;
 static uint8_t          g_b4_task_humps = 0U;
-static uint8_t          g_b4_task_impacts = 0U;
 static bool             g_b4_task_b_imu_open = false;
 static volatile uint32_t g_b4_task_ticks = 0U;
 static volatile uint32_t g_b4_task_cal_word = 0U;
@@ -172,7 +158,7 @@ static uint32_t         g_b4_task_rec_mag_count = 0U;
 #endif
 static uint64_t         g_b4_task_rec_last_us = 0U;
 static bool             g_b4_task_b_rec_seen = false;
-#if B4_REC_ANY_STOP
+#if B4_REC_HUMP_STOP
 static uint32_t         g_b4_task_hs_prev_total = 0U;   /* Ring total seen. */
 static uint8_t          g_b4_task_hs_left = 0U;         /* Samples to add.  */
 static uint8_t          g_b4_task_hs_state = 0U;        /* 0 wait, 1 count,
@@ -194,11 +180,14 @@ b4_task_now_ms (void);
 static void
 b4_task_open_imu (uint32_t now_ms);
 
-/** @brief Read the drive word and pass the learning input to b4_proc.
+/** @brief Read the drive word and pass the drive inputs to b4_proc.
  *
  * The word is stale when its sequence has not changed for
  * B4_TASK_DRIVE_STALE_MS, and a stale word means not driving, so learning
- * stops but detection goes on.
+ * stops but detection goes on. The forward flag is stricter than learning,
+ * because a pivot moves the car without driving it forward. The target-step
+ * field is passed once per new sequence, so the jolt learner sees each VC
+ * publish once and ignores a word that has not changed.
  *
  * @param now_ms The current time in milliseconds.
  */
@@ -220,7 +209,7 @@ b4_task_report_terrain (b4_types_status_t const * p_status);
 static bool
 b4_task_sample (uint32_t now_ms);
 
-/** @brief Count completed humps and impacts from the latest status.
+/** @brief Count completed humps from the latest status.
  *
  * @param p_status The status after the latest sample.
  */
@@ -394,8 +383,7 @@ b4_task_unpack (uint32_t word, b4_task_terrain_t * p_terrain)
             (0U != ((word >> B4_TASK_VALID_SHIFT) & 1U));
         p_terrain->hump_count = (uint8_t)(
             (word >> B4_TASK_HUMPS_SHIFT) & B4_TASK_HUMPS_MASK);
-        p_terrain->impact_count = (uint8_t)(
-            (word >> B4_TASK_IMPACTS_SHIFT) & B4_TASK_IMPACTS_MASK);
+        p_terrain->b_lift_cue = (0U != (word & B4_TASK_CUE_BIT));
     }
 }
 
@@ -591,7 +579,9 @@ b4_task_apply_drive (uint32_t now_ms)
                                               B4_TASK_DRIVE_RIGHT_SHIFT);
     bool     b_fresh = false;
     bool     b_learn = false;
+    bool     b_forward = false;
     bool     b_first = (false == g_b4_task_b_drive_seen);
+    bool     b_new_word = false;
 
     if (true == b_first)
     {
@@ -601,6 +591,7 @@ b4_task_apply_drive (uint32_t now_ms)
     }
     else if (seq != g_b4_task_drive_seq)
     {
+        b_new_word = true;
         g_b4_task_drive_seq = seq;
         g_b4_task_drive_change_ms = now_ms;
     }
@@ -614,6 +605,14 @@ b4_task_apply_drive (uint32_t now_ms)
     b_learn = (true == b_fresh) &&
               (0U != (word & B4_TASK_DRIVE_DRIVING_BIT)) &&
               (0U != (word & B4_TASK_DRIVE_MOVING_BIT));
+
+    /* Forward takes the signed speeds before the travel below replaces
+     * them with their magnitudes. A pivot has one wheel negative, so it is
+     * moving but not driving forward. */
+    b_forward = (true == b_learn) &&
+                (false == b_first) &&
+                (left_mm_s > 0) &&
+                (right_mm_s > 0);
 
     if ((true == b_fresh) && (false == b_first))
     {
@@ -677,7 +676,17 @@ b4_task_apply_drive (uint32_t now_ms)
         right_mm_s = -right_mm_s;
     }
 
-    b4_proc_set_drive(b_learn, (left_mm_s + right_mm_s) / 2);
+    b4_proc_set_drive(b_learn, (left_mm_s + right_mm_s) / 2, b_forward);
+
+    /* The step field describes one VC publish, so it is passed once, when
+     * the sequence changes. The first word has no previous target to
+     * compare with. */
+    if (true == b_new_word)
+    {
+        uint8_t step = (uint8_t)((word >> B4_TASK_DRIVE_STEP_SHIFT) &
+                                 B4_TASK_DRIVE_STEP_MASK);
+        b4_proc_set_target_step(step);
+    }
 }
 
 static bool
@@ -722,15 +731,6 @@ b4_task_count_events (b4_types_status_t const * p_status)
     {
         g_b4_task_humps++;
     }
-
-    if (true == p_status->b_impact_event)
-    {
-        g_b4_task_impacts++;
-
-        /* The telemetry samples every 200 ms, so every impact also goes out
-         * as an event; a full event queue drops it and is not a fault. */
-        (void)comms_event_motion(COMMS_MOTION_IMPACT);
-    }
 }
 
 static uint32_t
@@ -770,8 +770,11 @@ b4_task_pack (b4_types_status_t const * p_status)
     word |= valid << B4_TASK_VALID_SHIFT;
     word |= ((uint32_t)g_b4_task_humps & B4_TASK_HUMPS_MASK) <<
             B4_TASK_HUMPS_SHIFT;
-    word |= ((uint32_t)g_b4_task_impacts & B4_TASK_IMPACTS_MASK) <<
-            B4_TASK_IMPACTS_SHIFT;
+
+    if (true == p_status->b_lift_cue)
+    {
+        word |= B4_TASK_CUE_BIT;
+    }
 
     return (word);
 }
@@ -853,9 +856,9 @@ b4_task_report_terrain (b4_types_status_t const * p_status)
     /* Both motion enumerations run 0..4 in the same order. */
     terrain.motion = (comms_motion_class_t)p_status->motion;
 
-    /* A pivot is TURNING unless the classifier saw an impact, which wins. */
+    /* A pivot is TURNING unless the lift cue is set, which wins. */
     if ((true == g_b4_task_b_pivot) &&
-        (B4_MOTION_IMPACT != p_status->motion))
+        (B4_MOTION_LIFTED != p_status->motion))
     {
         terrain.motion = COMMS_MOTION_TURNING;
     }
@@ -868,8 +871,6 @@ b4_task_report_terrain (b4_types_status_t const * p_status)
     /* The helper clamps the height to the telemetry range. */
     terrain.hump_dmm = (int32_t)b4_task_current_dmm(p_status);
     terrain.turn_dps = (int32_t)g_b4_task_turn_dps;
-    /* The terrain word carries the same 3-bit counter, so mask it here. */
-    terrain.impact_count = (int32_t)(g_b4_task_impacts & B4_TASK_IMPACTS_MASK);
 
 #if B4_TASK_DIAG_TERRAIN
     b4_task_diag_terrain(&terrain, p_status);
@@ -1040,7 +1041,7 @@ b4_task_rec_read_mag (void)
 }
 #endif /* B4_REC_MAG */
 
-#if B4_REC_ANY_STOP
+#if B4_REC_HUMP_STOP
 /** @brief Decide whether this sample is the first one after the stop.
  *
  * The Buddy 4 task is the only writer of the ring, so it keeps the state.
@@ -1048,9 +1049,7 @@ b4_task_rec_read_mag (void)
  * the VC task sets it to 0 at BEGIN, and a stopped ring does not add, so
  * the total only falls at a BEGIN.  The first hump that finishes while the
  * drive word says driving starts a countdown; a hump finishing earlier (a
- * carried car, the START pivot) is ignored.  With B4_REC_IMPACT_STOP the
- * first impact event starts it instead, with no drive word check because
- * impacts are only judged while driving.
+ * carried car, the START pivot) is ignored.
  *
  * @param p_status The sample just processed.
  * @return True when the sample must not be added to the ring.
@@ -1062,12 +1061,8 @@ b4_task_hump_stop_skip (b4_types_status_t const * p_status)
     bool           b_skip = false;
     bool           b_trigger;
 
-#if B4_REC_IMPACT_STOP
-    b_trigger = p_status->b_impact_event;
-#else
     b_trigger = ((true == p_status->b_hump_completed_event) &&
                  (0U != (g_b4_task_drive_word & B4_TASK_DRIVE_DRIVING_BIT)));
-#endif
 
     if (total < g_b4_task_hs_prev_total)
     {
@@ -1105,7 +1100,7 @@ b4_task_hump_stop_skip (b4_types_status_t const * p_status)
 
     return (b_skip);
 }
-#endif /* B4_REC_ANY_STOP */
+#endif /* B4_REC_HUMP_STOP */
 
 static void
 b4_task_record (b4_types_status_t const * p_status)
@@ -1116,7 +1111,7 @@ b4_task_record (b4_types_status_t const * p_status)
     uint64_t                  dt_us = 0U;
     uint32_t                  flags = 0U;
 
-#if B4_REC_ANY_STOP
+#if B4_REC_HUMP_STOP
     if (true == b4_task_hump_stop_skip(p_status))
     {
         return;
@@ -1153,9 +1148,9 @@ b4_task_record (b4_types_status_t const * p_status)
         flags |= B4_REC_FLAG_HEIGHT;
     }
 
-    if (true == p_status->b_impact_event)
+    if (true == p_status->b_lift_cue)
     {
-        flags |= B4_REC_FLAG_IMPACT;
+        flags |= B4_REC_FLAG_CUE;
     }
 
     if (true == p_status->b_hump_started_event)
@@ -1171,6 +1166,11 @@ b4_task_record (b4_types_status_t const * p_status)
     if (true == p_status->b_sample_stale)
     {
         flags |= B4_REC_FLAG_STALE;
+    }
+
+    if (true == p_status->b_jolt_window_active)
+    {
+        flags |= B4_REC_FLAG_JOLT;
     }
 
     rec.ms                = b4_task_now_ms();
@@ -1197,7 +1197,7 @@ b4_task_record (b4_types_status_t const * p_status)
                                        B4_TASK_REC_ENC_MASK);
     rec.drive_speed_mm_s  = b4_task_rec_i16(p_status->drive_speed_mm_s);
     rec.dt_us             = b4_task_rec_u16(dt_us);
-    /* The enums are small and the flags use seven bits, so each cast
+    /* The enums are small and the flags use eight bits, so each cast
      * below is exact. */
     rec.hump_state        = (uint8_t)p_status->hump_state;
     rec.flags             = (uint8_t)flags;
@@ -1251,7 +1251,6 @@ b4_task_sample_task (INT stacd, void * p_exinf)
         {
             (void)b4_proc_clear_run_maximum();
             g_b4_task_humps = 0U;   /* Per run; this task also counts. */
-            g_b4_task_impacts = 0U; /* Per run, like the hump count. */
         }
 
         b4_task_calibrate(pattern);
