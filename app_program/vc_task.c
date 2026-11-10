@@ -526,6 +526,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
     static vc_line_t s_line    = VC_LINE_LOST;
     static int8_t    s_error   = 0;
     static uint8_t   s_sensors = 0U;
+    static bool      s_capture = false;
     static vc_cal_b3_t s_cal   = VC_CAL_B3_IDLE;
     static uint32_t  s_seen_ms = 0U;
     static bool      s_b_seen  = false;
@@ -544,6 +545,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         {
             s_line    = line_from_buddy3(status.line_state);
             s_sensors = status.line_sensors;
+            s_capture = status.b_barcode_capture;
             s_error   = status.line_error;      /* Already -127..+127. */
             s_cal     = (vc_cal_b3_t) status.cal_state;     /* Same order. */
             s_seen_ms = now;
@@ -570,6 +572,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         p_in->line       = s_line;
         p_in->line_error = s_error;
         p_in->line_sensors = s_sensors;
+        p_in->b_barcode_capture = s_capture;
     }
     else
     {
@@ -577,6 +580,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
         p_in->line       = VC_LINE_LOST;
         p_in->line_error = 0;
         p_in->line_sensors = 0U;
+        p_in->b_barcode_capture = false;
         g_b_line_black   = false;
 #if VC_RECORDER
         g_rec_sensors    = 0U;
@@ -592,6 +596,7 @@ read_line (vc_inputs_t * p_in, uint32_t now)
     p_in->line       = VC_LINE_CENTRE;
     p_in->line_error = 0;
     p_in->line_sensors = VC_LINE_SENSOR_CENTRE;
+    p_in->b_barcode_capture = false;
     p_in->cal_b3     = VC_CAL_B3_OK;        /* Nothing to calibrate.       */
     g_b_line_black   = true;
 

@@ -404,6 +404,126 @@ test_follow_line_and_hump (void)
     CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
 }
 
+/* A barcode capture holds steering only while the line is CENTRE.  Once
+ * the line is off centre, normal steering resumes and the hold has reset
+ * the ramp, so the normal ramp starts fresh. */
+static void
+test_barcode_capture_hold (void)
+{
+    printf("barcode capture holds only while centred\n");
+
+    go_to_follow_line(0U);
+
+    /* On the line: capture holds straight at normal forward speed. */
+    g_in.line              = VC_LINE_CENTRE;
+    g_in.line_sensors      = VC_LINE_SENSOR_CENTRE;
+    g_in.b_barcode_capture = true;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_MOTION_DRIVE == g_out.motion);
+    CHECK(0 == g_out.steer);
+    CHECK(VC_SPEED_NORMAL_MM_S == g_out.speed_mm_s);
+    CHECK(!g_out.b_state_changed);
+
+    /* No steering ramp builds behind the centred hold. */
+    wait_ms(200U);
+    CHECK(0 == g_out.steer);
+
+    /* RIGHT during the capture: normal ramp starts fresh at START. */
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+    step();
+    CHECK((VC_STEER_START + VC_STEER_STEP) == g_out.steer);
+
+    /* Back on CENTRE during the capture: hold and reset again. */
+    g_in.line         = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
+    step();
+    CHECK(0 == g_out.steer);
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+
+    /* Capture ends on RIGHT: the normal ramp carries on growing. */
+    g_in.b_barcode_capture = false;
+    step();
+    CHECK((VC_STEER_START + VC_STEER_STEP) == g_out.steer);
+
+    /* A fresh active ramp still keeps its forward speed while centred. */
+    g_in.line              = VC_LINE_CENTRE;
+    g_in.line_sensors      = VC_LINE_SENSOR_CENTRE;
+    g_in.b_barcode_capture = true;
+    g_in.b_hump            = true;
+    g_in.b_ramp_active     = true;
+    step();
+    CHECK(0 == g_out.steer);
+    CHECK(VC_SPEED_HUMP_MM_S == g_out.speed_mm_s);
+}
+
+/* The capture hold clears the right ramp explicitly, so the next RIGHT
+ * restarts at START. */
+static void
+test_barcode_capture_resets_ramp (void)
+{
+    printf("barcode capture clears the right ramp\n");
+
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    step();
+    CHECK(68 == g_out.steer);
+
+    /* The capture starts on CENTRE: the hold resets the right ramp. */
+    g_in.line              = VC_LINE_CENTRE;
+    g_in.line_sensors      = VC_LINE_SENSOR_CENTRE;
+    g_in.b_barcode_capture = true;
+    step();
+    CHECK(0 == g_out.steer);
+
+    g_in.b_barcode_capture = false;
+    step();
+    CHECK(0 == g_out.steer);
+    g_in.line         = VC_LINE_RIGHT;
+    g_in.line_sensors = VC_LINE_SENSOR_RIGHT;
+    step();
+    CHECK(VC_STEER_START == g_out.steer);
+}
+
+/* A real line loss during a barcode capture still starts recovery. */
+static void
+test_barcode_capture_lost (void)
+{
+    printf("barcode capture does not hide a lost line\n");
+
+    go_to_follow_line(0U);
+    g_in.b_barcode_capture = true;
+    g_in.line = VC_LINE_LOST;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    CHECK(VC_MOTION_PIVOT == g_out.motion);
+    CHECK(0 != g_out.pivot_mdeg);
+}
+
+/* Capture inactive: the ordinary follow-line steering is unchanged. */
+static void
+test_barcode_capture_inactive (void)
+{
+    printf("barcode capture inactive: steering unchanged\n");
+
+    go_to_follow_line(0U);
+    g_in.b_barcode_capture = false;
+    g_in.line = VC_LINE_LEFT;
+    g_in.line_error = 0;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(-VC_STEER_START == g_out.steer);
+    CHECK(VC_SPEED_NORMAL_MM_S > g_out.speed_mm_s);
+}
+
 /* The ramp exception changes speed only, never line or safety decisions. */
 static void
 test_ramp_follow_speed (void)
@@ -2161,6 +2281,10 @@ main (void)
 {
     test_start_up();
     test_follow_line_and_hump();
+    test_barcode_capture_hold();
+    test_barcode_capture_resets_ramp();
+    test_barcode_capture_lost();
+    test_barcode_capture_inactive();
     test_ramp_follow_speed();
     test_ramp_preemption();
     test_barcode_turn();

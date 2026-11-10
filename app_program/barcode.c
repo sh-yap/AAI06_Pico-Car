@@ -78,8 +78,7 @@
  */
 #define BARCODE_MIN_ELEMENT_COUNTS   4
 
-/* Captures with fewer edges are specks/noise and are dropped silently. */
-#define BARCODE_MIN_EDGES        6U
+/* BARCODE_MIN_EDGES is in barcode.h: the recorder uses it too. */
 
 /*
  * Raw acquisition buffer. One sample per encoder position is kept, so a

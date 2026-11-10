@@ -46,7 +46,8 @@ round_trip(buddy3_status_t const * p_in)
            (out.line_sensors == p_in->line_sensors) &&
            (out.barcode == p_in->barcode) &&
            (out.nav_command == p_in->nav_command) &&
-           (out.cal_state == p_in->cal_state);
+           (out.cal_state == p_in->cal_state) &&
+           (out.b_barcode_capture == p_in->b_barcode_capture);
 }
 
 
@@ -56,7 +57,7 @@ test_all_valid_values(void)
 {
     static int8_t const errors[] = { -127, -1, 0, 1, 64, 127 };
     buddy3_status_t s;
-    uint32_t ls, e, sn, bc, nav, cal;
+    uint32_t ls, e, sn, bc, nav, cal, cap;
     bool all_ok = true;
 
     for (ls = 0U; ls <= (uint32_t)LINE_JUNCTION; ls++)
@@ -65,6 +66,7 @@ test_all_valid_values(void)
     for (bc = 0U; bc <= (uint32_t)BARCODE_INVALID; bc++)
     for (nav = 0U; nav <= (uint32_t)NAV_UTURN; nav++)
     for (cal = 0U; cal <= (uint32_t)LINE_CAL_FAIL_GAP; cal++)
+    for (cap = 0U; cap <= 1U; cap++)
     {
         s.line_state   = (line_state_t)ls;
         s.line_error   = errors[e];
@@ -72,14 +74,16 @@ test_all_valid_values(void)
         s.barcode      = (barcode_t)bc;
         s.nav_command  = (nav_command_t)nav;
         s.cal_state    = (line_cal_state_t)cal;
+        s.b_barcode_capture = (0U != cap);
 
         if (!round_trip(&s))
         {
             all_ok = false;
             (void)printf("  round trip failed: ls=%u err=%d sn=%u bc=%u"
-                         " nav=%u cal=%u\n",
+                         " nav=%u cal=%u cap=%u\n",
                          (unsigned)ls, (int)errors[e], (unsigned)sn,
-                         (unsigned)bc, (unsigned)nav, (unsigned)cal);
+                         (unsigned)bc, (unsigned)nav, (unsigned)cal,
+                         (unsigned)cap);
         }
     }
 
@@ -87,15 +91,17 @@ test_all_valid_values(void)
 }
 
 
-/* Packed word uses only bits 0-21. */
+/* Packed word uses only bits 0-22. */
 static void
 test_width(void)
 {
     buddy3_status_t s = { LINE_JUNCTION, -127, 3U, BARCODE_INVALID, NAV_UTURN,
-                          LINE_CAL_FAIL_GAP };
+                          LINE_CAL_FAIL_GAP, true };
 
-    check("no bits above bit 21",
+    check("no bits above bit 22",
           (buddy3_status_pack(&s) & B3_RESERVED_MASK) == 0U);
+    check("capture flag uses bit 22",
+          (buddy3_status_pack(&s) & (1UL << B3_CAPTURE_SHIFT)) != 0U);
 }
 
 
@@ -133,8 +139,8 @@ test_reserved_rejected(void)
               !buddy3_status_unpack(code << B3_CAL_SHIFT, &out));
     }
 
-    check("reserved bit 22 rejected",
-          !buddy3_status_unpack(1UL << 22, &out));
+    check("reserved bit 23 rejected",
+          !buddy3_status_unpack(1UL << 23, &out));
 
     check("reserved bit 31 rejected",
           !buddy3_status_unpack(1UL << 31, &out));
@@ -146,14 +152,15 @@ static void
 test_reject_keeps_output(void)
 {
     buddy3_status_t out = { LINE_RIGHT, 42, 2U, BARCODE_F, NAV_RIGHT,
-                            LINE_CAL_OK };
+                            LINE_CAL_OK, true };
 
     (void)buddy3_status_unpack(7UL << B3_NAV_SHIFT, &out);
 
     check("rejected unpack leaves output unchanged",
           (out.line_state == LINE_RIGHT) && (out.line_error == 42) &&
           (out.line_sensors == 2U) && (out.barcode == BARCODE_F) &&
-          (out.nav_command == NAV_RIGHT) && (out.cal_state == LINE_CAL_OK));
+          (out.nav_command == NAV_RIGHT) && (out.cal_state == LINE_CAL_OK) &&
+          out.b_barcode_capture);
 }
 
 

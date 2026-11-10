@@ -60,15 +60,18 @@
 # latched lift cue; jolt is the jolt guard window; the raw target step is
 # not recorded).
 # Event log: if the image also has g_ev_rec (whole-run log of line losses,
-# ramp edges and hump results, 62 events, earliest kept), the same command
-# dumps it to <time>_<name>_events.bin and writes <time>_<name>_events.csv:
+# ramp edges, hump results and failed barcode captures, 62 events, earliest
+# kept), the same command dumps it to <time>_<name>_events.bin and writes
+# <time>_<name>_events.csv:
 # ms, event (LINE_LOST value = steer before the loss; LINE_BACK value = ms
 # since LINE_LOST; RAMP_START / RAMP_END value 0; HUMP_DONE value = newest
 # height in 0.1 mm; RUN_MAX value = the word's highest height in 0.1 mm,
 # logged when it changes; LIFT value = the confirmed both-black spell in VC
-# cycles), value, count (hump count for HUMP_DONE, 0 for LIFT), valid
-# (HUMP_DONE only: the word's height was valid; empty otherwise).  With
-# -File, pass the dump as -EvFile.
+# cycles; BARCODE_FAIL value = edges in the failed capture), value, count
+# (hump count for HUMP_DONE, 0 for LIFT), valid (HUMP_DONE only: the word's
+# height was valid; empty otherwise).  With -File, pass the dump as -EvFile.
+# On a failed barcode capture the barcode ring stops 500 ms after it, so
+# the whole pass and that margin are kept instead of being overwritten.
 # A warning is printed if the ring was not frozen (run still going, or the
 # image was reset before it ended).
 
@@ -102,7 +105,8 @@ $evMagic     = 0x31564545
 $evRecBytes  = 8
 $evHeader    = 16
 $evNames     = @("?0", "LINE_LOST", "LINE_BACK", "RAMP_START", "RAMP_END",
-                 "HUMP_DONE", "RUN_MAX", "REMOVED_IMPACT", "LIFT")
+                 "HUMP_DONE", "RUN_MAX", "REMOVED_IMPACT", "LIFT",
+                 "BARCODE_FAIL")
 $magic       = 0x31434552
 $lineNames   = @("LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION")
 $stateNames  = @("INITIALISE", "READY", "CALIBRATE", "FOLLOW_LINE",

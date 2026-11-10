@@ -281,6 +281,9 @@ typedef struct
     int8_t     line_error;         /* -127 (left) .. +127 (right).
                                       Telemetry only: not used to steer.   */
     uint8_t    line_sensors;       /* Same packed sample as line/cal_b3.   */
+    bool       b_barcode_capture;  /* Buddy 3: edges stored, capture not
+                                      finished.  Hold straight while the
+                                      line is CENTRE only.                 */
     vc_nav_t   barcode;            /* Event: barcode decoded.             */
     bool       b_motion_done;      /* Event: turn / distance complete.    */
     bool       b_motion_failed;    /* Motion fault or command rejected.   */

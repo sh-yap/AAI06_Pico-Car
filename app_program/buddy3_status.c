@@ -35,6 +35,10 @@ buddy3_packed_t buddy3_status_pack(buddy3_status_t const *p_status)
     packed |= ((uint32_t)p_status->cal_state & B3_CAL_MASK)
               << B3_CAL_SHIFT;
 
+    packed |= ((uint32_t)p_status->b_barcode_capture
+               & B3_CAPTURE_MASK)
+              << B3_CAPTURE_SHIFT;
+
     return packed;
 }
 
@@ -46,6 +50,7 @@ bool buddy3_status_unpack(buddy3_packed_t packed, buddy3_status_t *p_status)
     uint32_t barcode;
     uint32_t nav;
     uint32_t cal;
+    uint32_t barcode_capture;
     int32_t line_error;
 
     if ((packed & B3_RESERVED_MASK) != 0U)
@@ -58,6 +63,8 @@ bool buddy3_status_unpack(buddy3_packed_t packed, buddy3_status_t *p_status)
     barcode    = (packed >> B3_BARCODE_SHIFT) & B3_BARCODE_MASK;
     nav        = (packed >> B3_NAV_SHIFT) & B3_NAV_MASK;
     cal        = (packed >> B3_CAL_SHIFT) & B3_CAL_MASK;
+    barcode_capture = (packed >> B3_CAPTURE_SHIFT)
+                      & B3_CAPTURE_MASK;
 
     /* Reserved codes: anything past the last defined enum value. */
     if ((line_state > (uint32_t)LINE_JUNCTION) ||
@@ -88,6 +95,7 @@ bool buddy3_status_unpack(buddy3_packed_t packed, buddy3_status_t *p_status)
     p_status->barcode      = (barcode_t)barcode;
     p_status->nav_command  = (nav_command_t)nav;
     p_status->cal_state    = (line_cal_state_t)cal;
+    p_status->b_barcode_capture = (0U != barcode_capture);
 
     return true;
 }

@@ -89,10 +89,11 @@ void run_rec_freeze(void);
 /* ---- Barcode sensor trace ------------------------------------------------
  * A second ring, g_bc_rec: one record per Buddy 3 cycle (10 ms) so the
  * barcode sensor can be studied at full rate.  It begins and freezes with
- * the run ring above (run_rec_begin / run_rec_freeze).  Only Buddy 3 writes
- * records; the VC task resets and freezes it, so a record torn at the
- * boundary is possible and accepted.  No locks.  Keep tools/run_rec_read.ps1
- * in step. */
+ * the run ring above (run_rec_begin / run_rec_freeze).  Buddy 3 can also
+ * freeze it early after a failed capture (bc_rec_fail), so that pass and
+ * the margin after it are not overwritten.  Only Buddy 3 writes records;
+ * the VC task resets and freezes it, so a record torn at the boundary is
+ * possible and accepted.  No locks.  Keep tools/run_rec_read.ps1 in step. */
 
 #define BC_REC_MAGIC        (0x31524342UL)  /* "BCR1" little endian.        */
 #if B4_RECORDER
@@ -140,6 +141,23 @@ extern bc_rec_t g_bc_rec;
 
 /* Append one record.  Ignored when frozen or before the first BEGIN. */
 void bc_rec_add(bc_rec_record_t const * p_record);
+
+/* After this much time past a failed capture the barcode ring stops
+ * recording, so the failure and this margin stay in it instead of being
+ * overwritten.  Diagnostics only: 500 ms is 50 records, enough to see the
+ * line state and steering after the bars; a barcode pass is short, so the
+ * whole capture still fits in the 5 s ring of a B4_RECORDER build. */
+#define BC_REC_FAIL_MARGIN_MS   (500U)
+
+/* A capture finished without a valid course character (INVALID or '?'), or
+ * was discarded with too few edges.  ms is the cycle's monotonic time and
+ * edges the count seen in the capture.  Logs EV_REC_BARCODE_FAIL always, but
+ * stops the barcode ring BC_REC_FAIL_MARGIN_MS later only when b_arm is true;
+ * Buddy 3 arms a pass only from BARCODE_MIN_EDGES up, so a noise speck does
+ * not freeze out the real failed passes.  The VC and Buddy 4 rings keep
+ * recording; the event log keeps logging later failures.  Logging is ignored
+ * when the run has not begun or has frozen. */
+void bc_rec_fail(uint32_t ms, uint8_t edges, bool b_arm);
 
 #if B4_RECORDER
 /* ---- Buddy 4 trace ---------------------------------------------------------
@@ -210,13 +228,14 @@ void b4_rec_add(b4_rec_record_t const * p_record);
 
 /* ---- Whole-run event log --------------------------------------------------
  * A fourth, small log, g_ev_rec: the rings above keep only the newest few
- * seconds, so this one keeps the line losses, ramp edges and hump results of
- * the whole run.  When full it stops (earliest events kept) and counts
- * dropped; it never wraps.  It begins and freezes with the run ring.  Only
- * the VC task writes it (ev_rec_step at the 20 ms step, ev_rec_hump when a
- * terrain word shows a new hump count, ev_rec_lift when the lift rule
- * confirms).  Keep tools/run_rec_read.ps1 in
- * step. */
+ * seconds, so this one keeps the line losses, ramp edges, hump results and
+ * failed barcode captures of the whole run.  When full it stops (earliest
+ * events kept) and counts dropped; it never wraps.  It begins and freezes
+ * with the run ring.  The VC task writes it (ev_rec_step at the 20 ms step,
+ * ev_rec_hump when a terrain word shows a new hump count, ev_rec_lift when
+ * the lift rule confirms); Buddy 3 also adds BARCODE_FAIL from bc_rec_fail,
+ * so a rare event-log race between the two tasks is possible and accepted.
+ * Keep tools/run_rec_read.ps1 in step. */
 
 #define EV_REC_MAGIC        (0x31564545UL)  /* "EEV1" little endian.        */
 #define EV_REC_CAPACITY     (62U)           /* 16 + 62 * 8 = 512 bytes.     */
@@ -241,9 +260,12 @@ typedef enum
                                    value = it in 0.1 mm.  Not logged for
                                    the reset to 0 at BEGIN.                 */
     EV_REC_REMOVED_IMPACT,      /* Retired: the per-run impact count.       */
-    EV_REC_LIFT                 /* The VC confirmed a lift and finished the
+    EV_REC_LIFT,                /* The VC confirmed a lift and finished the
                                    run; value = the confirmed both-black
                                    spell in VC cycles, 1 to 255.           */
+    EV_REC_BARCODE_FAIL         /* A barcode capture ended without a valid
+                                   course character, or was discarded:
+                                   value = edges seen in it (0 if none).    */
 } ev_rec_type_t;
 
 /* One event, 8 bytes, no padding. */

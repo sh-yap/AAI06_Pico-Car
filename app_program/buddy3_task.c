@@ -385,6 +385,9 @@ void buddy3_task(INT stacd, void *exinf)
 #if VC_RECORDER
     bc_rec_record_t bc_rec;
     uint8_t bc_edges;
+    uint8_t bc_prev_edges = 0U;
+    bool    bc_prev_active = false;
+    bool    bc_done = false;
 #endif
 
     (void)stacd;
@@ -500,6 +503,7 @@ void buddy3_task(INT stacd, void *exinf)
         /* Sample the capture state before barcode_get_command() clears it.
          * Nothing here changes what Buddy 3 sends. */
         bc_edges           = barcode_get_edge_count();
+        bc_done            = barcode_available();
         bc_rec.enc         = encoder_position;
         bc_rec.barcode_adc = readings.barcode;
         bc_rec.threshold   = buddy3_barcode_threshold();
@@ -510,7 +514,7 @@ void buddy3_task(INT stacd, void *exinf)
         bc_rec.ch          = (uint8_t)barcode_get_char();
         bc_rec.flags       = barcode_is_black ? BC_REC_FLAG_BLACK : 0U;
 
-        if (barcode_available())
+        if (bc_done)
         {
             bc_rec.flags |= BC_REC_FLAG_DONE;
         }
@@ -523,6 +527,45 @@ void buddy3_task(INT stacd, void *exinf)
         nav_command = barcode_get_command();
 
 #if VC_RECORDER
+        /* A new run restarts the capture state below with the ring. */
+        if (0U == g_bc_rec.total)
+        {
+            bc_prev_active = false;
+            bc_prev_edges  = 0U;
+        }
+
+        /* Keep failed passes: INVALID or no decoded character, and captures
+         * discarded with too few edges (the edges go from non-zero to 0
+         * without a ready result).  Timed after the capture, not at run end,
+         * so the ring still holds the whole pass and a margin after it.  Every
+         * failure is logged, but only a pass with enough edges to be a real
+         * barcode arms the freeze: a one-edge noise speck must not stop the
+         * ring before the real failed passes are seen. */
+        if (bc_done)
+        {
+            if ((BARCODE_INVALID == barcode_code) || (0U == bc_rec.ch))
+            {
+                bc_rec_fail(bc_rec.ms, bc_edges,
+                            (BARCODE_MIN_EDGES <= bc_edges));
+            }
+
+            bc_prev_active = false;     /* barcode_get_command clears it. */
+        }
+        else if (bc_prev_active && (0U == bc_edges))
+        {
+            bc_rec_fail(bc_rec.ms, bc_prev_edges,
+                        (BARCODE_MIN_EDGES <= bc_prev_edges));
+            bc_prev_active = false;
+        }
+        else
+        {
+            bc_prev_active = (0U != bc_edges);
+            if (0U != bc_edges)
+            {
+                bc_prev_edges = bc_edges;
+            }
+        }
+
         bc_rec_add(&bc_rec);
 #endif
 
@@ -551,6 +594,9 @@ void buddy3_task(INT stacd, void *exinf)
         status.barcode      = barcode_code;
         status.nav_command  = nav_command;
         status.cal_state    = line_cal_state();
+        /* Same active rule as the recorder: edges stored, not finished. */
+        status.b_barcode_capture = (0U != barcode_get_edge_count())
+                                   && !barcode_available();
 
         packed = buddy3_status_pack(&status);
 

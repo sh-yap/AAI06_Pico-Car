@@ -49,6 +49,8 @@ static bool     s_b_lost_open;          /* A LINE_LOST has no LINE_BACK yet.*/
 static int8_t   s_prev_steer;
 static uint32_t s_lost_ms;
 static uint16_t s_prev_max_dmm;         /* Last highest height seen.        */
+static uint32_t s_bc_fail_ms;           /* Failed capture's time.           */
+static bool     s_b_bc_fail_hold;       /* Freeze the barcode ring soon.    */
 
 
 void
@@ -84,6 +86,8 @@ run_rec_begin (void)
     s_prev_steer          = 0;
     s_lost_ms             = 0U;
     s_prev_max_dmm        = 0U;
+    s_bc_fail_ms          = 0U;
+    s_b_bc_fail_hold      = false;
 
 #if B4_RECORDER
     g_b4_rec.frozen       = 1U;         /* Same order as above.             */
@@ -243,12 +247,44 @@ ev_rec_lift (uint32_t ms, uint16_t cycles)
 
 
 void
+bc_rec_fail (uint32_t ms, uint8_t edges, bool b_arm)
+{
+    /* The whole-run event log keeps every failed pass, even after the
+     * barcode ring has stopped for the first one. */
+    if ((EV_REC_MAGIC == g_ev_rec.magic) && (0U == g_ev_rec.frozen))
+    {
+        /* Cast: a capture has at most 64 edges, far below INT16_MAX. */
+        ev_rec_put(ms, EV_REC_BARCODE_FAIL, (int16_t) edges, 0U);
+    }
+
+    if (b_arm
+        && (BC_REC_MAGIC == g_bc_rec.magic) && (0U == g_bc_rec.frozen)
+        && (!s_b_bc_fail_hold))
+    {
+        s_b_bc_fail_hold = true;
+        s_bc_fail_ms     = ms;
+    }
+}
+
+
+void
 bc_rec_add (bc_rec_record_t const * p_record)
 {
     uint32_t index;
 
     if ((BC_REC_MAGIC == g_bc_rec.magic) && (0U == g_bc_rec.frozen))
     {
+        /* Keep the whole failed capture and the margin after it, then stop
+         * this ring so neither is overwritten.  Unsigned: wrap-safe. */
+        if (s_b_bc_fail_hold
+            && (BC_REC_FAIL_MARGIN_MS
+                < (p_record->ms - s_bc_fail_ms)))
+        {
+            g_bc_rec.frozen  = 1U;
+            s_b_bc_fail_hold = false;
+            return;
+        }
+
         index = g_bc_rec.write_index;
 
         /* A reset by the VC between the checks above and here may leave

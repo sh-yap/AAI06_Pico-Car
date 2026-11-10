@@ -324,6 +324,85 @@ test_b4_ring(void)
 #endif /* B4_RECORDER */
 
 
+/* A failed barcode capture freezes only the barcode ring, a margin after
+ * the failure, and logs one event with the edge count.  A noise speck is
+ * logged but does not arm the freeze. */
+static void
+test_bc_fail_freeze(void)
+{
+    uint32_t ev_count;
+
+    run_rec_begin();
+    add_bc(100U);
+
+    /* One edge is noise: the event is kept, the ring is not frozen. */
+    bc_rec_fail(100U, 1U, false);
+    check_u32("bc fail: noise event count", g_ev_rec.count, 1U);
+    check_u32("bc fail: noise event type", g_ev_rec.records[0].type,
+              EV_REC_BARCODE_FAIL);
+    check_u32("bc fail: noise event value",
+              (uint32_t)g_ev_rec.records[0].value, 1U);
+    check_u32("bc fail: noise no freeze", g_bc_rec.frozen, 0U);
+
+    add_bc(700U);                       /* 600 ms past: would have frozen. */
+    check_u32("bc fail: noise ring keeps", g_bc_rec.total, 2U);
+    check_u32("bc fail: noise still open", g_bc_rec.frozen, 0U);
+
+    /* A real failed pass arms the freeze. */
+    add_bc(1000U);
+    bc_rec_fail(1000U, 17U, true);
+    check_u32("bc fail: event count", g_ev_rec.count, 2U);
+    check_u32("bc fail: event type", g_ev_rec.records[1].type,
+              EV_REC_BARCODE_FAIL);
+    check_u32("bc fail: event value", (uint32_t)g_ev_rec.records[1].value,
+              17U);
+    check_u32("bc fail: event count byte", g_ev_rec.records[1].count, 0U);
+
+    add_bc(1490U);                      /* 490 ms: inside the margin.      */
+    add_bc(1500U);                      /* 500 ms: still kept.             */
+    check_u32("bc fail: margin total", g_bc_rec.total, 5U);
+    check_u32("bc fail: margin frozen", g_bc_rec.frozen, 0U);
+
+    add_bc(1510U);                      /* 510 ms: stop recording.         */
+    check_u32("bc fail: frozen", g_bc_rec.frozen, 1U);
+    check_u32("bc fail: total stops", g_bc_rec.total, 5U);
+    check_u32("bc fail: index stops", g_bc_rec.write_index, 5U);
+    check_u32("bc fail: newest kept", g_bc_rec.records[4].ms, 1500U);
+
+    /* Only the barcode ring stopped: the run ring keeps recording. */
+    add_ms(5000U);
+    check_u32("bc fail: run ring total", g_run_rec.total, 1U);
+#if B4_RECORDER
+    add_b4(5000U);
+    check_u32("bc fail: b4 ring total", g_b4_rec.total, 1U);
+#endif
+
+    /* A later failure still reaches the whole-run event log, but the
+     * barcode ring stays frozen. */
+    ev_count = g_ev_rec.count;
+    bc_rec_fail(1600U, 3U, false);
+    check_u32("bc fail: later event logged", g_ev_rec.count, ev_count + 1U);
+    check_u32("bc fail: later event type",
+              g_ev_rec.records[ev_count].type, EV_REC_BARCODE_FAIL);
+    check_u32("bc fail: later event value",
+              (uint32_t)g_ev_rec.records[ev_count].value, 3U);
+    add_bc(1610U);
+    check_u32("bc fail: still frozen", g_bc_rec.total, 5U);
+
+    /* After the run freezes nothing more is logged. */
+    run_rec_freeze();
+    ev_count = g_ev_rec.count;
+    bc_rec_fail(1700U, 4U, true);
+    check_u32("bc fail: frozen run no event", g_ev_rec.count, ev_count);
+
+    /* BEGIN starts a fresh run, with no carry-over of the hold. */
+    run_rec_begin();
+    add_bc(2000U);
+    check_u32("bc fail: reset total", g_bc_rec.total, 1U);
+    check_u32("bc fail: reset frozen", g_bc_rec.frozen, 0U);
+}
+
+
 static void
 write_sample(char const * p_path)
 {
@@ -542,6 +621,7 @@ main(int argc, char * argv[])
     test_wrap_keeps_newest();
     test_freeze_and_reset();
     test_bc_ring();
+    test_bc_fail_freeze();
     test_ev_rec();
 #if B4_RECORDER
     test_b4_ring();

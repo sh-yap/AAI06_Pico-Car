@@ -590,15 +590,33 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     }
     else
     {
+        bool const b_capture      = p_in->b_barcode_capture;
+        bool const b_capture_hold = b_capture && (VC_LINE_CENTRE == line);
+
         p_out->motion     = VC_MOTION_DRIVE;
         /* Cross straight while centre evidence remains, then track even
-         * while duplicate crossing events are still suppressed. */
+         * while duplicate crossing events are still suppressed.  A barcode
+         * capture holds steering only while the line is CENTRE: that keeps
+         * the car on the line it is already following.  Once Buddy 3 says
+         * RIGHT, LEFT or LOST, normal follow_steer resumes immediately, so a
+         * capture no longer drives blind off the line.  During either hold
+         * feed LOST: that clears the ramp and the right-sensor latch, so a
+         * full steer does not survive and apply on the first step after it.
+         * LOST is used because these are synthetic holds, not line
+         * observations; LOST and JUNCTION both reset the ramp. */
         p_out->steer      = follow_steer(p_vc,
-                                         (p_vc->b_junction_hold
-                                          && !p_vc->b_junction_track)
-                                         ? VC_LINE_JUNCTION : line,
+                                         (b_capture_hold
+                                          || (p_vc->b_junction_hold
+                                              && !p_vc->b_junction_track))
+                                         ? VC_LINE_LOST : line,
                                          p_in->line_error,
                                          p_in->line_sensors);
+        if (b_capture_hold)
+        {
+            /* Both wheels must travel the same distance over the bars. */
+            p_out->steer = 0;
+        }
+
         /* A healthy ramp report keeps the forward command at ramp speed:
          * historical climbs stalled at 50 mm/s. Keep steering and LOST
          * recovery, unlike the reverted straight hold. Missing terrain alone

@@ -19,6 +19,10 @@ typedef enum
     BARCODE_INVALID
 } barcode_t;
 
+/* Captures with fewer edges are specks/noise and are dropped silently.  The
+ * recorder also uses this to decide whether a failed pass is worth keeping. */
+#define BARCODE_MIN_EDGES    (6U)
+
 
 /* One black/white transition while passing over a barcode. */
 typedef struct
