@@ -690,6 +690,8 @@ read_terrain (vc_inputs_t * p_in, uint32_t now)
 
     p_in->b_hump          = (!b_ready) || b_ramp;
     p_in->b_ramp_active   = b_ready && b_ramp;
+    /* A stale or unhealthy terrain word is not a lift cue. */
+    p_in->b_imu_cue       = b_ready && s_terrain.b_lift_cue;
     p_in->b_terrain_ready = b_ready && (!b_ramp);
     p_in->cal_b4          = (vc_cal_b4_t) b4_task_get_calibration(NULL);
                                                         /* Same order.     */
@@ -2039,8 +2041,9 @@ vc_task_entry (INT stacd, void * p_exinf)
         bypass_run(&in);
         terrain_fault = read_terrain(&in, now);
 
-        if ((VC_STATE_READY == g_vc.state) && (VC_CMD_START == in.cmd)
-            && (!in.b_terrain_ready))
+        if (((VC_STATE_READY == g_vc.state)
+             || (VC_STATE_FINISHED == g_vc.state))
+            && (VC_CMD_START == in.cmd) && (!in.b_terrain_ready))
         {
             tm_printf((UB *) "[vc] START refused: Buddy 4 not ready\n");
         }
@@ -2076,7 +2079,9 @@ vc_task_entry (INT stacd, void * p_exinf)
          * reports EMERGENCY_STOP already carries the reason.  While
          * idle, the IMU bit follows the live value instead.  During
          * calibration it is not published. */
-        if ((VC_STATE_READY == before) && (VC_STATE_READY != out.state))
+        if (((VC_STATE_READY == before) && (VC_STATE_READY != out.state))
+            || ((VC_STATE_FINISHED == before)
+                && (VC_STATE_CALIBRATE == out.state)))
         {
             g_faults_seen = 0U;                 /* New run: clean slate. */
         }
@@ -2120,6 +2125,15 @@ vc_task_entry (INT stacd, void * p_exinf)
         {
             tm_printf((UB *) "[vc] EMERGENCY_STOP: faults=0x%03x\n",
                       (UINT) g_faults_seen);
+        }
+
+        if (true == out.b_lift_confirmed)
+        {
+            tm_printf((UB *) "[vc] LIFTED: run finished\n");
+#if VC_RECORDER
+            ev_rec_lift(now, (uint16_t) g_vc.lift_spell_cycles);
+#endif
+            (void) comms_event_motion(COMMS_MOTION_LIFTED);
         }
 
         report_state(before, &out, now);

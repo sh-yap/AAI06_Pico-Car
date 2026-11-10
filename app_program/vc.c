@@ -6,9 +6,12 @@
  *   1. safety   - a serious fault in any state -> EMERGENCY_STOP;
  *   2. command  - laptop STOP in any running state (including the START
  *                 calibration) -> READY;
- *   3. the current state's own transitions (in FOLLOW_LINE: finish, then
+ *   3. lift     - in every running state except CALIBRATE, a both-black
+ *                 spell longer than the learned normal spell, with Buddy
+ *                 4's sharp-change cue seen during it -> FINISHED;
+ *   4. the current state's own transitions (in FOLLOW_LINE: finish, then
  *      obstacle, then junction, then line loss);
- *   4. the state's timeout, if no transition happened in step 3, so an
+ *   5. the state's timeout, if no transition happened in step 4, so an
  *      expected event arriving at the deadline still wins.
  */
 
@@ -60,6 +63,95 @@ is_running (vc_state_t state)
     return (VC_STATE_CALIBRATE == state)
            || ((VC_STATE_FOLLOW_LINE <= state)
                && (VC_STATE_REACQUIRE_LINE >= state));
+}
+
+
+/* True in the states where the lift rule counts both-black spells.  A
+ * calibration sweep crosses the line with both sensors black on purpose,
+ * so it is left out. */
+static bool
+is_lift_scope (vc_state_t state)
+{
+    return (VC_STATE_CALIBRATE != state) && is_running(state);
+}
+
+
+/* Rule 3: track both-black spells and confirm a lift.
+ *
+ * A normal junction is short, so the longest spell that ended without a
+ * confirmation is the learned normal length, capped by a safety bound so one
+ * odd spell cannot disable detection.  A lift is confirmed when the current
+ * spell is longer than that learned length, or than the fallback bound
+ * before any spell has ended, AND Buddy 4's sharp-change cue was seen during
+ * the spell.  A confirmed spell is not learned.
+ *
+ * @return True when a lift is confirmed and the run must finish.
+ */
+static bool
+step_lift (vc_t * p_vc, vc_inputs_t const * p_in)
+{
+    uint8_t const both = (uint8_t)(VC_LINE_SENSOR_CENTRE
+                                   | VC_LINE_SENSOR_RIGHT);
+    bool const b_both_black = (both == (p_in->line_sensors & both));
+    bool b_confirmed = false;
+    uint8_t limit;
+
+    if (false == is_lift_scope(p_vc->state))
+    {
+        /* Not normal driving: neither count nor learn a spell here. */
+        p_vc->lift_spell_cycles = 0U;
+        p_vc->b_lift_spell_cued = false;
+    }
+    else if (true == b_both_black)
+    {
+        if (UINT8_MAX > p_vc->lift_spell_cycles)
+        {
+            p_vc->lift_spell_cycles++;
+        }
+
+        if (true == p_in->b_imu_cue)
+        {
+            p_vc->b_lift_spell_cued = true;
+        }
+
+        limit = (0U == p_vc->lift_spell_max_cycles)
+                ? (uint8_t)VC_LIFT_SPELL_FALLBACK_CYCLES
+                : p_vc->lift_spell_max_cycles;
+
+        if ((p_vc->lift_spell_cycles > limit)
+            && (true == p_vc->b_lift_spell_cued))
+        {
+            b_confirmed = true;
+
+            /* A lift is not a normal spell, so it teaches nothing.  The
+             * counter is left for the event log; the next step is outside
+             * the running states and clears it without learning. */
+        }
+    }
+    else if (0U != p_vc->lift_spell_cycles)
+    {
+        /* The spell ended without confirming: remember it if it is the
+         * longest so far, inside the safety cap. */
+        if (p_vc->lift_spell_cycles > p_vc->lift_spell_max_cycles)
+        {
+            p_vc->lift_spell_max_cycles = p_vc->lift_spell_cycles;
+
+            if (VC_LIFT_SPELL_CAP_CYCLES < p_vc->lift_spell_max_cycles)
+            {
+                p_vc->lift_spell_max_cycles =
+                    (uint8_t)VC_LIFT_SPELL_CAP_CYCLES;
+            }
+        }
+
+        p_vc->lift_spell_cycles = 0U;
+        p_vc->b_lift_spell_cued = false;
+    }
+    else
+    {
+        /* No spell to end. */
+    }
+
+    return (b_confirmed);
 }
 
 
@@ -971,7 +1063,7 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
 }
 
 
-/* Rule 3: the current state's own transitions. */
+/* Rule 4: the current state's own transitions. */
 static void
 step_state (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 {
@@ -1038,9 +1130,28 @@ step_state (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
             }
             break;
 
-        case VC_STATE_HANDLE_JUNCTION:  /* Transient: never seen here.    */
         case VC_STATE_FINISHED:
-            /* Remain where we are. */
+            /* The run is over and the car stays stopped until the operator
+             * asks for another run.  START needs Buddy 4 ready, as in
+             * READY, and no serious fault, as in EMERGENCY_STOP.  STOP
+             * drops back to READY, which also accepts START. */
+            if ((VC_CMD_START == p_in->cmd) && p_in->b_terrain_ready
+                && (0U == p_in->serious_faults))
+            {
+                enter_state(p_vc, VC_STATE_CALIBRATE, p_in->now_ms, p_out);
+            }
+            else if (VC_CMD_STOP == p_in->cmd)
+            {
+                enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
+            }
+            else
+            {
+                /* Remain where we are. */
+            }
+            break;
+
+        case VC_STATE_HANDLE_JUNCTION:  /* Transient: never seen here.    */
+            /* Remained where we are. */
             break;
 
         default:
@@ -1089,6 +1200,9 @@ vc_init (vc_t * p_vc, uint32_t now_ms)
         p_vc->b_junction_seen   = false;
         p_vc->junction_seen_mm  = 0;
         p_vc->pending_turn      = VC_NAV_NONE;
+        p_vc->lift_spell_cycles = 0U;
+        p_vc->lift_spell_max_cycles = 0U;
+        p_vc->b_lift_spell_cued = false;
     }
 }
 
@@ -1120,6 +1234,7 @@ step_checked (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     p_out->pivot_mdeg      = 0;
     p_out->cal_req         = VC_CAL_REQ_NONE;
     p_out->cal_fail        = VC_CAL_FAIL_NONE;
+    p_out->b_lift_confirmed = false;
 
     /* Rule 1: safety first.  Any serious fault stops the car. */
     if ((0U != p_in->serious_faults)
@@ -1133,12 +1248,18 @@ step_checked (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
     {
         enter_state(p_vc, VC_STATE_READY, p_in->now_ms, p_out);
     }
+    /* Rule 3: a confirmed lift ends the run, before any mission action. */
+    else if (true == step_lift(p_vc, p_in))
+    {
+        enter_state(p_vc, VC_STATE_FINISHED, p_in->now_ms, p_out);
+        p_out->b_lift_confirmed = true;
+    }
     else
     {
-        /* Rule 3: the state's own transitions. */
+        /* Rule 4: the state's own transitions. */
         step_state(p_vc, p_in, p_out);
 
-        /* Rule 4: the state's timeout, only if nothing else happened.
+        /* Rule 5: the state's timeout, only if nothing else happened.
          * step_state() has already replaced any out-of-range state. */
         timeout_ms = g_state_timeout_ms[p_vc->state];
 

@@ -105,6 +105,32 @@
  * line sensors and set it. */
 #define VC_JUNCTION_ADVANCE_MM  (100)
 
+/* Lift rule (requirements R20/R21, 10 Nov 2026).  The user's lift test
+ * lifts the car off the ground: both line sensors read black for seconds,
+ * which is far longer than any junction, and Buddy 4 sees a sharp IMU
+ * change.  A run ends when a both-black spell is longer than the longest
+ * normal spell learned so far AND Buddy 4's sharp-change cue was seen
+ * during that spell.  The cue is a bound, not a measured lift value: the
+ * 10 Nov recording raised it about 220 ms after both sensors went black.
+ *
+ * Both spell bounds below are SAFETY BOUNDS, not lift measurements.  The
+ * four normal recordings of 10 Nov have at most 11 VC cycles (220 ms) of
+ * both-black sensor bits (the JUNCTION line state lasted 10 cycles; the
+ * packed bits go black one cycle earlier through Buddy 3's debounce), so:
+ *  - VC_LIFT_SPELL_CAP_CYCLES caps what one odd normal spell can teach.
+ *    25 cycles (500 ms) is 2.3 times the observed normal worst case and
+ *    still far below the multi-second both-black of a car in the air.
+ *  - VC_LIFT_SPELL_FALLBACK_CYCLES is used before any normal spell has
+ *    ended.  15 cycles (300 ms) is 1.4 times the observed normal worst
+ *    case, and the fresh START calibration does not train it.
+ *
+ * The learned length survives a run until the next power-on, like Buddy 4's
+ * learned statistics; vc_init() clears it.  A confirmed lift spell is not
+ * learned, and the START calibration is not counted.
+ */
+#define VC_LIFT_SPELL_FALLBACK_CYCLES (15U)
+#define VC_LIFT_SPELL_CAP_CYCLES      (25U)
+
 /* Line lost while following: stop, then pivot in place to find it again,
  * towards the side it was last seen on first, then the other side.  The
  * pivot is the same TURN_ANGLE as the calibration sweep, at 80 mm/s. */
@@ -263,6 +289,8 @@ typedef struct
                                       Buddy 4 not ready or silent).      */
     bool       b_ramp_active;      /* Buddy 4: fresh, healthy active ramp.
                                       Keep forward speed while steering. */
+    bool       b_imu_cue;          /* Buddy 4: fresh sharp-change cue.  A
+                                      stale word reads false.            */
     bool       b_terrain_ready;    /* Buddy 4: fresh, ready, level.  START
                                       is refused without it.             */
     bool       b_obstacle_ahead;   /* Event: Buddy 5 OBSTACLE_AHEAD.      */
@@ -337,6 +365,9 @@ typedef struct
     vc_cal_req_t    cal_req;
     vc_cal_fail_t   cal_fail;       /* Set on the step that returns to
                                        READY after a failed calibration.  */
+    bool            b_lift_confirmed; /* Set on the step the lift rule
+                                       enters FINISHED, for the event
+                                       recorder and the motion event.     */
 } vc_outputs_t;
 
 typedef enum                   /* Pivot search after losing the line.     */
@@ -399,6 +430,9 @@ typedef struct
     bool       b_right_exit;       /* Right sensor read black during this
                                       RIGHT stretch; cleared otherwise.    */
     int16_t    steer_mag;          /* Ramp magnitude 0 .. 127.            */
+    uint8_t    lift_spell_cycles;  /* Both-black spell length, saturated. */
+    uint8_t    lift_spell_max_cycles; /* Longest normal spell, capped.    */
+    bool       b_lift_spell_cued;  /* The IMU cue was seen in this spell. */
 } vc_t;
 
 /* ------------------------------------------------------------------------ *

@@ -65,8 +65,8 @@
 # ms, event (LINE_LOST value = steer before the loss; LINE_BACK value = ms
 # since LINE_LOST; RAMP_START / RAMP_END value 0; HUMP_DONE value = newest
 # height in 0.1 mm; RUN_MAX value = the word's highest height in 0.1 mm,
-# logged when it changes; IMPACT value 0), value, count (hump count for
-# HUMP_DONE, impact count for IMPACT), valid
+# logged when it changes; LIFT value = the confirmed both-black spell in VC
+# cycles), value, count (hump count for HUMP_DONE, 0 for LIFT), valid
 # (HUMP_DONE only: the word's height was valid; empty otherwise).  With
 # -File, pass the dump as -EvFile.
 # A warning is printed if the ring was not frozen (run still going, or the
@@ -102,7 +102,7 @@ $evMagic     = 0x31564545
 $evRecBytes  = 8
 $evHeader    = 16
 $evNames     = @("?0", "LINE_LOST", "LINE_BACK", "RAMP_START", "RAMP_END",
-                 "HUMP_DONE", "RUN_MAX", "IMPACT")
+                 "HUMP_DONE", "RUN_MAX", "REMOVED_IMPACT", "LIFT")
 $magic       = 0x31434552
 $lineNames   = @("LEFT", "CENTRE", "RIGHT", "LOST", "JUNCTION")
 $stateNames  = @("INITIALISE", "READY", "CALIBRATE", "FOLLOW_LINE",

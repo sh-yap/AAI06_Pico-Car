@@ -232,12 +232,12 @@ ev_rec_max (uint32_t ms, uint16_t highest_dmm)
 
 
 void
-ev_rec_impact (uint32_t ms, uint8_t count)
+ev_rec_lift (uint32_t ms, uint16_t cycles)
 {
     if ((EV_REC_MAGIC == g_ev_rec.magic) && (0U == g_ev_rec.frozen))
     {
-        ev_rec_put(ms, EV_REC_IMPACT, 0,
-                   (uint8_t) (count & EV_REC_IMPACT_MASK));
+        /* Cast: the spell counter is far below INT16_MAX. */
+        ev_rec_put(ms, EV_REC_LIFT, (int16_t) cycles, 0U);
     }
 }
 

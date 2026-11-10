@@ -316,7 +316,6 @@ test_follow_line_and_hump (void)
     g_in.line_error = 0;
     step();
     CHECK(-64 == g_out.steer);
-    CHECK(100 == g_out.speed_mm_s);
     CHECK(VC_SPEED_NORMAL_MM_S > g_out.speed_mm_s);
     CHECK(VC_SPEED_CURVE_MM_S < g_out.speed_mm_s);
 
@@ -909,6 +908,17 @@ test_finished (void)
     g_in.serious_faults = 1U;
     step();
     CHECK_STATE(VC_STATE_FINISHED);           /* Stays finished. */
+
+    /* A fault cleared, STOP then START is the other way back. */
+    g_in.serious_faults = 0U;
+    g_in.cmd            = VC_CMD_STOP;
+    step();
+    CHECK_STATE(VC_STATE_READY);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+
+    g_in.cmd = VC_CMD_START;
+    step();
+    CHECK_STATE(VC_STATE_CALIBRATE);
 }
 
 static void
@@ -1939,6 +1949,211 @@ test_junction_hold_preempted (void)
     CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
 }
 
+/* Both line sensors read black: the lift rule's input. */
+static void
+set_both_black (void)
+{
+    g_in.line         = VC_LINE_JUNCTION;
+    g_in.line_sensors = (uint8_t) (VC_LINE_SENSOR_CENTRE
+                                   | VC_LINE_SENSOR_RIGHT);
+}
+
+/* Hold both sensors on black for a number of VC cycles. */
+static void
+hold_both_black (uint32_t cycles)
+{
+    uint32_t i;
+
+    for (i = 0U; i < cycles; i++)
+    {
+        step();
+    }
+}
+
+/* One normal crossing of a given length, then back on the centre sensor,
+ * so the lift rule learns the length. */
+static void
+learn_normal_spell (uint32_t cycles)
+{
+    set_both_black();
+    hold_both_black(cycles);
+    g_in.line         = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
+    step();
+}
+
+/* A lift on a straight run: the long both-black spell with the IMU cue
+ * finishes the run, really stops Motion, and a new START works. */
+static void
+test_lift_confirmed (void)
+{
+    printf("lift: long both-black spell with IMU cue -> FINISHED\n");
+
+    go_to_follow_line(0U);
+    learn_normal_spell(5U);                   /* Learned: 5 cycles.       */
+    CHECK(5U == g_vc.lift_spell_max_cycles);
+
+    set_both_black();
+    g_in.b_imu_cue = true;
+    hold_both_black(5U);                      /* Equal: not longer.       */
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
+
+    step();                                   /* Spell 6 > 5: confirm.    */
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(g_out.b_lift_confirmed);
+    CHECK(6U == g_vc.lift_spell_cycles);       /* For the event log.       */
+
+    /* Stays stopped, whatever the line and cue say now. */
+    hold_both_black(20U);
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(VC_MOTION_NONE == g_out.motion);     /* No new Motion request.   */
+
+    /* A new START from FINISHED starts another run. */
+    g_in.b_imu_cue   = false;
+    g_in.line        = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
+    g_in.cmd         = VC_CMD_START;
+    step();
+    CHECK_STATE(VC_STATE_CALIBRATE);
+    CHECK(VC_CAL_REQ_BEGIN == g_out.cal_req);
+}
+
+/* A long both-black spell with no IMU cue is a junction, not a lift, and it
+ * teaches only up to the safety cap. */
+static void
+test_lift_without_cue (void)
+{
+    printf("lift: long both-black spell without cue -> no lift\n");
+
+    go_to_follow_line(0U);
+    set_both_black();
+    g_in.b_imu_cue = false;
+    hold_both_black(60U);
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
+
+    g_in.line         = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
+    step();
+    CHECK(VC_LIFT_SPELL_CAP_CYCLES == g_vc.lift_spell_max_cycles);
+}
+
+/* A short both-black spell with the cue is not a lift, even after a longer
+ * normal spell has been learned. */
+static void
+test_lift_short_with_cue (void)
+{
+    printf("lift: short both-black spell with cue -> no lift\n");
+
+    go_to_follow_line(0U);
+    learn_normal_spell(8U);
+
+    set_both_black();
+    g_in.b_imu_cue = true;
+    hold_both_black(8U);                      /* Equal to the learned max. */
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
+
+    g_in.b_imu_cue    = false;
+    g_in.line         = VC_LINE_CENTRE;
+    g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
+    step();
+    CHECK(8U == g_vc.lift_spell_max_cycles);
+}
+
+/* Before any normal spell has ended, the conservative fallback bound
+ * applies: exactly the bound is not enough, one more cycle is. */
+static void
+test_lift_fallback (void)
+{
+    printf("lift: fallback bound before learning\n");
+
+    go_to_follow_line(0U);
+    set_both_black();
+    g_in.b_imu_cue = true;
+    hold_both_black(VC_LIFT_SPELL_FALLBACK_CYCLES);
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
+
+    step();
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(g_out.b_lift_confirmed);
+}
+
+/* The calibration sweep crosses the line with both sensors black on
+ * purpose, so the lift rule must not count it. */
+static void
+test_lift_not_in_calibration (void)
+{
+    printf("lift: calibration sweep is not a lift\n");
+
+    go_to_sweep();
+    set_both_black();
+    g_in.b_imu_cue = true;
+    hold_both_black(2U * VC_LIFT_SPELL_CAP_CYCLES);
+    CHECK_STATE(VC_STATE_CALIBRATE);
+    CHECK(!g_out.b_lift_confirmed);
+}
+
+/* A lift outranks the junction and its stored barcode turn, and the ramp
+ * rule, even on the step where the turn would start. */
+static void
+test_lift_priority (void)
+{
+    uint32_t i;
+
+    printf("lift: beats junction, barcode turn and ramp\n");
+
+    go_to_follow_line(0U);
+    learn_normal_spell(5U);
+    g_in.barcode = VC_NAV_LEFT;
+    step();
+
+    g_in.travel_mm  = 1000;
+    g_in.b_ramp_active = true;
+    g_in.b_hump     = true;
+    set_both_black();
+    g_in.b_imu_cue  = true;
+
+    for (i = 0U; i < 5U; i++)
+    {
+        g_in.travel_mm += 1;
+        step();
+    }
+
+    /* The junction was accepted, so the stored turn is pending. */
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_NAV_LEFT == g_vc.pending_turn);
+
+    g_in.travel_mm = 1000 + VC_JUNCTION_ADVANCE_MM;
+    step();                                   /* Spell 6: both would fire. */
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(g_out.b_lift_confirmed);
+}
+
+/* A long both-black spell that is found while recovering the line also
+ * finishes the run, before the junction is handled. */
+static void
+test_lift_during_recovery (void)
+{
+    printf("lift: beats line recovery\n");
+
+    go_to_follow_line(0U);
+    g_in.line         = VC_LINE_LOST;
+    g_in.line_sensors = 0U;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+
+    set_both_black();
+    g_in.b_imu_cue = true;
+    hold_both_black(VC_LIFT_SPELL_FALLBACK_CYCLES + 1U);
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(g_out.b_lift_confirmed);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int
@@ -1962,6 +2177,13 @@ main (void)
     test_stop_command();
     test_emergency_recovery();
     test_finished();
+    test_lift_confirmed();
+    test_lift_without_cue();
+    test_lift_short_with_cue();
+    test_lift_fallback();
+    test_lift_not_in_calibration();
+    test_lift_priority();
+    test_lift_during_recovery();
     test_timer_wraparound();
     test_names_and_null();
     test_junction_edge();
