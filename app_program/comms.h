@@ -58,7 +58,8 @@ typedef enum
     COMMS_NAV_COUNT
 } comms_nav_t;
 
-/* Same numbering as Buddy 3's line_state_t (docs/DATA_DEFINITIONS.md). */
+/* Same numbering as Buddy 3's line_state_t
+ * (docs/DATA_REPRESENTATION.md section 2). */
 typedef enum
 {
     COMMS_LINE_LEFT = 0,
@@ -202,7 +203,8 @@ typedef struct
 {
     bool     b_connected;
     uint32_t events_sent;
-    uint32_t events_dropped;    /* queue full: event discarded          */
+    uint32_t events_dropped;    /* queue full or unusable: discarded;
+                                   stops at 255 (8-bit wire)           */
     uint32_t telemetry_sent;
     uint32_t commands_received;
 } comms_stats_t;
@@ -218,8 +220,12 @@ void comms_get_stats(comms_stats_t * p_stats);
 /* Vehicle controller ONLY: these replace the whole state / fault word, so a
  * second caller would overwrite the controller's value. */
 void comms_set_state(comms_state_t state);
-void comms_set_fault(uint32_t fault_flags);     /* 0 = no fault; bits 0-15
-                                                   are sent (DATA_DEFS §6) */
+void comms_set_fault(uint32_t fault_flags);     /* 0 = no fault; fault bits
+                                                   0-9 are sent, bit 4 is
+                                                   reserved.  Names and set/
+                                                   clear rules: VC_FAULT_* in
+                                                   vc_task.h (docs/DATA_/
+                                                   REPRESENTATION.md §9) */
 bool comms_begin_run(void);     /* resets the run summary               */
 bool comms_end_run(void);       /* publishes the run summary            */
 bool comms_get_command(comms_cmd_t * p_cmd);    /* true if one waiting  */

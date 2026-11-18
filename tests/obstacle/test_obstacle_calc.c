@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include <math.h>
 
 #include "obstacle_config.h"
@@ -23,6 +24,7 @@
 #include "obstacle_monitor.h"
 #include "obstacle_scan.h"
 #include "obstacle_plan.h"
+#include "obstacle_pack.h"
 
 static uint32_t failures = 0U;
 static uint32_t checks = 0U;
@@ -1161,6 +1163,345 @@ test_plan_line_watch(void)
               OBSTACLE_LINE_NONE);
 }
 
+/*!
+ * @brief CR1: the stored scan record round-trips, pins its layout and
+ *        saturates at its field ends.
+ */
+static void
+test_pack_scan(void)
+{
+    obstacle_scan_result_t    in;
+    obstacle_scan_result_t    out;
+    obstacle_scan_packed_t    packed;
+    uint32_t const            mm[13] =
+        { 3007U, 924U, 450U, 446U, 445U, 441U, 441U, 441U, 440U, 441U,
+          441U, 441U, 446U };
+    uint32_t                  idx;
+
+    check_u32("scan packed words", OBSTACLE_SCAN_PACKED_WORDS, 17U);
+    check_u32("scan packed bytes", (uint32_t)sizeof(packed), 68U);
+
+    /* Zero: count 0, every point at its smallest value. */
+    (void)memset(&in, 0, sizeof(in));
+    (void)memset(&out, 0xFF, sizeof(out));
+    (void)memset(&packed, 0xFF, sizeof(packed));
+    obstacle_pack_scan(&in, &packed);
+    check_u32("scan zero unpack", obstacle_unpack_scan(&packed, &out), true);
+    check_u32("scan zero count", out.count, 0U);
+    check_u32("scan zero duration", out.duration_ms, 0U);
+    check_u32("scan zero profile",
+              (uint32_t)obstacle_calc_pack_profile(&out.profile), 0U);
+
+    for (idx = 0U; idx < OBSTACLE_SCAN_PACKED_WORDS; idx++)
+    {
+        check_u32("scan zero word", packed.word[idx], 0U);
+    }
+
+    /* One point pins the layout: 105 | 1234 << 7 | 3 << 19 | 2 << 23
+     * | BACKGROUND << 27, then count 1 | 60 << 4 | 120 << 11. */
+    (void)memset(&in, 0, sizeof(in));
+    in.count                    = 1U;
+    in.points[0].angle_deg      = 105U;
+    in.points[0].distance_mm    = 1234U;
+    in.points[0].valid_count    = 3U;
+    in.points[0].silent_count   = 2U;
+    in.points[0].point_class    = OBSTACLE_POINT_BACKGROUND;
+    in.right_edge_deg           = 60U;
+    in.left_edge_deg            = 120U;
+    in.duration_ms              = 2000U;
+    obstacle_pack_scan(&in, &packed);
+    check_u32("scan point word", packed.word[0], 286943593U);
+    check_u32("scan point spare", packed.word[0] >> 29, 0U);
+    check_u32("scan header word", packed.word[13], 246721U);
+    check_u32("scan header spare", packed.word[13] >> 18, 0U);
+    check_u32("scan duration word", packed.word[14], 2000U);
+    check_u32("scan duration spare", packed.word[14] >> 16, 0U);
+    check_u32("scan profile lo", packed.word[15], 0U);
+    check_u32("scan profile hi", packed.word[16], 0U);
+    check_u32("scan layout unpack", obstacle_unpack_scan(&packed, &out),
+              true);
+    check_u32("scan layout angle", out.points[0].angle_deg, 105U);
+    check_u32("scan layout class", out.points[0].point_class,
+              OBSTACLE_POINT_BACKGROUND);
+
+    /* A real 5-degree scan (2026-10-31), analysed then round-tripped. */
+    (void)memset(&in, 0, sizeof(in));
+    make_fine_scan(&in, mm);
+    in.duration_ms = 2410U;
+    obstacle_pack_scan(&in, &packed);
+    (void)memset(&out, 0, sizeof(out));
+    check_u32("scan real unpack", obstacle_unpack_scan(&packed, &out), true);
+    check_u32("scan real count", out.count, 13U);
+    check_u32("scan real duration", out.duration_ms, 2410U);
+    check_u32("scan real right edge", out.right_edge_deg,
+              in.right_edge_deg);
+    check_u32("scan real left edge", out.left_edge_deg, in.left_edge_deg);
+    check_u64("scan real profile", obstacle_unpack_scan_profile(&packed),
+              obstacle_calc_pack_profile(&in.profile));
+
+    for (idx = 0U; idx < 13U; idx++)
+    {
+        check_u32("scan real angle", out.points[idx].angle_deg,
+                  in.points[idx].angle_deg);
+        check_u32("scan real mm", out.points[idx].distance_mm,
+                  in.points[idx].distance_mm);
+        check_u32("scan real valid", out.points[idx].valid_count,
+                  in.points[idx].valid_count);
+        check_u32("scan real class", out.points[idx].point_class,
+                  in.points[idx].point_class);
+    }
+
+    /* A full 13-point scan, every field at its largest value. */
+    in.count      = 13U;
+    in.duration_ms = 65535U;
+    in.right_edge_deg = 120U;
+    in.left_edge_deg  = 120U;
+    in.profile.distance_mm    = 4095U;
+    in.profile.angle_deg      = 180U;
+    in.profile.width_mm       = 1023U;
+    in.profile.clear_left_mm  = 4095U;
+    in.profile.clear_right_mm = 4095U;
+    in.profile.action         = OBSTACLE_ACTION_REVERSE_RETRY;
+
+    for (idx = 0U; idx < 13U; idx++)
+    {
+        in.points[idx].angle_deg    = OBSTACLE_SERVO_ANGLE_MAX_DEG;
+        in.points[idx].distance_mm  = 4000U;
+        in.points[idx].valid_count  = 8U;
+        in.points[idx].silent_count = 8U;
+        in.points[idx].point_class  = OBSTACLE_POINT_BACKGROUND;
+    }
+
+    obstacle_pack_scan(&in, &packed);
+    (void)memset(&out, 0, sizeof(out));
+    check_u32("scan max unpack", obstacle_unpack_scan(&packed, &out), true);
+    check_u32("scan max count", out.count, 13U);
+    check_u32("scan max duration", out.duration_ms, 65535U);
+    check_u32("scan max right", out.right_edge_deg, 120U);
+    check_u32("scan max left", out.left_edge_deg, 120U);
+    check_u64("scan max profile",
+              obstacle_unpack_scan_profile(&packed),
+              obstacle_calc_pack_profile(&in.profile));
+
+    for (idx = 0U; idx < 13U; idx++)
+    {
+        check_u32("scan max angle", out.points[idx].angle_deg, 120U);
+        check_u32("scan max mm", out.points[idx].distance_mm, 4000U);
+        check_u32("scan max valid", out.points[idx].valid_count, 8U);
+        check_u32("scan max silent", out.points[idx].silent_count, 8U);
+        check_u32("scan max class", out.points[idx].point_class,
+                  OBSTACLE_POINT_BACKGROUND);
+    }
+
+    /* Out of range: saturate at each field's end, never wrap. */
+    in.points[0].angle_deg    = 200U;
+    in.points[0].distance_mm  = 9000U;
+    in.points[0].valid_count  = 20U;
+    in.points[0].silent_count = 20U;
+    in.duration_ms            = 100000U;
+    in.count                  = 20U;
+    in.left_edge_deg          = 200U;
+    obstacle_pack_scan(&in, &packed);
+    check_u32("scan clamp unpack", obstacle_unpack_scan(&packed, &out), true);
+    check_u32("scan clamp angle", out.points[0].angle_deg, 127U);
+    check_u32("scan clamp mm", out.points[0].distance_mm, 4095U);
+    check_u32("scan clamp valid", out.points[0].valid_count, 15U);
+    check_u32("scan clamp silent", out.points[0].silent_count, 15U);
+    check_u32("scan clamp duration", out.duration_ms, 65535U);
+    check_u32("scan clamp count", out.count, OBSTACLE_SCAN_MAX_POINTS);
+    check_u32("scan clamp left", out.left_edge_deg, 127U);
+
+    /* An unknown enum code on pack becomes UNKNOWN, and one in a stored
+     * record makes the whole result "no scan". */
+    in.points[0].point_class = (obstacle_point_class_t)7;
+    (void)memset(&packed, 0, sizeof(packed));
+    obstacle_pack_scan(&in, &packed);
+    check_u32("scan bad class pack", obstacle_unpack_scan(&packed, &out), true);
+    check_u32("scan bad class", out.points[0].point_class,
+              OBSTACLE_POINT_UNKNOWN);
+
+    packed.word[0] |= (3U << 27);
+    check_u32("scan unknown class", obstacle_unpack_scan(&packed, &out),
+              false);
+
+    packed.word[13] |= (14U << 0);
+    check_u32("scan unknown count", obstacle_unpack_scan(&packed, &out),
+              false);
+
+    obstacle_pack_scan(NULL, NULL);
+    check_u32("scan NULL unpack", obstacle_unpack_scan(NULL, NULL), false);
+}
+
+/*!
+ * @brief CR1: the stored path-check record round-trips and pins its
+ *        layout.
+ */
+static void
+test_pack_path(void)
+{
+    obstacle_path_t        in;
+    obstacle_path_t        out;
+    obstacle_path_packed_t packed;
+    uint32_t               idx;
+
+    check_u32("path packed words", OBSTACLE_PATH_PACKED_WORDS, 3U);
+    check_u32("path packed bytes", (uint32_t)sizeof(packed), 12U);
+
+    /* Zero: no points, verdict CLEAR, nothing needed or known. */
+    (void)memset(&in, 0, sizeof(in));
+    (void)memset(&out, 0xFF, sizeof(out));
+    (void)memset(&packed, 0xFF, sizeof(packed));
+    obstacle_pack_path(&in, &packed);
+    check_u32("path zero word0", packed.word[0], 0U);
+    check_u32("path zero word1", packed.word[1], 0U);
+    check_u32("path zero word2", packed.word[2], 0U);
+    check_u32("path zero unpack", obstacle_unpack_path(&packed, &out), true);
+    check_u32("path zero count", out.count, 0U);
+    check_u32("path zero need", out.need_mm, 0U);
+
+    /* The bench path (2026-11-01): 21 cm card at 455 mm, 21 deg right. */
+    path_start(&in, 1047U, 455U);
+    path_add(&in, 70U, OBSTACLE_RANGE_OK, 2270U);
+    path_add(&in, 80U, OBSTACLE_RANGE_OK, 465U);
+    path_add(&in, 90U, OBSTACLE_RANGE_OK, 456U);
+    obstacle_scan_path_verdict(&in);
+    obstacle_pack_path(&in, &packed);
+
+    /* W0: verdict | 1047 << 3 | 455 << 15 | 3 << 27 | CLEAR << 29. */
+    check_u32("path header word", packed.word[0], 417571000U);
+    /* W1: 70 | 2270 << 7 | 465 << 19. */
+    check_u32("path word 1", packed.word[1], 244084550U);
+    /* W2: 456 | 80 << 12 | 90 << 19 | KNOWN << 26 | KNOWN << 29. */
+    check_u32("path word 2", packed.word[2], 2463433160U);
+
+    (void)memset(&out, 0, sizeof(out));
+    check_u32("path unpack", obstacle_unpack_path(&packed, &out), true);
+    check_u32("path verdict", out.verdict, OBSTACLE_PATH_CLEAR);
+    check_u32("path need", out.need_mm, 1047U);
+    check_u32("path known", out.known_mm, 455U);
+    check_u32("path count", out.count, 3U);
+    check_u32("path p0 angle", out.points[0].angle_deg, 70U);
+    check_u32("path p0 mm", out.points[0].distance_mm, 2270U);
+    check_u32("path p0 verdict", out.points[0].verdict, OBSTACLE_PATH_CLEAR);
+    check_u32("path p1 angle", out.points[1].angle_deg, 80U);
+    check_u32("path p1 mm", out.points[1].distance_mm, 465U);
+    check_u32("path p1 verdict", out.points[1].verdict, OBSTACLE_PATH_KNOWN);
+    check_u32("path p2 angle", out.points[2].angle_deg, 90U);
+    check_u32("path p2 mm", out.points[2].distance_mm, 456U);
+    check_u32("path p2 verdict", out.points[2].verdict, OBSTACLE_PATH_KNOWN);
+
+    /* Every field at its largest valid value. */
+    in.verdict = OBSTACLE_PATH_KNOWN;
+    in.need_mm = 4095U;
+    in.known_mm = 4000U;
+
+    for (idx = 0U; idx < OBSTACLE_PATH_MAX_POINTS; idx++)
+    {
+        in.points[idx].angle_deg = 115U;
+        in.points[idx].distance_mm = 4000U;
+        in.points[idx].verdict = OBSTACLE_PATH_KNOWN;
+    }
+
+    obstacle_pack_path(&in, &packed);
+    (void)memset(&out, 0, sizeof(out));
+    check_u32("path max unpack", obstacle_unpack_path(&packed, &out), true);
+    check_u32("path max verdict", out.verdict, OBSTACLE_PATH_KNOWN);
+    check_u32("path max need", out.need_mm, 4095U);
+    check_u32("path max known", out.known_mm, 4000U);
+
+    for (idx = 0U; idx < OBSTACLE_PATH_MAX_POINTS; idx++)
+    {
+        check_u32("path max angle", out.points[idx].angle_deg, 115U);
+        check_u32("path max mm", out.points[idx].distance_mm, 4000U);
+        check_u32("path max point verdict", out.points[idx].verdict,
+                  OBSTACLE_PATH_KNOWN);
+    }
+
+    /* Out of range: saturate at the field ends. */
+    in.need_mm = 9000U;
+    in.known_mm = 9000U;
+    in.count = 7U;
+    in.points[0].angle_deg = 200U;
+    in.points[0].distance_mm = 9000U;
+    in.points[1].distance_mm = 9000U;
+    in.points[2].distance_mm = 9000U;
+    obstacle_pack_path(&in, &packed);
+    check_u32("path clamp unpack", obstacle_unpack_path(&packed, &out), true);
+    check_u32("path clamp need", out.need_mm, 4095U);
+    check_u32("path clamp known", out.known_mm, 4095U);
+    check_u32("path clamp count", out.count, OBSTACLE_PATH_MAX_POINTS);
+    check_u32("path clamp angle", out.points[0].angle_deg, 127U);
+    check_u32("path clamp mm", out.points[2].distance_mm, 4095U);
+
+    /* An unknown verdict code in a stored record is "no path check". */
+    in.verdict = (obstacle_path_verdict_t)7;
+    (void)memset(&packed, 0, sizeof(packed));
+    obstacle_pack_path(&in, &packed);
+    check_u32("path bad verdict unpack",
+              obstacle_unpack_path(&packed, &out), true);
+    check_u32("path bad verdict", out.verdict, OBSTACLE_PATH_CLEAR);
+
+    packed.word[0] |= (5U << 0);
+    check_u32("path unknown verdict", obstacle_unpack_path(&packed, &out),
+              false);
+
+    packed.word[2] |= (6U << 26);
+    check_u32("path unknown point verdict",
+              obstacle_unpack_path(&packed, &out), false);
+
+    packed.word[0] = (4U << 27);
+    check_u32("path unknown count", obstacle_unpack_path(&packed, &out),
+              false);
+
+    obstacle_pack_path(NULL, NULL);
+    check_u32("path NULL unpack", obstacle_unpack_path(NULL, NULL), false);
+}
+
+/*!
+ * @brief CR1: the controller's path-check request is one word, so the
+ *        task cannot read a mixed set of values.
+ */
+static void
+test_pack_path_request(void)
+{
+    obstacle_action_t side = OBSTACLE_ACTION_STOP;
+    uint32_t          need_mm = 0U;
+    uint32_t          known_mm = 0U;
+    uint32_t          word;
+
+    /* 1047 | 455 << 12 | TURN_LEFT << 24; 27 bits, 5 spare. */
+    word = obstacle_pack_path_request(OBSTACLE_ACTION_TURN_LEFT, 1047U,
+                                      455U);
+    check_u32("request word", word, 35419159U);
+    check_u32("request spare", word >> 27, 0U);
+    obstacle_unpack_path_request(word, &side, &need_mm, &known_mm);
+    check_u32("request side", side, OBSTACLE_ACTION_TURN_LEFT);
+    check_u32("request need", need_mm, 1047U);
+    check_u32("request known", known_mm, 455U);
+
+    /* Saturation, and no side for "nothing known": still one word. */
+    word = obstacle_pack_path_request(OBSTACLE_ACTION_TURN_RIGHT, 9000U,
+                                      9000U);
+    obstacle_unpack_path_request(word, &side, &need_mm, &known_mm);
+    check_u32("request clamp side", side, OBSTACLE_ACTION_TURN_RIGHT);
+    check_u32("request clamp need", need_mm, 4095U);
+    check_u32("request clamp known", known_mm, 4095U);
+
+    /* An unknown side code reads as straight ahead, never as a bypass
+     * side. */
+    word = obstacle_pack_path_request((obstacle_action_t)9, 500U, 400U);
+    obstacle_unpack_path_request(word, &side, &need_mm, &known_mm);
+    check_u32("request bad side pack", side, OBSTACLE_ACTION_STOP);
+
+    word = (7U << 24);
+    obstacle_unpack_path_request(word, &side, &need_mm, &known_mm);
+    check_u32("request bad side unpack", side, OBSTACLE_ACTION_CONTINUE);
+    check_u32("request bad side need", need_mm, 0U);
+
+    /* NULL outputs are allowed. */
+    obstacle_unpack_path_request(0U, NULL, NULL, NULL);
+}
+
 int
 main(void)
 {
@@ -1182,6 +1523,9 @@ main(void)
     test_scan_path();
     test_plan_bypass();
     test_plan_line_watch();
+    test_pack_scan();
+    test_pack_path();
+    test_pack_path_request();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

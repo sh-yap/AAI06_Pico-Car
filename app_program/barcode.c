@@ -266,8 +266,15 @@ static course_code_t const course_codes[] =
     { 'X', BARCODE_X },
 };
 
-/* Stored black/white transition data. */
-static barcode_edge_t barcode_edges[BARCODE_MAX_EDGES];
+/*
+ * Stored black/white transition data, packed in two words per edge: word 0
+ * is_black + 31-bit signed encoder position, word 1 timestamp_ms (see the
+ * helpers in barcode.h).  barcode_edge_t stays the value type of
+ * barcode_get_edge().
+ */
+#define BARCODE_EDGE_WORDS            2U
+
+static uint32_t barcode_edges[BARCODE_MAX_EDGES * BARCODE_EDGE_WORDS];
 
 
 /* Number of valid edges currently stored. */
@@ -320,9 +327,21 @@ static char guard_char = C39_CHAR_NONE;
 static bool capture_in_guard = false;
 
 
-/* Raw ADC samples for the current acquisition, oldest first. */
-static uint16_t raw_adc[BARCODE_RAW_MAX_SAMPLES];
-static int32_t raw_encoder[BARCODE_RAW_MAX_SAMPLES];
+/*
+ * Raw samples for the current acquisition, oldest first.
+ *
+ * raw_adc holds 12-bit samples two per three bytes (720 B instead of
+ * 960 B).  raw_encoder holds the encoder position as an int16 offset from
+ * raw_encoder_base (960 B instead of 1920 B).  The buffer is appended to,
+ * never overwritten, and raw_count only goes back to 0 in
+ * barcode_raw_clear(), so the base set by the first sample of a capture is
+ * valid for every sample still stored (see barcode_raw_store_sample()).
+ */
+#define BARCODE_RAW_ADC_BYTES         ((BARCODE_RAW_MAX_SAMPLES / 2U) * 3U)
+
+static uint8_t raw_adc[BARCODE_RAW_ADC_BYTES];
+static int16_t raw_encoder[BARCODE_RAW_MAX_SAMPLES];
+static int32_t raw_encoder_base = 0;
 static uint16_t raw_time_ms[BARCODE_RAW_MAX_SAMPLES];
 
 /* Histogram used only while learning the current capture's levels. */
@@ -365,9 +384,74 @@ typedef enum
  * Decode work buffers: static so the decode does not need ~600 bytes
  * of the Buddy 3 task stack. Used only inside barcode_decode_char().
  */
-static uint32_t raw_widths[BARCODE_MAX_ELEMENTS];
-static uint32_t variant_widths[BARCODE_MAX_ELEMENTS];
+static uint16_t raw_widths[BARCODE_MAX_ELEMENTS];
+static uint16_t variant_widths[BARCODE_MAX_ELEMENTS];
 static uint8_t glitch_choice[BARCODE_MAX_ELEMENTS];
+
+
+/* Unpack stored edge 'index' (only called with index < edge_count). */
+static barcode_edge_t barcode_edge_read(uint8_t index)
+{
+    barcode_edge_t edge;
+    uint32_t offset = (uint32_t)index * BARCODE_EDGE_WORDS;
+
+    edge.is_black = barcode_edge_word_is_black(barcode_edges[offset]);
+    edge.encoder_position = barcode_edge_word_position(barcode_edges[offset]);
+    edge.timestamp_ms = barcode_edges[offset + 1U];
+
+    return edge;
+}
+
+
+/* Pack one edge into the stored form (position clamped to 31 bits). */
+static void barcode_edge_write(uint8_t index, bool is_black,
+                               uint32_t timestamp_ms,
+                               int32_t encoder_position)
+{
+    uint32_t offset = (uint32_t)index * BARCODE_EDGE_WORDS;
+
+    barcode_edges[offset] = barcode_edge_word(is_black, encoder_position);
+    barcode_edges[offset + 1U] = timestamp_ms;
+}
+
+
+/* One raw ADC sample; values are 12-bit by hardware, masked on store. */
+static uint16_t raw_adc_get(uint16_t index)
+{
+    return barcode_adc_unpack(raw_adc, index);
+}
+
+
+static void raw_adc_set(uint16_t index, uint16_t adc)
+{
+    barcode_adc_pack(raw_adc, index, adc);
+}
+
+
+/* One raw encoder position, stored as an offset from raw_encoder_base. */
+static int32_t raw_encoder_get(uint16_t index)
+{
+    return raw_encoder_base + (int32_t)raw_encoder[index];
+}
+
+
+/*
+ * Store one raw encoder position.  If it leaves int16 from the capture
+ * base, clamp it and set raw_overflow: the capture is then reported as
+ * invalid on the same path as an over-long capture, never decoded from
+ * wrapped data.
+ */
+static void raw_encoder_set(uint16_t index, int32_t encoder_position)
+{
+    int16_t offset;
+
+    if (!barcode_encoder_offset(raw_encoder_base, encoder_position, &offset))
+    {
+        raw_overflow = true;
+    }
+
+    raw_encoder[index] = offset;
+}
 
 
 /* Distance in encoder counts, either direction. */
@@ -475,7 +559,7 @@ static void c39_top_add(uint32_t top[C39_TOP_WIDTHS], uint32_t width)
  * C39_ELEMENTS. b_first_black is the colour of the run's first element
  * and top holds the run's widest widths (c39_top_add()).
  */
-static char c39_match(uint32_t const * p_widths, uint8_t count,
+static char c39_match(uint16_t const * p_widths, uint8_t count,
                       uint8_t missing_start, bool b_reversed,
                       bool b_first_black,
                       uint32_t const top[C39_TOP_WIDTHS])
@@ -572,7 +656,7 @@ static uint32_t barcode_median_width(uint8_t count)
             slot--;
         }
 
-        variant_widths[slot] = width;
+        variant_widths[slot] = barcode_width_counts(width);
     }
 
     return variant_widths[count / 2U];
@@ -602,7 +686,7 @@ static uint32_t barcode_median_colour(uint8_t count, uint8_t first)
             slot--;
         }
 
-        variant_widths[slot] = width;
+        variant_widths[slot] = barcode_width_counts(width);
         n++;
     }
 
@@ -638,7 +722,8 @@ static void barcode_correct_edge_shift(uint8_t count, bool b_black0)
     {
         width = (int32_t)raw_widths[i];
         width = ((i % 2U) == first_bar) ? (width + shift) : (width - shift);
-        raw_widths[i] = (width < 1) ? 1U : (uint32_t)width;
+        raw_widths[i] = (width < 1)
+                        ? 1U : barcode_width_counts((uint32_t)width);
     }
 }
 
@@ -659,6 +744,7 @@ static uint8_t barcode_build_variant(uint8_t raw_count,
     uint32_t digits = variant;
     uint32_t carry = 0U;
     uint32_t width;
+    uint32_t merged;
     uint8_t out = 0U;
     uint8_t i;
     bool b_ok = true;
@@ -689,7 +775,9 @@ static uint8_t barcode_build_variant(uint8_t raw_count,
 
                 if (b_ok)
                 {
-                    variant_widths[out - 1U] += width + raw_widths[i + 1U];
+                    merged = (uint32_t)variant_widths[out - 1U] + width
+                             + (uint32_t)raw_widths[i + 1U];
+                    variant_widths[out - 1U] = barcode_width_counts(merged);
                 }
 
                 i = (uint8_t)(i + 2U);
@@ -700,8 +788,9 @@ static uint8_t barcode_build_variant(uint8_t raw_count,
 
                 if (b_ok)
                 {
-                    variant_widths[out - 2U] += variant_widths[out - 1U]
-                                                + width;
+                    merged = (uint32_t)variant_widths[out - 2U]
+                             + (uint32_t)variant_widths[out - 1U] + width;
+                    variant_widths[out - 2U] = barcode_width_counts(merged);
                     out--;
                 }
 
@@ -716,7 +805,7 @@ static uint8_t barcode_build_variant(uint8_t raw_count,
 
             case GLITCH_KEEP:
             default:
-                variant_widths[out] = width;
+                variant_widths[out] = barcode_width_counts(width);
                 out++;
                 i++;
                 break;
@@ -818,22 +907,28 @@ static char barcode_decode_widths(uint8_t raw_count, bool b_corrected)
     uint32_t variants = 1U;
     uint32_t variant;
     uint32_t median;
+    barcode_edge_t previous;
+    barcode_edge_t current;
     uint8_t glitches = 0U;
     uint8_t i;
     bool b_conflict = false;
     char character = C39_CHAR_NONE;
 
     /* Absolute width, so reversing wheels still gives positive widths. */
+    previous = barcode_edge_read(0U);
+
     for (i = 0U; i < raw_count; i++)
     {
-        raw_widths[i] = (uint32_t)abs_counts(
-            barcode_edges[i + 1U].encoder_position
-            - barcode_edges[i].encoder_position);
+        current = barcode_edge_read((uint8_t)(i + 1U));
+        raw_widths[i] = barcode_width_counts(
+            (uint32_t)abs_counts(current.encoder_position
+                                 - previous.encoder_position));
+        previous = current;
     }
 
     if (b_corrected)
     {
-        barcode_correct_edge_shift(raw_count, barcode_edges[0].is_black);
+        barcode_correct_edge_shift(raw_count, barcode_edge_read(0U).is_black);
     }
 
     median = barcode_median_width(raw_count);
@@ -855,7 +950,7 @@ static char barcode_decode_widths(uint8_t raw_count, bool b_corrected)
         barcode_match_variant(
             barcode_build_variant(raw_count, glitch_index, glitches,
                                   variant),
-            barcode_edges[0].is_black, &character, &b_conflict);
+            barcode_edge_read(0U).is_black, &character, &b_conflict);
     }
 
     return b_conflict ? C39_CHAR_NONE : character;
@@ -925,6 +1020,8 @@ static bool barcode_raw_pair_noise(uint16_t low_limit, uint16_t high_limit,
 {
     uint32_t count = 0U;
     uint32_t difference;
+    uint16_t previous;
+    uint16_t value;
     uint16_t i;
     uint8_t bin;
     bool b_pair;
@@ -934,24 +1031,28 @@ static bool barcode_raw_pair_noise(uint16_t low_limit, uint16_t high_limit,
         raw_hist[bin] = 0U;
     }
 
+    previous = raw_adc_get(0U);
+
     for (i = 1U; i < raw_count; i++)
     {
+        value = raw_adc_get(i);
+
         if (b_high)
         {
-            b_pair = ((int32_t)raw_adc[i - 1U] >= (int32_t)high_limit)
-                     && ((int32_t)raw_adc[i] >= (int32_t)high_limit);
+            b_pair = ((int32_t)previous >= (int32_t)high_limit)
+                     && ((int32_t)value >= (int32_t)high_limit);
         }
         else
         {
-            b_pair = ((int32_t)raw_adc[i - 1U] <= (int32_t)low_limit)
-                     && ((int32_t)raw_adc[i] <= (int32_t)low_limit);
+            b_pair = ((int32_t)previous <= (int32_t)low_limit)
+                     && ((int32_t)value <= (int32_t)low_limit);
         }
 
         if (b_pair)
         {
-            difference = (raw_adc[i] > raw_adc[i - 1U])
-                         ? (uint32_t)(raw_adc[i] - raw_adc[i - 1U])
-                         : (uint32_t)(raw_adc[i - 1U] - raw_adc[i]);
+            difference = (value > previous)
+                         ? (uint32_t)(value - previous)
+                         : (uint32_t)(previous - value);
             bin = (uint8_t)(difference >> BARCODE_LEVEL_BIN_SHIFT);
 
             if (bin >= BARCODE_LEVEL_BINS)
@@ -962,6 +1063,8 @@ static bool barcode_raw_pair_noise(uint16_t low_limit, uint16_t high_limit,
             raw_hist[bin] = (uint16_t)(raw_hist[bin] + 1U);
             count++;
         }
+
+        previous = value;
     }
 
     if (count < BARCODE_LEVEL_MIN_CLASS)
@@ -993,7 +1096,7 @@ static uint32_t barcode_raw_histogram(void)
     for (i = 0U; i < raw_count; i++)
     {
         /* ADC is 12-bit; the clamp only protects against a bad caller. */
-        bin = (uint8_t)(raw_adc[i] >> BARCODE_LEVEL_BIN_SHIFT);
+        bin = (uint8_t)(raw_adc_get(i) >> BARCODE_LEVEL_BIN_SHIFT);
 
         if (bin >= BARCODE_LEVEL_BINS)
         {
@@ -1228,7 +1331,8 @@ static uint16_t barcode_raw_local_threshold(uint16_t first,
 
     for (i = 0U; i < count; i++)
     {
-        bin = (uint8_t)(raw_adc[first + i] >> BARCODE_LEVEL_BIN_SHIFT);
+        bin = (uint8_t)(raw_adc_get((uint16_t)(first + i))
+                        >> BARCODE_LEVEL_BIN_SHIFT);
 
         if (bin >= BARCODE_LEVEL_BINS)
         {
@@ -1263,7 +1367,7 @@ static uint16_t barcode_raw_local_threshold(uint16_t first,
 
     for (i = 0U; i < count; i++)
     {
-        if (raw_adc[first + i] < midpoint)
+        if (raw_adc_get((uint16_t)(first + i)) < midpoint)
         {
             below++;
         }
@@ -1438,7 +1542,8 @@ static void barcode_raw_add_edge(bool is_black, uint32_t timestamp_ms,
 {
     if ((edge_count > 0U) &&
         (abs_counts(encoder_position
-                    - barcode_edges[edge_count - 1U].encoder_position)
+                    - barcode_edge_read((uint8_t)(edge_count - 1U))
+                          .encoder_position)
          < BARCODE_MIN_ELEMENT_COUNTS))
     {
         edge_count--;
@@ -1447,9 +1552,8 @@ static void barcode_raw_add_edge(bool is_black, uint32_t timestamp_ms,
 
     if (edge_count < BARCODE_MAX_EDGES)
     {
-        barcode_edges[edge_count].is_black = is_black;
-        barcode_edges[edge_count].timestamp_ms = timestamp_ms;
-        barcode_edges[edge_count].encoder_position = encoder_position;
+        barcode_edge_write(edge_count, is_black, timestamp_ms,
+                           encoder_position);
         edge_count++;
     }
     else
@@ -1464,12 +1568,14 @@ static void barcode_raw_update_widest(void)
 {
     int32_t widest = 0;
     int32_t width;
+    int32_t previous = 0;
     uint16_t i;
 
     for (i = 1U; i < edge_count; i++)
     {
-        width = abs_counts(barcode_edges[i].encoder_position
-                           - barcode_edges[i - 1U].encoder_position);
+        previous = barcode_edge_read((uint8_t)(i - 1U)).encoder_position;
+        width = abs_counts(barcode_edge_read((uint8_t)i).encoder_position
+                           - previous);
 
         if (width > widest)
         {
@@ -1518,8 +1624,8 @@ static void barcode_raw_rebuild_edges(uint16_t threshold,
                                               local_threshold);
     }
 
-    previous_adc = raw_adc[0];
-    previous_encoder = raw_encoder[0];
+    previous_adc = raw_adc_get(0U);
+    previous_encoder = raw_encoder_get(0U);
     sample_threshold = barcode_raw_sample_threshold(
         0U, threshold, b_local, local_count, local_center,
         local_threshold);
@@ -1528,8 +1634,8 @@ static void barcode_raw_rebuild_edges(uint16_t threshold,
 
     for (i = 1U; i < raw_count; i++)
     {
-        current_adc = raw_adc[i];
-        current_encoder = raw_encoder[i];
+        current_adc = raw_adc_get(i);
+        current_encoder = raw_encoder_get(i);
         timestamp_ms = raw_start_ms + (uint32_t)raw_time_ms[i];
         sample_threshold = barcode_raw_sample_threshold(
             i, threshold, b_local, local_count, local_center,
@@ -1686,8 +1792,9 @@ static void barcode_raw_store_sample(uint16_t adc, uint32_t timestamp_ms,
     if (0U == raw_count)
     {
         raw_start_ms = timestamp_ms;
-        raw_adc[0] = adc;
-        raw_encoder[0] = encoder_position;
+        raw_encoder_base = encoder_position;   /* Valid while stored.  */
+        raw_adc_set(0U, adc);
+        raw_encoder_set(0U, encoder_position);
         raw_time_ms[0] = 0U;
         raw_count = 1U;
         return;
@@ -1697,9 +1804,9 @@ static void barcode_raw_store_sample(uint16_t adc, uint32_t timestamp_ms,
     time_delta = (elapsed > UINT16_MAX)
                  ? UINT16_MAX : (uint16_t)elapsed; /* Clamped, safe cast. */
 
-    if (encoder_position == raw_encoder[raw_count - 1U])
+    if (encoder_position == raw_encoder_get((uint16_t)(raw_count - 1U)))
     {
-        raw_adc[raw_count - 1U] = adc;
+        raw_adc_set((uint16_t)(raw_count - 1U), adc);
         raw_time_ms[raw_count - 1U] = time_delta;
         return;
     }
@@ -1710,8 +1817,8 @@ static void barcode_raw_store_sample(uint16_t adc, uint32_t timestamp_ms,
         return;
     }
 
-    raw_adc[raw_count] = adc;
-    raw_encoder[raw_count] = encoder_position;
+    raw_adc_set(raw_count, adc);
+    raw_encoder_set(raw_count, encoder_position);
     raw_time_ms[raw_count] = time_delta;
     raw_count++;
 }
@@ -1722,6 +1829,7 @@ static void barcode_raw_clear(void)
 {
     raw_count = 0U;
     raw_start_ms = 0U;
+    raw_encoder_base = 0;     /* Set again by the next capture's sample 0. */
     raw_mode = false;
     raw_overflow = false;
     raw_levels_valid = false;
@@ -1838,8 +1946,9 @@ void barcode_update(
 
     /* Flicker: this edge undoes the last one almost in place. */
     if ((edge_count > 0U) &&
-        (abs_counts(encoder_position -
-                    barcode_edges[edge_count - 1U].encoder_position)
+        (abs_counts(encoder_position
+                    - barcode_edge_read((uint8_t)(edge_count - 1U))
+                          .encoder_position)
          < BARCODE_MIN_ELEMENT_COUNTS))
     {
         edge_count--;
@@ -1860,23 +1969,19 @@ void barcode_update(
 
         /* The element this edge closes, for the end gap. */
         if ((edge_count > 0U) &&
-            (abs_counts(encoder_position -
-                        barcode_edges[edge_count - 1U].encoder_position)
+            (abs_counts(encoder_position
+                        - barcode_edge_read((uint8_t)(edge_count - 1U))
+                              .encoder_position)
              > widest_counts))
         {
             widest_counts = abs_counts(
-                encoder_position -
-                barcode_edges[edge_count - 1U].encoder_position);
+                encoder_position
+                - barcode_edge_read((uint8_t)(edge_count - 1U))
+                      .encoder_position);
         }
 
-        barcode_edges[edge_count].is_black =
-            is_black;
-
-        barcode_edges[edge_count].timestamp_ms =
-            timestamp_ms;
-
-        barcode_edges[edge_count].encoder_position =
-            encoder_position;
+        barcode_edge_write(edge_count, is_black, timestamp_ms,
+                           encoder_position);
 
         edge_count++;
     }
@@ -2000,8 +2105,8 @@ void barcode_finish_capture(void)
             guard_char = decoded_char;
             guard_position = last_activity_position;
             guard_counts = abs_counts(
-                barcode_edges[edge_count - 1U].encoder_position
-                - barcode_edges[0].encoder_position)
+                barcode_edge_read((uint8_t)(edge_count - 1U)).encoder_position
+                - barcode_edge_read(0U).encoder_position)
                 + (BARCODE_GUARD_GAP_FACTOR * barcode_end_gap());
 
             if (guard_counts < BARCODE_GUARD_MIN_COUNTS)
@@ -2096,7 +2201,7 @@ bool barcode_get_edge(uint8_t index, barcode_edge_t *p_edge)
         return false;
     }
 
-    *p_edge = barcode_edges[index];
+    *p_edge = barcode_edge_read(index);
     return true;
 }
 

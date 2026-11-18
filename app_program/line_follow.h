@@ -62,6 +62,44 @@ typedef struct
 } line_cal_result_t;
 
 
+/*
+ * CR1 Phase 4 storage helper: one sweep history sample (centre and right
+ * 12-bit ADC counts) packed as 24 bits in three bytes, 768 B for the
+ * 256-sample ring instead of 1024 B.
+ *
+ * Static inline so line_follow.c and the round-trip tests use one
+ * implementation.
+ */
+#define LINE_CAL_ADC_MASK          (UINT32_C(0x0FFF))
+#define LINE_CAL_SAMPLE_BYTES      (3U)
+
+static inline void line_cal_sample_pack(uint8_t *p_store, uint32_t index,
+                                        uint16_t centre, uint16_t right)
+{
+    uint32_t offset = index * LINE_CAL_SAMPLE_BYTES;
+    uint32_t value = ((uint32_t)centre & LINE_CAL_ADC_MASK)
+                     | (((uint32_t)right & LINE_CAL_ADC_MASK) << 12);
+
+    p_store[offset] = (uint8_t)(value & UINT32_C(0xFF));
+    p_store[offset + 1U] = (uint8_t)((value >> 8) & UINT32_C(0xFF));
+    p_store[offset + 2U] = (uint8_t)((value >> 16) & UINT32_C(0xFF));
+}
+
+static inline void line_cal_sample_unpack(uint8_t const *p_store,
+                                          uint32_t index,
+                                          uint16_t *p_centre,
+                                          uint16_t *p_right)
+{
+    uint32_t offset = index * LINE_CAL_SAMPLE_BYTES;
+    uint32_t value = (uint32_t)p_store[offset]
+                     | ((uint32_t)p_store[offset + 1U] << 8)
+                     | ((uint32_t)p_store[offset + 2U] << 16);
+
+    *p_centre = (uint16_t)(value & LINE_CAL_ADC_MASK);
+    *p_right = (uint16_t)((value >> 12) & LINE_CAL_ADC_MASK);
+}
+
+
 /* Initialise the line-following module. */
 void line_follow_init(void);
 

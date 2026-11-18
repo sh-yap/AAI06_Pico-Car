@@ -31,6 +31,8 @@
 #include <stdbool.h>
 
 #include "vc.h"
+#include "obstacle_types.h"     /* vc_pack.h: the stored bypass plan.    */
+#include "vc_pack.h"
 #include "vc_task.h"
 #include "motion_types.h"
 #include "motion_task.h"
@@ -60,7 +62,7 @@
 
 #if VC_HAVE_BUDDY5
 #include "obstacle_config.h"
-#include "obstacle_types.h"
+#include "obstacle_calc.h"
 #include "obstacle_task.h"
 #include "obstacle_plan.h"
 #endif
@@ -170,7 +172,11 @@
  * Private data (used only by the VC task)
  * ------------------------------------------------------------------------ */
 
-static vc_t     g_vc;
+/* The controller state in its packed stored form (vc_pack.h): 10 words
+ * instead of the 88 B full-width vc_t.  The VC task is the only reader and
+ * writer, so it needs no lock: each step unpacks this into a stack working
+ * copy, runs vc_step() on that, and packs it back. */
+static vc_packed_t g_vc;
 static bool     g_b_init_ok;
 static UW       g_stack[VC_TASK_STACK_BYTES / sizeof(UW)];
 
@@ -180,7 +186,7 @@ static bool     g_b_manoeuvre_failed;  /* Motion refused the manoeuvre.   */
 static bool     g_b_rejected;          /* Motion refused a drive command. */
 
 static bool              g_b_pending;  /* Manoeuvre waiting to be sent.   */
-static motion_command_t  g_pending;
+static motion_command_packed_t g_pending;
 static uint32_t          g_pending_tries;
 static uint32_t          g_hold_steps; /* Steps left after a stop.        */
 
@@ -268,11 +274,12 @@ is_retryable (motion_result_t result)
 }
 
 
-/* Next Motion sequence id; 0 is reserved by Motion as invalid. */
+/* Next Motion sequence id; 0 is reserved by Motion as invalid.  The packed
+   command carries 16 bits and Motion echoes that value, so wrap there. */
 static uint32_t
 next_seq (void)
 {
-    g_seq++;
+    g_seq = (g_seq + 1U) & 0xFFFFU;
 
     if (0U == g_seq)
     {
@@ -847,8 +854,12 @@ typedef enum
 } obst_req_t;
 
 static obst_req_t             g_scan_req;
-static obstacle_profile_t     g_profile;    /* Latest scan.              */
-static obstacle_bypass_plan_t g_plan;       /* For TURN recommendations. */
+static uint64_t               g_profile_word; /* Latest scan: its 64-bit
+                                                 profile word
+                                                 (obstacle_calc.h).     */
+static vc_plan_packed_t       g_plan;         /* For TURN recommendations,
+                                                 stored packed
+                                                 (vc_pack.h).           */
 static bool                   g_b_ahead_quiet;  /* See read_obstacle(). */
 static uint32_t               g_ahead_quiet_until_ms;
 
@@ -938,31 +949,50 @@ avoid_from_buddy5 (obstacle_action_t action)
 static void
 scan_finished (vc_inputs_t * p_in)
 {
-    comms_obstacle_t report = {0};
-    vc_avoid_t       avoid  = VC_AVOID_STOP;    /* No result: fail safe. */
+    comms_obstacle_t   report = {0};
+    obstacle_profile_t profile;
+    vc_avoid_t         avoid  = VC_AVOID_STOP;    /* No result: fail safe. */
 
-    if (obstacle_task_get_profile(&g_profile))
+    if (obstacle_task_get_profile(&profile))
     {
-        avoid = avoid_from_buddy5(g_profile.action);
+        avoid = avoid_from_buddy5(profile.action);
 
-        if (((VC_AVOID_TURN_LEFT == avoid) || (VC_AVOID_TURN_RIGHT == avoid))
-            && (!obstacle_plan_bypass(g_profile.distance_mm, g_profile.action,
-                                      &g_plan)))
+        if ((VC_AVOID_TURN_LEFT == avoid) || (VC_AVOID_TURN_RIGHT == avoid))
         {
-            /* Too close for any allowed turn: back off and scan again. */
-            avoid = VC_AVOID_REVERSE_RETRY;
+            obstacle_bypass_plan_t plan;
+
+            if (obstacle_plan_bypass(profile.distance_mm, profile.action,
+                                     &plan))
+            {
+                vc_pack_plan(&plan, &g_plan);
+            }
+            else
+            {
+                /* Too close for any allowed turn: back off and scan
+                 * again. */
+                avoid = VC_AVOID_REVERSE_RETRY;
+            }
+        }
+        else
+        {
+            /* No bypass to plan. */
         }
 
-        report.distance_mm    = (int32_t) g_profile.distance_mm;
-        report.angle_deg      = (int32_t) g_profile.angle_deg;
-        report.width_mm       = (int32_t) g_profile.width_mm;
-        report.clear_left_mm  = (int32_t) g_profile.clear_left_mm;
-        report.clear_right_mm = (int32_t) g_profile.clear_right_mm;
+        /* Stored packed: the profile is already a 64-bit word in Buddy 5's
+         * record, so unpacking it for this block and packing it back for
+         * the bypass loses nothing. */
+        g_profile_word = obstacle_calc_pack_profile(&profile);
+
+        report.distance_mm    = (int32_t) profile.distance_mm;
+        report.angle_deg      = (int32_t) profile.angle_deg;
+        report.width_mm       = (int32_t) profile.width_mm;
+        report.clear_left_mm  = (int32_t) profile.clear_left_mm;
+        report.clear_right_mm = (int32_t) profile.clear_right_mm;
         report.action         = (comms_avoid_t) avoid;      /* Same order. */
         (void) comms_event_obstacle(&report);
 
         tm_printf((UB *) "[vc] scan: closest %u mm, recommendation %d\n",
-                  (UINT) g_profile.distance_mm, (INT) avoid);
+                  (UINT) profile.distance_mm, (INT) avoid);
     }
 
     p_in->b_scan_done    = true;
@@ -1106,9 +1136,8 @@ static void
 queue_manoeuvre (motion_command_t const * p_cmd)
 {
     stop_motion();
-    g_pending       = *p_cmd;
+    g_b_pending     = motion_pack_command(p_cmd, &g_pending);
     g_pending_tries = 0U;
-    g_b_pending     = true;
 }
 
 
@@ -1252,12 +1281,20 @@ service_pending (void)
     }
     else if (g_b_pending)
     {
-        g_pending.sequence_id = next_seq();
-        result = motion_submit(&g_pending);
+        motion_command_t cmd;
+
+        if (!motion_unpack_command(&g_pending, &cmd))
+        {
+            g_b_pending          = false;
+            g_b_manoeuvre_failed = true;
+            return;
+        }
+        cmd.sequence_id = next_seq();
+        result = motion_submit(&cmd);
 
         if (MOTION_RESULT_OK == result)
         {
-            g_manoeuvre_seq = g_pending.sequence_id;
+            g_manoeuvre_seq = cmd.sequence_id;
             g_b_pending     = false;
         }
         else if (is_retryable(result)
@@ -1355,18 +1392,30 @@ queue_bypass_leg (uint32_t length_mm)
 }
 
 
-/* VC_MOTION_BYPASS: start the sequence with the first turn. */
+/* VC_MOTION_BYPASS: start the sequence with the first turn.  The stored
+ * plan is unpacked once here; a plan that cannot be decoded is reported as
+ * a motion failure, which the VC turns into EMERGENCY_STOP. */
 static void
 bypass_start (void)
 {
+    obstacle_bypass_plan_t plan;
+
+    if (!vc_unpack_plan(&g_plan, &plan))
+    {
+        g_bypass_step         = BYPASS_IDLE;
+        g_b_manoeuvre_failed  = true;
+        tm_printf((UB *) "[vc] bypass plan unreadable: stopped\n");
+        return;
+    }
+
     g_bypass_step = BYPASS_TURN_OUT;
     g_path_req    = OBST_REQ_IDLE;
-    queue_bypass_turn(g_plan.side, g_plan.turn_deg);
+    queue_bypass_turn(plan.side, plan.turn_deg);
     tm_printf((UB *) "[vc] bypass %s: turn %u deg, out %u mm, along %u mm\n",
-              (UB *) ((OBSTACLE_ACTION_TURN_LEFT == g_plan.side) ? "LEFT"
-                                                                 : "RIGHT"),
-              (UINT) g_plan.turn_deg, (UINT) g_plan.out_mm,
-              (UINT) g_plan.along_mm);
+              (UB *) ((OBSTACLE_ACTION_TURN_LEFT == plan.side) ? "LEFT"
+                                                              : "RIGHT"),
+              (UINT) plan.turn_deg, (UINT) plan.out_mm,
+              (UINT) plan.along_mm);
 }
 
 
@@ -1385,12 +1434,12 @@ is_line_back (vc_inputs_t const * p_in)
  * runs along it.  CROSSED: handing over there lost it (same day), so the
  * bypass attaches to it instead. */
 static obstacle_line_seen_t
-watch_line_along (void)
+watch_line_along (uint32_t along_mm)
 {
     obstacle_line_seen_t seen = OBSTACLE_LINE_NONE;
 
     if ((0U != g_manoeuvre_seq) && (BYPASS_LEG_ALONG == g_bypass_step)
-        && (g_manoeuvre_mm >= (int32_t) (g_plan.along_mm / 2U)))
+        && (g_manoeuvre_mm >= (int32_t) (along_mm / 2U)))
     {
         seen = obstacle_plan_line_watch(&g_line_watch, g_b_line_black,
                                         g_manoeuvre_mm);
@@ -1425,17 +1474,24 @@ bypass_finish (vc_inputs_t * p_in)
  * a refused path, or something close on a leg, is reported as a motion
  * failure, which the VC turns into EMERGENCY_STOP. */
 static void
-bypass_run (vc_inputs_t * p_in)
+bypass_run (vc_inputs_t * p_in, vc_state_t state)
 {
-    T_RFLG               rflg;
-    obstacle_path_t      path;
-    obstacle_line_seen_t along;
-    UINT                 flags = 0U;
-    bool                 b_fail = false;
+    T_RFLG                 rflg;
+    obstacle_bypass_plan_t plan;
+    obstacle_path_t        path;
+    obstacle_line_seen_t   along;
+    UINT                   flags = 0U;
+    bool                   b_fail = false;
 
-    if (VC_STATE_BYPASS != g_vc.state)
+    if (VC_STATE_BYPASS != state)
     {
         g_bypass_step = BYPASS_IDLE;            /* Left BYPASS: stand down. */
+    }
+    else if (!vc_unpack_plan(&g_plan, &plan))
+    {
+        /* Unreadable stored plan: stop through the usual fault path. */
+        tm_printf((UB *) "[vc] bypass plan unreadable: stopped\n");
+        b_fail = true;
     }
     else if (BYPASS_IDLE != g_bypass_step)
     {
@@ -1444,7 +1500,7 @@ bypass_run (vc_inputs_t * p_in)
             flags = rflg.flgptn;
         }
 
-        along = watch_line_along();
+        along = watch_line_along(plan.along_mm);
 
         if (((BYPASS_LEG_OUT == g_bypass_step)
              || (BYPASS_LEG_ALONG == g_bypass_step)
@@ -1464,7 +1520,7 @@ bypass_run (vc_inputs_t * p_in)
         }
         else if (OBSTACLE_LINE_CROSSED == along)
         {
-            queue_bypass_turn(g_plan.side, VC_BYPASS_ATTACH_DEG);
+            queue_bypass_turn(plan.side, VC_BYPASS_ATTACH_DEG);
             g_bypass_step = BYPASS_ATTACH;
             tm_printf((UB *) "[vc] bypass: line crossed at %d mm: "
                       "pivoting onto it\n", (INT) g_manoeuvre_mm);
@@ -1491,11 +1547,22 @@ bypass_run (vc_inputs_t * p_in)
                 case BYPASS_TURN_OUT:
                     if (p_in->b_motion_done)
                     {
-                        obstacle_task_request_path_check(g_plan.side,
-                                                         g_plan.check_mm,
-                                                         g_profile.distance_mm);
-                        g_path_req    = OBST_REQ_SENT;
-                        g_bypass_step = BYPASS_CHECK;
+                        obstacle_profile_t profile;
+
+                        if (obstacle_calc_unpack_profile(g_profile_word,
+                                                         &profile))
+                        {
+                            obstacle_task_request_path_check(
+                                plan.side, plan.check_mm,
+                                profile.distance_mm);
+                            g_path_req    = OBST_REQ_SENT;
+                            g_bypass_step = BYPASS_CHECK;
+                        }
+                        else
+                        {
+                            /* Unreadable profile: safe stop. */
+                            b_fail = true;
+                        }
                     }
                     break;
 
@@ -1509,7 +1576,7 @@ bypass_run (vc_inputs_t * p_in)
                             && ((OBSTACLE_PATH_CLEAR == path.verdict)
                                 || (OBSTACLE_PATH_OPEN == path.verdict)))
                         {
-                            queue_bypass_leg(g_plan.out_mm);
+                            queue_bypass_leg(plan.out_mm);
                             g_bypass_step = BYPASS_LEG_OUT;
                         }
                         else
@@ -1523,8 +1590,8 @@ bypass_run (vc_inputs_t * p_in)
                 case BYPASS_LEG_OUT:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_turn(other_side(g_plan.side),
-                                          g_plan.turn_deg);
+                        queue_bypass_turn(other_side(plan.side),
+                                          plan.turn_deg);
                         g_bypass_step = BYPASS_TURN_ALONG;
                     }
                     break;
@@ -1532,7 +1599,7 @@ bypass_run (vc_inputs_t * p_in)
                 case BYPASS_TURN_ALONG:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_leg(g_plan.along_mm);
+                        queue_bypass_leg(plan.along_mm);
                         obstacle_plan_line_reset(&g_line_watch);
                         g_bypass_step = BYPASS_LEG_ALONG;
                     }
@@ -1551,8 +1618,8 @@ bypass_run (vc_inputs_t * p_in)
                     }
                     else if (p_in->b_motion_done)
                     {
-                        queue_bypass_turn(other_side(g_plan.side),
-                                          g_plan.back_deg);
+                        queue_bypass_turn(other_side(plan.side),
+                                          plan.back_deg);
                         g_bypass_step = BYPASS_TURN_BACK;
                     }
                     else
@@ -1564,7 +1631,7 @@ bypass_run (vc_inputs_t * p_in)
                 case BYPASS_TURN_BACK:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_leg((g_plan.back_mm
+                        queue_bypass_leg((plan.back_mm
                                           * VC_BYPASS_RETURN_MAX_PCT) / 100U);
                         g_bypass_step = BYPASS_LEG_BACK;
                     }
@@ -1576,7 +1643,7 @@ bypass_run (vc_inputs_t * p_in)
                         /* No line seen: by the turns the car is near it;
                          * turn straight and let line following search. */
                         tm_printf((UB *) "[vc] bypass: no line seen\n");
-                        queue_bypass_turn(g_plan.side, g_plan.back_deg);
+                        queue_bypass_turn(plan.side, plan.back_deg);
                         g_bypass_step = BYPASS_TURN_STRAIGHT;
                     }
                     break;
@@ -1584,7 +1651,7 @@ bypass_run (vc_inputs_t * p_in)
                 case BYPASS_SNAP:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_turn(g_plan.side, g_plan.back_deg);
+                        queue_bypass_turn(plan.side, plan.back_deg);
                         g_bypass_step = BYPASS_TURN_STRAIGHT;
                     }
                     break;
@@ -1613,17 +1680,17 @@ bypass_run (vc_inputs_t * p_in)
                     break;
             }
         }
-
-        if (b_fail)
-        {
-            stop_motion();
-            g_bypass_step         = BYPASS_IDLE;
-            p_in->b_motion_failed = true;       /* VC -> EMERGENCY_STOP. */
-        }
     }
     else
     {
         /* In BYPASS but not started (or already ended): nothing to do. */
+    }
+
+    if (b_fail)
+    {
+        stop_motion();
+        g_bypass_step         = BYPASS_IDLE;
+        p_in->b_motion_failed = true;           /* VC -> EMERGENCY_STOP. */
     }
 }
 
@@ -1639,9 +1706,10 @@ bypass_start (void)
 
 
 static void
-bypass_run (vc_inputs_t * p_in)
+bypass_run (vc_inputs_t * p_in, vc_state_t state)
 {
     (void) p_in;
+    (void) state;
 }
 
 #endif /* VC_HAVE_BUDDY5 */
@@ -1688,7 +1756,7 @@ act_on_motion (vc_outputs_t const * p_out)
 /* Calibration requests to Buddy 3 and Buddy 4, and the console log.  The
  * sensor tables are printed by Buddy 3 and Buddy 4 themselves. */
 static void
-act_on_calibration (vc_outputs_t const * p_out)
+act_on_calibration (vc_t const * p_vc, vc_outputs_t const * p_out)
 {
     static char const * const names[] = {"none", "line sensor contrast",
                                          "line not found", "Buddy 4",
@@ -1728,7 +1796,7 @@ act_on_calibration (vc_outputs_t const * p_out)
             b4_task_request_calibration(B4_TASK_CAL_END);
 #endif
             tm_printf((UB *) "[cal] vc swept %d mdeg, centre back on"
-                             " the line\n", (INT) g_vc.cal_out_mdeg);
+                             " the line\n", (INT) p_vc->cal_out_mdeg);
             break;
 
         case VC_CAL_REQ_ABORT:
@@ -1919,7 +1987,7 @@ report_state (vc_state_t from, vc_outputs_t const * p_out, uint32_t now)
 /* Every VC_TRACE_STEPS during a run: requested against measured speed, so
  * a slowdown on the ramp is shown as physical, not just commanded. */
 static void
-report_trace (vc_inputs_t const * p_in)
+report_trace (vc_inputs_t const * p_in, vc_state_t state)
 {
     static uint32_t s_steps = 0U;
 
@@ -1930,7 +1998,7 @@ report_trace (vc_inputs_t const * p_in)
         s_steps = 0U;
         tm_printf((UB *) "[trace] t=%u st=%s req=%d L=%d R=%d steer=%d"
                          " slow=%d ready=%d overruns=%u\n",
-                  (UINT) p_in->now_ms, (UB *) vc_state_name(g_vc.state),
+                  (UINT) p_in->now_ms, (UB *) vc_state_name(state),
                   g_b_driving ? (INT) g_drive_speed : 0,
                   (INT) g_left_mm_s, (INT) g_right_mm_s,
                   (INT) g_drive_steer, (INT) p_in->b_hump,
@@ -2017,61 +2085,86 @@ vc_task_entry (INT stacd, void * p_exinf)
 {
     vc_inputs_t  in;
     vc_outputs_t out;
+    vc_t         vc;                /* Working copy; g_vc is the record.  */
     vc_state_t   before;
     uint16_t     terrain_fault;
     uint32_t     now;
     uint32_t     next;
     int32_t      wait;
+    bool         b_state_ok;
 
     (void) stacd;
     (void) p_exinf;
 
     next = now_ms();
-    vc_init(&g_vc, next);
+    vc_init(&vc, next);
+    vc_pack_state(&vc, &g_vc);
     comms_set_state(COMMS_STATE_INIT);
 
     for (;;)
     {
         now = now_ms();
 
+        /* Unpack the stored state into the stack working copy.  A record
+         * the packer cannot have written is never run as a state: the
+         * working copy restarts at INITIALISE and the step sees a fault,
+         * which the VC's safety rule turns into EMERGENCY_STOP. */
+        b_state_ok = vc_unpack_state(&g_vc, &vc);
+
+        if (!b_state_ok)
+        {
+            vc_init(&vc, now);
+            tm_printf((UB *) "[vc] stored state unreadable: stopping\n");
+        }
+
         /* Inputs: start from "nothing happened", then fill in. */
         in = (vc_inputs_t) {0};
         in.now_ms        = now;
         in.b_init_ok     = g_b_init_ok;
         in.b_init_failed = !g_b_init_ok;
+
+        if (!b_state_ok)
+        {
+            /* No VC fault bit of its own exists (bit 4 of the shared mask
+             * is reserved for Buddy 1), so an unreadable stored state is
+             * reported as the general controller fault and the car stops. */
+            in.serious_faults |= (uint16_t) VC_FAULT_MOTION_CMD;
+        }
+
         read_command(&in);
         read_motion(&in);
         read_line(&in, now);
-        read_obstacle(&in, g_vc.state);
-        bypass_run(&in);
+        read_obstacle(&in, vc.state);
+        bypass_run(&in, vc.state);
         terrain_fault = read_terrain(&in, now);
 
-        if (((VC_STATE_READY == g_vc.state)
-             || (VC_STATE_FINISHED == g_vc.state))
+        if (((VC_STATE_READY == vc.state)
+             || (VC_STATE_FINISHED == vc.state))
             && (VC_CMD_START == in.cmd) && (!in.b_terrain_ready))
         {
             tm_printf((UB *) "[vc] START refused: Buddy 4 not ready\n");
         }
 
-        before = g_vc.state;
-        vc_step(&g_vc, &in, &out);
+        before = vc.state;
+        vc_step(&vc, &in, &out);
+        vc_pack_state(&vc, &g_vc);     /* Stored state follows the step.   */
         publish_drive(out.state, in.b_stationary);
 
         act_on_motion(&out);
         act_on_obstacle(&out);
-        act_on_calibration(&out);
+        act_on_calibration(&vc, &out);
 
         /* One calibration event per START, on success and on failure. */
         if (VC_CAL_FAIL_NONE != out.cal_fail)
         {
             publish_calibration(cal_result_of(out.cal_fail),
-                                g_vc.cal_far_mdeg, 0 < g_vc.cal_first_dir);
+                                vc.cal_far_mdeg, 0 < vc.cal_first_dir);
         }
         else if ((VC_STATE_CALIBRATE == before)
                  && (VC_STATE_FOLLOW_LINE == out.state))
         {
-            publish_calibration(COMMS_CAL_OK, g_vc.cal_out_mdeg,
-                                0 < g_vc.cal_first_dir);
+            publish_calibration(COMMS_CAL_OK, vc.cal_out_mdeg,
+                                0 < vc.cal_first_dir);
         }
         else
         {
@@ -2091,8 +2184,8 @@ vc_task_entry (INT stacd, void * p_exinf)
             g_faults_seen = 0U;                 /* New run: clean slate. */
         }
 
-        if ((VC_STATE_INITIALISE == g_vc.state) ||
-            (VC_STATE_READY == g_vc.state))
+        if ((VC_STATE_INITIALISE == vc.state) ||
+            (VC_STATE_READY == vc.state))
         {
             /* Idle: the IMU bit shows whether START would be accepted
              * now, so a not-ready spell at boot does not linger. Other
@@ -2102,7 +2195,7 @@ vc_task_entry (INT stacd, void * p_exinf)
                                         | in.serious_faults
                                         | terrain_fault);
         }
-        else if (VC_STATE_CALIBRATE == g_vc.state)
+        else if (VC_STATE_CALIBRATE == vc.state)
         {
             /* START makes Buddy 4 re-level, which briefly makes it not
              * ready on purpose, so the IMU bit is left out here.  A real
@@ -2136,13 +2229,13 @@ vc_task_entry (INT stacd, void * p_exinf)
         {
             tm_printf((UB *) "[vc] LIFTED: run finished\n");
 #if VC_RECORDER
-            ev_rec_lift(now, (uint16_t) g_vc.lift_spell_cycles);
+            ev_rec_lift(now, (uint16_t) vc.lift_spell_cycles);
 #endif
             (void) comms_event_motion(COMMS_MOTION_LIFTED);
         }
 
         report_state(before, &out, now);
-        report_trace(&in);
+        report_trace(&in, vc.state);
 #if VC_RECORDER
         record_cycle(&in, &out);
 #endif

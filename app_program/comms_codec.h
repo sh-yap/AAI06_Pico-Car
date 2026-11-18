@@ -24,10 +24,13 @@
  * Values outside a field's range are clamped to the nearest end in BOTH
  * formats, so a decoded binary message equals its JSON twin.
  *
+ * The packed records at the end of this header are the same fields held in
+ * fixed 32-bit words, for data that is queued or shared between tasks.
+ *
  * Pure logic: no RTOS, no hardware, host-testable (tests/comms).
  *
- * BARR-C 4.2: no #include here.  Include <stdint.h>, <stdbool.h> and
- * "comms_link.h" before this header.
+ * BARR-C 4.2: no #include here.  Include <stdint.h>, <stdbool.h>,
+ * "comms_link.h" and "comms.h" before this header.
  */
 
 #ifndef COMMS_CODEC_H
@@ -87,6 +90,105 @@ void codec_end(codec_writer_t * p_w);
 /* A plain-text message in either format (robot/info). */
 void codec_text(comms_link_msg_t * p_msg, char const * p_topic, uint8_t qos,
                 bool b_retain, char const * p_text);
+
+/* ------------------------------------------------------------------------ *
+ * Packed records: minimum-bit storage for queued and shared data
+ *
+ * A packed record is a fixed number of 32-bit words.  Bit 0 is the LSB, a
+ * field never crosses a word boundary, and the layout is written with
+ * explicit masks and shifts, never with C bit-fields (BARR-C 5.5.b).  A
+ * stored field is normally the message width, so packing clamps to the
+ * field ends like the encoder.  Fields the consumer reads back and
+ * subtracts (encoder counts, travelled distance) keep a full 32-bit word
+ * and are narrowed only on the wire, at send time.  Signed fields are two's
+ * complement in their own width and are sign-extended on unpack; negative
+ * "invalid" values are stored as 0, as the encoder sends them
+ * (docs/DATA_REPRESENTATION.md sections 7, 8 and 11).
+ *
+ * Each record has one writer task; the words are copied whole (a single
+ * aligned store each), under the caller's seqlock or message buffer.
+ * ------------------------------------------------------------------------ */
+
+/* Field widths in bits, shared by the messages and the packed records so
+ * the two can never drift apart. */
+#define CODEC_BITS_SPEED              (10U)   /* signed                */
+#define CODEC_BITS_DRIVE              (11U)   /* signed, permille      */
+#define CODEC_BITS_ENCODER            (19U)   /* signed, counts        */
+#define CODEC_BITS_DISTANCE           (16U)   /* signed, mm            */
+#define CODEC_BITS_LINE_POS           (3U)
+#define CODEC_BITS_LINE_ERROR         (8U)    /* signed                */
+#define CODEC_BITS_SENSORS            (2U)
+#define CODEC_BITS_ADC                (12U)   /* RP2040 ADC reading    */
+#define CODEC_BITS_MOTION_CLASS       (3U)
+#define CODEC_BITS_TILT               (11U)   /* signed, milli-g       */
+#define CODEC_BITS_HUMP               (10U)   /* 0.1 mm                */
+#define CODEC_BITS_TURN               (11U)   /* signed, deg/s         */
+#define CODEC_BITS_BARCODE            (3U)
+#define CODEC_BITS_NAV                (3U)
+#define CODEC_BITS_OBST_DIST          (12U)   /* mm                    */
+#define CODEC_BITS_ANGLE              (8U)    /* deg                   */
+#define CODEC_BITS_WIDTH              (10U)   /* mm                    */
+#define CODEC_BITS_CLEARANCE          (12U)   /* mm                    */
+#define CODEC_BITS_ACTION             (3U)
+#define CODEC_BITS_CAL_RESULT         (3U)
+#define CODEC_BITS_CAL_OVERLAP        (9U)    /* signed, -256 = none   */
+#define CODEC_BITS_CAL_LEARNED        (1U)
+#define CODEC_BITS_CAL_FIRST_RIGHT    (1U)
+#define CODEC_BITS_CAL_FLOOR          (9U)    /* milli-g               */
+#define CODEC_BITS_CAL_SAMPLES        (15U)
+#define CODEC_BITS_CAL_ANGLE          (8U)    /* whole degrees         */
+#define CODEC_BITS_EVENT_TYPE         (3U)    /* queued element only   */
+
+/* Record sizes in words (old storage in the comment). */
+#define CODEC_MOTION_WORDS            (6U)    /* 24 B, was 44 B        */
+#define CODEC_LINE_WORDS              (2U)    /*  8 B, was 16 B        */
+#define CODEC_TERRAIN_WORDS           (2U)    /*  8 B, was 16 B        */
+#define CODEC_EVENT_WORDS             (7U)    /* 28 B, was 76 B        */
+
+/* Event codes: the queued element's type field (7 types, 3 bits). */
+typedef enum
+{
+    CODEC_EVENT_BARCODE = 0,
+    CODEC_EVENT_HUMP,
+    CODEC_EVENT_OBSTACLE,
+    CODEC_EVENT_MOTION,
+    CODEC_EVENT_RUN_BEGIN,
+    CODEC_EVENT_RUN_END,
+    CODEC_EVENT_CALIBRATION,
+    CODEC_EVENT_COUNT
+} codec_event_type_t;
+
+/* One queued event, unpacked (the queue element itself is 7 words). */
+typedef struct
+{
+    uint32_t            time_ms;
+    uint8_t             type;      /* codec_event_type_t               */
+    uint8_t             code;      /* barcode character                */
+    uint8_t             kind;      /* nav command / motion class       */
+    int32_t             value;     /* hump peak height, 0.1 mm         */
+    comms_obstacle_t    obstacle;
+    comms_calibration_t calibration;
+} codec_event_t;
+
+/* Motion telemetry record: 6 words, robot/telemetry/motion fields. */
+void codec_pack_motion(uint32_t * p_words, comms_motion_t const * p_motion);
+void codec_unpack_motion(uint32_t const * p_words, comms_motion_t * p_motion);
+
+/* Line telemetry record: 2 words, robot/telemetry/line fields. */
+void codec_pack_line(uint32_t * p_words, comms_line_t const * p_line);
+void codec_unpack_line(uint32_t const * p_words, comms_line_t * p_line);
+
+/* Terrain telemetry record: 2 words, robot/telemetry/terrain fields. */
+void codec_pack_terrain(uint32_t * p_words,
+                        comms_terrain_t const * p_terrain);
+void codec_unpack_terrain(uint32_t const * p_words,
+                          comms_terrain_t * p_terrain);
+
+/* Queued event element: 7 words.  Unpack returns false for an unknown event
+ * type: the caller drops the element (the out-of-range rule: reject, never
+ * guess). */
+void codec_pack_event(uint32_t * p_words, codec_event_t const * p_event);
+bool codec_unpack_event(uint32_t const * p_words, codec_event_t * p_event);
 
 #endif /* COMMS_CODEC_H */
 

@@ -106,7 +106,7 @@ static line_cal_result_t cal_result;
  * Gap check history: the last LINE_CAL_HISTORY pairs of centre and right
  * readings of the sweep, kept in a ring because the thresholds that say
  * which readings are black are only known when both sensors are done.
- * 256 samples of 4 bytes is 1 KB, at the 10 ms Buddy 3 cycle 2.56 s. The
+ * 256 samples of 3 bytes is 768 B, at the 10 ms Buddy 3 cycle 2.56 s. The
  * sweep is at most 45 degrees out and 90 degrees across at about 77
  * degrees per second (under 2 s), so the pass that finds the line fits.
  * Older readings (the still phase) hold no black stretch worth keeping.
@@ -115,15 +115,31 @@ static line_cal_result_t cal_result;
 #define LINE_CAL_HISTORY_MASK      (LINE_CAL_HISTORY - 1U)
 #define LINE_CAL_OVERLAP_LIMIT     255
 
+/* Value type for one history sample; the ring itself is packed. */
 typedef struct
 {
     uint16_t centre;
     uint16_t right;
 } cal_sample_t;
 
-static cal_sample_t cal_history[LINE_CAL_HISTORY];
+static uint8_t cal_history[LINE_CAL_HISTORY * LINE_CAL_SAMPLE_BYTES];
 static uint32_t cal_history_count;      /* Samples recorded since sweep.   */
 static bool cal_sweeping;               /* The pivot has started.          */
+
+
+/* Read one history sample from its packed 24-bit form. */
+static void cal_history_get(uint32_t slot, cal_sample_t *p_sample)
+{
+    line_cal_sample_unpack(cal_history, slot, &p_sample->centre,
+                            &p_sample->right);
+}
+
+
+/* Store one history sample; the ADC values are 12-bit by hardware. */
+static void cal_history_put(uint32_t slot, uint16_t centre, uint16_t right)
+{
+    line_cal_sample_pack(cal_history, slot, centre, right);
+}
 
 
 /*
@@ -521,6 +537,7 @@ static void cal_use_raw_range(cal_track_t *p_track, bool centre)
     uint32_t count = cal_history_count;
     uint32_t used = (count < LINE_CAL_HISTORY) ? count : LINE_CAL_HISTORY;
     uint32_t k;
+    cal_sample_t sample;
     uint16_t value;
     uint16_t low1 = UINT16_MAX;
     uint16_t low2 = UINT16_MAX;
@@ -529,7 +546,8 @@ static void cal_use_raw_range(cal_track_t *p_track, bool centre)
 
     for (k = 0U; k < used; k++)
     {
-        value = centre ? cal_history[k].centre : cal_history[k].right;
+        cal_history_get(k, &sample);
+        value = centre ? sample.centre : sample.right;
 
         if (value < low1)
         {
@@ -729,7 +747,7 @@ static bool cal_gap_blind(uint32_t begin, uint32_t end, uint32_t oldest)
 
     for (k = begin; k < end; k++)
     {
-        sample = cal_history[(oldest + k) & LINE_CAL_HISTORY_MASK];
+        cal_history_get((oldest + k) & LINE_CAL_HISTORY_MASK, &sample);
 
         if (!right_sees_line(sample.right))
         {
@@ -787,7 +805,7 @@ static bool cal_measure_overlap(uint16_t c_thr, uint16_t r_thr,
 
     for (k = 0U; k < used; k++)
     {
-        sample = cal_history[(oldest + k) & LINE_CAL_HISTORY_MASK];
+        cal_history_get((oldest + k) & LINE_CAL_HISTORY_MASK, &sample);
 
         if (sample.centre > c_thr)
         {
@@ -840,10 +858,8 @@ void line_cal_update(ir_readings_t readings)
         return;
     }
 
-    cal_history[cal_history_count & LINE_CAL_HISTORY_MASK].centre =
-        readings.centre;
-    cal_history[cal_history_count & LINE_CAL_HISTORY_MASK].right =
-        readings.right;
+    cal_history_put(cal_history_count & LINE_CAL_HISTORY_MASK, readings.centre,
+                    readings.right);
     cal_history_count++;
 
     cal_track_update(&cal_centre, readings.centre);

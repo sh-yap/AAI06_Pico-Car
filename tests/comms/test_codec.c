@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include "comms.h"
 #include "comms_link.h"
 #include "comms_codec.h"
 
@@ -399,6 +400,515 @@ test_golden (void)
 
 #endif /* COMMS_JSON */
 
+/* ------------------------------------------------------------------------ *
+ * Packed records (comms_codec.c): the words are the same in both builds, so
+ * this runs for the binary and the JSON one.  Every field is checked at
+ * zero, at its maximum, at its minimum where it is signed, and with an
+ * out-of-range value that must clamp to the wire range.
+ * ------------------------------------------------------------------------ */
+
+static void
+test_pack_motion (void)
+{
+    comms_motion_t in;
+    comms_motion_t out;
+    uint32_t       words[CODEC_MOTION_WORDS];
+    int32_t        run_start_mm;
+
+    printf("packed motion record, %u words\n",
+           (unsigned) CODEC_MOTION_WORDS);
+    CHECK(24U == (CODEC_MOTION_WORDS * sizeof(uint32_t)));
+
+    /* Zero. */
+    memset(&in, 0, sizeof(in));
+    codec_pack_motion(words, &in);
+    memset(&out, 0xFF, sizeof(out));
+    codec_unpack_motion(words, &out);
+    CHECK(0 == out.speed_left_mm_s);
+    CHECK(0 == out.speed_right_mm_s);
+    CHECK(0 == out.encoder_left);
+    CHECK(0 == out.encoder_right);
+    CHECK(0 == out.distance_mm);
+    CHECK(0 == out.target_left_mm_s);
+    CHECK(0 == out.target_right_mm_s);
+    CHECK(0 == out.slewed_left_mm_s);
+    CHECK(0 == out.slewed_right_mm_s);
+    CHECK(0 == out.drive_left_permille);
+    CHECK(0 == out.drive_right_permille);
+
+    /* Maximum of every field (10, 19, 16 and 11 bits). */
+    memset(&in, 0, sizeof(in));
+    in.speed_left_mm_s      = 511;
+    in.speed_right_mm_s     = 511;
+    in.encoder_left         = 262143;
+    in.encoder_right        = 262143;
+    in.distance_mm          = 32767;
+    in.target_left_mm_s     = 511;
+    in.target_right_mm_s    = 511;
+    in.slewed_left_mm_s     = 511;
+    in.slewed_right_mm_s    = 511;
+    in.drive_left_permille  = 1023;
+    in.drive_right_permille = 1023;
+    codec_pack_motion(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_motion(words, &out);
+    CHECK(511 == out.speed_left_mm_s);
+    CHECK(511 == out.speed_right_mm_s);
+    CHECK(262143 == out.encoder_left);
+    CHECK(262143 == out.encoder_right);
+    CHECK(32767 == out.distance_mm);
+    CHECK(511 == out.target_left_mm_s);
+    CHECK(511 == out.target_right_mm_s);
+    CHECK(511 == out.slewed_left_mm_s);
+    CHECK(511 == out.slewed_right_mm_s);
+    CHECK(1023 == out.drive_left_permille);
+    CHECK(1023 == out.drive_right_permille);
+
+    /* Minimum of every field: the sign extends out of the field. */
+    memset(&in, 0, sizeof(in));
+    in.speed_left_mm_s      = -512;
+    in.speed_right_mm_s     = -512;
+    in.encoder_left         = -262144;
+    in.encoder_right        = -262144;
+    in.distance_mm          = -32768;
+    in.target_left_mm_s     = -512;
+    in.target_right_mm_s    = -512;
+    in.slewed_left_mm_s     = -512;
+    in.slewed_right_mm_s    = -512;
+    in.drive_left_permille  = -1024;
+    in.drive_right_permille = -1024;
+    codec_pack_motion(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_motion(words, &out);
+    CHECK(-512 == out.speed_left_mm_s);
+    CHECK(-512 == out.speed_right_mm_s);
+    CHECK(-262144 == out.encoder_left);
+    CHECK(-262144 == out.encoder_right);
+    CHECK(-32768 == out.distance_mm);
+    CHECK(-512 == out.target_left_mm_s);
+    CHECK(-512 == out.target_right_mm_s);
+    CHECK(-512 == out.slewed_left_mm_s);
+    CHECK(-512 == out.slewed_right_mm_s);
+    CHECK(-1024 == out.drive_left_permille);
+    CHECK(-1024 == out.drive_right_permille);
+
+    /* Encoder counts and travelled distance are stored full width because
+     * the consumer reads them back and subtracts (run summary, wheel
+     * difference); only the wire field clamps. */
+    memset(&in, 0, sizeof(in));
+    in.speed_left_mm_s      = 5000;
+    in.speed_right_mm_s     = -5000;
+    in.encoder_left         = 999999999;
+    in.encoder_right        = -999999999;
+    in.distance_mm          = 40000;
+    in.target_left_mm_s     = 5000;
+    in.target_right_mm_s    = -5000;
+    in.slewed_left_mm_s     = 5000;
+    in.slewed_right_mm_s    = -5000;
+    in.drive_left_permille  = 5000;
+    in.drive_right_permille = -5000;
+    codec_pack_motion(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_motion(words, &out);
+    CHECK(511 == out.speed_left_mm_s);
+    CHECK(-512 == out.speed_right_mm_s);
+    CHECK(999999999 == out.encoder_left);
+    CHECK(-999999999 == out.encoder_right);
+    CHECK(40000 == out.distance_mm);
+    CHECK(511 == out.target_left_mm_s);
+    CHECK(-512 == out.target_right_mm_s);
+    CHECK(511 == out.slewed_left_mm_s);
+    CHECK(-512 == out.slewed_right_mm_s);
+    CHECK(1023 == out.drive_left_permille);
+    CHECK(-1024 == out.drive_right_permille);
+
+    /* A run that starts at 32000 mm and ends at 33000 mm must report
+     * 1000 mm, not a clamped 767. */
+    memset(&in, 0, sizeof(in));
+    in.distance_mm = 32000;
+    codec_pack_motion(words, &in);
+    codec_unpack_motion(words, &out);
+    run_start_mm = out.distance_mm;
+    CHECK(32000 == run_start_mm);
+    memset(&in, 0, sizeof(in));
+    in.distance_mm = 33000;
+    codec_pack_motion(words, &in);
+    codec_unpack_motion(words, &out);
+    CHECK(33000 == out.distance_mm);
+    CHECK(1000 == (out.distance_mm - run_start_mm));
+
+    /* Counts either side of the old 24-bit field and the int32 extremes. */
+    memset(&in, 0, sizeof(in));
+    in.encoder_left  = 8388608 + 100;
+    in.encoder_right = -(8388608 + 100);
+    codec_pack_motion(words, &in);
+    codec_unpack_motion(words, &out);
+    CHECK((8388608 + 100) == out.encoder_left);
+    CHECK(-(8388608 + 100) == out.encoder_right);
+    in.encoder_left  = INT32_MAX;
+    in.encoder_right = INT32_MIN;
+    codec_pack_motion(words, &in);
+    codec_unpack_motion(words, &out);
+    CHECK(INT32_MAX == out.encoder_left);
+    CHECK(INT32_MIN == out.encoder_right);
+    in.distance_mm = INT32_MAX;
+    codec_pack_motion(words, &in);
+    codec_unpack_motion(words, &out);
+    CHECK(INT32_MAX == out.distance_mm);
+    in.distance_mm = INT32_MIN;
+    codec_pack_motion(words, &in);
+    codec_unpack_motion(words, &out);
+    CHECK(INT32_MIN == out.distance_mm);
+}
+
+
+static void
+test_pack_line (void)
+{
+    comms_line_t in;
+    comms_line_t out;
+    uint32_t     words[CODEC_LINE_WORDS];
+
+    printf("packed line record, %u words\n", (unsigned) CODEC_LINE_WORDS);
+    CHECK(8U == (CODEC_LINE_WORDS * sizeof(uint32_t)));
+
+    /* Zero. */
+    memset(&in, 0, sizeof(in));
+    codec_pack_line(words, &in);
+    memset(&out, 0xFF, sizeof(out));
+    codec_unpack_line(words, &out);
+    CHECK(COMMS_LINE_LEFT == out.position);
+    CHECK(0 == out.error);
+    CHECK(0 == out.sensors);
+    CHECK(0 == out.centre_adc);
+    CHECK(0 == out.right_adc);
+
+    /* Maximum (3, 8 signed, 2 and 12 bits). */
+    memset(&in, 0, sizeof(in));
+    in.position   = (comms_line_pos_t) 7;
+    in.error      = 127;
+    in.sensors    = 3U;
+    in.centre_adc = 4095U;
+    in.right_adc  = 4095U;
+    codec_pack_line(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_line(words, &out);
+    CHECK(7 == out.position);
+    CHECK(127 == out.error);
+    CHECK(3 == out.sensors);
+    CHECK(4095 == out.centre_adc);
+    CHECK(4095 == out.right_adc);
+
+    /* Minimum: the signed error reaches -128 in its 8-bit field. */
+    memset(&in, 0, sizeof(in));
+    in.error = -128;
+    codec_pack_line(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_line(words, &out);
+    CHECK(-128 == out.error);
+
+    /* Out of range: clamped. */
+    memset(&in, 0, sizeof(in));
+    in.position   = (comms_line_pos_t) 9;
+    in.error      = 200;
+    in.sensors    = 5U;
+    in.centre_adc = 5000U;
+    in.right_adc  = 5000U;
+    codec_pack_line(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_line(words, &out);
+    CHECK(7 == out.position);
+    CHECK(127 == out.error);
+    CHECK(3 == out.sensors);
+    CHECK(4095 == out.centre_adc);
+    CHECK(4095 == out.right_adc);
+
+    in.error = -200;
+    codec_pack_line(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_line(words, &out);
+    CHECK(-128 == out.error);
+}
+
+
+static void
+test_pack_terrain (void)
+{
+    comms_terrain_t in;
+    comms_terrain_t out;
+    uint32_t        words[CODEC_TERRAIN_WORDS];
+
+    printf("packed terrain record, %u words\n",
+           (unsigned) CODEC_TERRAIN_WORDS);
+    CHECK(8U == (CODEC_TERRAIN_WORDS * sizeof(uint32_t)));
+
+    /* Zero. */
+    memset(&in, 0, sizeof(in));
+    codec_pack_terrain(words, &in);
+    memset(&out, 0xFF, sizeof(out));
+    codec_unpack_terrain(words, &out);
+    CHECK(COMMS_MOTION_QUIET == out.motion);
+    CHECK(0 == out.tilt_mg);
+    CHECK(0 == out.hump_dmm);
+    CHECK(0 == out.turn_dps);
+
+    /* Maximum (3, 11 signed, 10 and 11 signed bits). */
+    memset(&in, 0, sizeof(in));
+    in.motion   = (comms_motion_class_t) 7;
+    in.tilt_mg  = 1023;
+    in.hump_dmm = 1023;
+    in.turn_dps = 1023;
+    codec_pack_terrain(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_terrain(words, &out);
+    CHECK(7 == out.motion);
+    CHECK(1023 == out.tilt_mg);
+    CHECK(1023 == out.hump_dmm);
+    CHECK(1023 == out.turn_dps);
+
+    /* Minimum. */
+    memset(&in, 0, sizeof(in));
+    in.tilt_mg  = -1024;
+    in.turn_dps = -1024;
+    codec_pack_terrain(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_terrain(words, &out);
+    CHECK(-1024 == out.tilt_mg);
+    CHECK(-1024 == out.turn_dps);
+
+    /* Out of range: clamped (the hump height is unsigned on the wire). */
+    memset(&in, 0, sizeof(in));
+    in.motion   = (comms_motion_class_t) 9;
+    in.tilt_mg  = 5000;
+    in.hump_dmm = -5;
+    in.turn_dps = -5000;
+    codec_pack_terrain(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_terrain(words, &out);
+    CHECK(7 == out.motion);
+    CHECK(1023 == out.tilt_mg);
+    CHECK(0 == out.hump_dmm);
+    CHECK(-1024 == out.turn_dps);
+}
+
+
+/* Pack, unpack and return whether the type was known. */
+static bool
+event_round_trip (codec_event_t * p_in, codec_event_t * p_out)
+{
+    uint32_t words[CODEC_EVENT_WORDS];
+    bool     b_ok;
+
+    codec_pack_event(words, p_in);
+    memset(p_out, 0, sizeof(*p_out));
+    b_ok = codec_unpack_event(words, p_out);
+
+    return b_ok;
+}
+
+
+static void
+test_pack_event (void)
+{
+    codec_event_t in;
+    codec_event_t out;
+
+    printf("packed event element, %u words\n",
+           (unsigned) CODEC_EVENT_WORDS);
+    CHECK(28U == (CODEC_EVENT_WORDS * sizeof(uint32_t)));
+    CHECK(7U == CODEC_EVENT_COUNT);
+
+    /* A run marker carries only its type; the time is all 32 bits. */
+    memset(&in, 0, sizeof(in));
+    in.time_ms = 0xFFFFFFFFU;
+    in.type    = (uint8_t) CODEC_EVENT_RUN_BEGIN;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(CODEC_EVENT_RUN_BEGIN == out.type);
+    CHECK(0xFFFFFFFFU == out.time_ms);
+
+    /* Barcode: a character, a nav code, then the clamps. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_BARCODE;
+    in.code = 'Z';
+    in.kind = (uint8_t) COMMS_NAV_UTURN;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(CODEC_EVENT_BARCODE == out.type);
+    CHECK('Z' == out.code);
+    CHECK(COMMS_NAV_UTURN == out.kind);
+
+    in.code = 0xFFU;
+    in.kind = 9U;                       /* 3 bits: clamps to 7 */
+    CHECK(event_round_trip(&in, &out));
+    CHECK(0xFF == out.code);
+    CHECK(7 == out.kind);
+
+    /* Hump: zero, maximum, out of range and the negative "invalid" one. */
+    memset(&in, 0, sizeof(in));
+    in.type  = (uint8_t) CODEC_EVENT_HUMP;
+    in.value = 800;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(800 == out.value);
+
+    in.value = 5000;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(1023 == out.value);
+
+    in.value = -5;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(0 == out.value);
+
+    /* Motion class: 5, then out of range. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_MOTION;
+    in.kind = (uint8_t) COMMS_MOTION_TURNING;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(COMMS_MOTION_TURNING == out.kind);
+
+    in.kind = 9U;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(7 == out.kind);
+
+    /* Obstacle: zero. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_OBSTACLE;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(CODEC_EVENT_OBSTACLE == out.type);
+    CHECK(0 == out.obstacle.distance_mm);
+    CHECK(0 == out.obstacle.angle_deg);
+    CHECK(0 == out.obstacle.width_mm);
+    CHECK(0 == out.obstacle.clear_left_mm);
+    CHECK(0 == out.obstacle.clear_right_mm);
+    CHECK(COMMS_AVOID_STOP == out.obstacle.action);
+
+    /* Obstacle: every field at its maximum (12, 8, 10, 12, 12, 3 bits). */
+    in.obstacle.distance_mm    = 4095;
+    in.obstacle.angle_deg      = 255;
+    in.obstacle.width_mm       = 1023;
+    in.obstacle.clear_left_mm  = 4095;
+    in.obstacle.clear_right_mm = 4095;
+    in.obstacle.action         = COMMS_AVOID_REVERSE_RETRY;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(4095 == out.obstacle.distance_mm);
+    CHECK(255 == out.obstacle.angle_deg);
+    CHECK(1023 == out.obstacle.width_mm);
+    CHECK(4095 == out.obstacle.clear_left_mm);
+    CHECK(4095 == out.obstacle.clear_right_mm);
+    CHECK(COMMS_AVOID_REVERSE_RETRY == out.obstacle.action);
+
+    /* Obstacle: out of range clamps, a negative "invalid" becomes 0. */
+    in.obstacle.distance_mm    = -1;
+    in.obstacle.angle_deg      = 5000;
+    in.obstacle.width_mm       = 5000;
+    in.obstacle.clear_left_mm  = -1;
+    in.obstacle.clear_right_mm = 5000;
+    in.obstacle.action         = (comms_avoid_t) 9;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(0 == out.obstacle.distance_mm);
+    CHECK(255 == out.obstacle.angle_deg);
+    CHECK(1023 == out.obstacle.width_mm);
+    CHECK(0 == out.obstacle.clear_left_mm);
+    CHECK(4095 == out.obstacle.clear_right_mm);
+    CHECK(7 == out.obstacle.action);
+
+    /* Calibration: zero. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_CALIBRATION;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(CODEC_EVENT_CALIBRATION == out.type);
+    CHECK(COMMS_CAL_OK == out.calibration.result);
+    CHECK(0 == out.calibration.centre_low);
+    CHECK(0 == out.calibration.centre_high);
+    CHECK(0 == out.calibration.centre_threshold);
+    CHECK(0 == out.calibration.centre_full_black);
+    CHECK(0 == out.calibration.right_low);
+    CHECK(0 == out.calibration.right_high);
+    CHECK(0 == out.calibration.right_threshold);
+    CHECK(0 == out.calibration.barcode_low);
+    CHECK(0 == out.calibration.barcode_high);
+    CHECK(0 == out.calibration.barcode_threshold);
+    CHECK(!out.calibration.b_barcode_learned);
+    CHECK(!out.calibration.b_first_right);
+    CHECK(0 == out.calibration.overlap_samples);
+    CHECK(0 == out.calibration.b4_floor_mg);
+    CHECK(0 == out.calibration.b4_samples);
+    CHECK(0 == out.calibration.sweep_deg);
+
+    /* Calibration: every field at its maximum. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_CALIBRATION;
+    in.calibration.result             = COMMS_CAL_SENSOR_GAP;
+    in.calibration.centre_low         = 4095U;
+    in.calibration.centre_high        = 4095U;
+    in.calibration.centre_threshold   = 4095U;
+    in.calibration.centre_full_black  = 4095U;
+    in.calibration.right_low          = 4095U;
+    in.calibration.right_high         = 4095U;
+    in.calibration.right_threshold    = 4095U;
+    in.calibration.barcode_low        = 4095U;
+    in.calibration.barcode_high       = 4095U;
+    in.calibration.barcode_threshold  = 4095U;
+    in.calibration.b_barcode_learned  = true;
+    in.calibration.b_first_right      = true;
+    in.calibration.overlap_samples    = 255;
+    in.calibration.b4_floor_mg        = 511U;
+    in.calibration.b4_samples         = 32767U;
+    in.calibration.sweep_deg          = 255;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(COMMS_CAL_SENSOR_GAP == out.calibration.result);
+    CHECK(4095 == out.calibration.centre_low);
+    CHECK(4095 == out.calibration.centre_high);
+    CHECK(4095 == out.calibration.centre_threshold);
+    CHECK(4095 == out.calibration.centre_full_black);
+    CHECK(4095 == out.calibration.right_low);
+    CHECK(4095 == out.calibration.right_high);
+    CHECK(4095 == out.calibration.right_threshold);
+    CHECK(4095 == out.calibration.barcode_low);
+    CHECK(4095 == out.calibration.barcode_high);
+    CHECK(4095 == out.calibration.barcode_threshold);
+    CHECK(out.calibration.b_barcode_learned);
+    CHECK(out.calibration.b_first_right);
+    CHECK(255 == out.calibration.overlap_samples);
+    CHECK(511 == out.calibration.b4_floor_mg);
+    CHECK(32767 == out.calibration.b4_samples);
+    CHECK(255 == out.calibration.sweep_deg);
+
+    /* Calibration: the signed overlap reaches its minimum (-256, which is
+     * also "not measured"). */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_CALIBRATION;
+    in.calibration.overlap_samples = COMMS_CAL_OVERLAP_NOT_MEASURED;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(COMMS_CAL_OVERLAP_NOT_MEASURED ==
+          out.calibration.overlap_samples);
+
+    /* Calibration: out of range clamps. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_CALIBRATION;
+    in.calibration.result            = (comms_cal_result_t) 9;
+    in.calibration.centre_low        = 5000U;
+    in.calibration.overlap_samples   = -400;
+    in.calibration.b4_floor_mg       = 600U;
+    in.calibration.b4_samples        = 40000U;
+    in.calibration.sweep_deg         = -5;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(7 == out.calibration.result);
+    CHECK(4095 == out.calibration.centre_low);
+    CHECK(COMMS_CAL_OVERLAP_NOT_MEASURED ==
+          out.calibration.overlap_samples);
+    CHECK(511 == out.calibration.b4_floor_mg);
+    CHECK(32767 == out.calibration.b4_samples);
+    CHECK(0 == out.calibration.sweep_deg);
+
+    in.calibration.sweep_deg = 500;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(255 == out.calibration.sweep_deg);
+
+    /* Unknown event type: rejected, never guessed; the caller drops it. */
+    memset(&in, 0, sizeof(in));
+    in.type = (uint8_t) CODEC_EVENT_COUNT;
+    CHECK(!event_round_trip(&in, &out));
+}
+
 /* ------------------------------------------------------------------------ */
 
 int
@@ -413,6 +923,10 @@ main (void)
     test_round_trip();
     test_golden();
 #endif
+    test_pack_motion();
+    test_pack_line();
+    test_pack_terrain();
+    test_pack_event();
 
     printf("\n%u checks, %u failed\n", (unsigned) g_checks,
            (unsigned) g_failures);
