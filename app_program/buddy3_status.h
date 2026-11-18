@@ -19,7 +19,9 @@
  *   bits 16-18  nav command     3 bits  0 NONE .. 4 UTURN, 5-7 reserved
  *   bits 19-21  calibration     3 bits  0 IDLE .. 5 FAIL_GAP, 6-7 reserved
  *   bit  22     barcode capture 1 bit   1 = edges stored, not finished
- *   bits 23-31  reserved        always 0
+ *   bits 23-28  barcode char    6 bits  0 none, 1..43 Code 39, 44 failed,
+ *                                       45-63 reserved
+ *   bits 29-31  reserved        always 0
  *
  * Written only by the Buddy 3 task. Only the stored/sent word is
  * packed; ADC readings, timestamps and encoder positions keep their
@@ -41,7 +43,9 @@ typedef uint32_t buddy3_packed_t;
 #define B3_CAL_MASK             0x7U
 #define B3_CAPTURE_SHIFT        22U
 #define B3_CAPTURE_MASK         0x1U
-#define B3_RESERVED_MASK        0xFF800000UL
+#define B3_CHAR_SHIFT           23U
+#define B3_CHAR_MASK            0x3FU
+#define B3_RESERVED_MASK        0xE0000000UL
 
 
 /* Unpacked view of the status word, used for logic and debugging. */
@@ -51,13 +55,14 @@ typedef struct
     int8_t line_error;         /* -127 left .. +127 right */
     uint8_t line_sensors;      /* LINE_SENSOR_* bits, 1 = black */
     barcode_t barcode;         /* BARCODE_NONE unless one was just decoded */
+    uint8_t barcode_char;      /* BARCODE_CHAR_*: 0 none .. 44 failed */
     nav_command_t nav_command;
     line_cal_state_t cal_state;   /* START calibration progress */
     bool b_barcode_capture;       /* Edges stored, capture not finished */
 } buddy3_status_t;
 
 
-/* Pack a status into the 23-bit status word. */
+/* Pack a status into the 29-bit status word. */
 buddy3_packed_t buddy3_status_pack(buddy3_status_t const *p_status);
 
 /*

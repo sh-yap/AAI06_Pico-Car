@@ -717,6 +717,8 @@ test_pack_event (void)
            (unsigned) CODEC_EVENT_WORDS);
     CHECK(28U == (CODEC_EVENT_WORDS * sizeof(uint32_t)));
     CHECK(7U == CODEC_EVENT_COUNT);
+    /* Any Code 39 character, not just the course set (18 Nov). */
+    CHECK(6U == CODEC_BITS_BARCODE);
 
     /* A run marker carries only its type; the time is all 32 bits. */
     memset(&in, 0, sizeof(in));

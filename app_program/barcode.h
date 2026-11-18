@@ -23,6 +23,18 @@ typedef enum
  * recorder also uses this to decide whether a failed pass is worth keeping. */
 #define BARCODE_MIN_EDGES    (6U)
 
+/*
+ * Decoded character as a 6-bit index into the Code 39 set in barcode.c
+ * (c39_table order: '0'..'9', 'A'..'Z', '-', '.', ' ', '$', '/', '+', '%').
+ *   BARCODE_CHAR_NONE    0      no barcode ready
+ *   1..43                       table position + 1
+ *   BARCODE_CHAR_FAILED  44     decode failed
+ * 45..63 are reserved.
+ */
+#define BARCODE_CHAR_BITS    (6U)
+#define BARCODE_CHAR_NONE    (0U)
+#define BARCODE_CHAR_FAILED  (44U)
+
 
 /* One black/white transition while passing over a barcode. */
 typedef struct
@@ -268,6 +280,17 @@ barcode_t barcode_get_code(void);
  * outside the course table still be logged or reported.
  */
 char barcode_get_char(void);
+
+/*
+ * 6-bit index of a decoded Code 39 character (see BARCODE_CHAR_*):
+ * '\0' -> BARCODE_CHAR_NONE, a c39_table character -> table position + 1,
+ * anything else -> BARCODE_CHAR_FAILED.
+ */
+uint8_t barcode_char_index(char character);
+
+/* Inverse of barcode_char_index(): 0 -> '\0', 1..43 -> the table
+ * character, any other index -> '?'. */
+char barcode_index_char(uint8_t index);
 
 /* Debug: number of edges stored in the current capture. */
 uint8_t barcode_get_edge_count(void);

@@ -30,6 +30,7 @@
 
 #include <tk/tkernel.h>
 
+#include "barcode.h"
 #include "build_info.h"
 #include "comms.h"
 #include "comms_link.h"
@@ -648,33 +649,14 @@ non_negative (int32_t value)
 }
 
 
-/* Barcode character -> 3-bit code, the course set (Buddy 3's barcode.c):
- * 0 NONE, 1 A, 2 Y, 3 X, 4 spare, 5 F, 6 Z, 7 INVALID.  Y and X took the
- * design's unused B and C (3 Nov); A, F and Z keep their codes so older
- * logs still decode them. */
+/* Barcode character -> 6-bit code: 0 NONE, 1..43 Code 39 in the decoder's
+ * table order ('0'..'9', 'A'..'Z', '-', '.', ' ', '$', '/', '+', '%'),
+ * 44 INVALID (barcode.c owns the table; the laptop lists the same 45
+ * names).  '?' is the failed-decode character vc_task sends. */
 static uint32_t
 barcode_code (char code)
 {
-    static char const g_letters[] = { 'A', 'Y', 'X', '\0', 'F', 'Z' };
-    uint32_t          result = 7U;
-    uint32_t          i;
-
-    if ('\0' == code)
-    {
-        result = 0U;
-    }
-    else
-    {
-        for (i = 0U; (7U == result) && (i < sizeof(g_letters)); i++)
-        {
-            if (g_letters[i] == code)
-            {
-                result = i + 1U;
-            }
-        }
-    }
-
-    return result;
+    return (uint32_t) barcode_char_index(code);
 }
 
 

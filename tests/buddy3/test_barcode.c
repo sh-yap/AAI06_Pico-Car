@@ -1192,6 +1192,48 @@ report_speed_sweep(int32_t narrow, char const * p_label)
     wide_um = WIDE_UM;
 }
 
+/* The 6-bit character index the laptop sees: every Code 39 character,
+ * the none value '\0', and the failure value for anything else. */
+static void
+test_char_index(void)
+{
+    static char const c39[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%";
+    uint8_t count = (uint8_t)(sizeof(c39) - 1U);      /* 43 characters */
+    uint8_t i;
+    bool all_ok = true;
+
+    check("Code 39 table has 43 characters", 43U == count);
+    check("character index is 6 bits", 6U == BARCODE_CHAR_BITS);
+    check("failure index is 44", 44U == BARCODE_CHAR_FAILED);
+
+    for (i = 0U; i < count; i++)
+    {
+        uint8_t index = barcode_char_index(c39[i]);
+
+        if ((index != (uint8_t)(i + 1U)) ||
+            (barcode_index_char(index) != c39[i]))
+        {
+            all_ok = false;
+            (void)printf("  character '%c' failed (index %u)\n",
+                         c39[i], (unsigned)index);
+        }
+    }
+
+    check("all 43 characters round-trip through the index", all_ok);
+    check("no character -> index 0", BARCODE_CHAR_NONE
+          == barcode_char_index('\0'));
+    check("index 0 -> no character", '\0' == barcode_index_char(0U));
+    check("start/stop '*' -> failed", BARCODE_CHAR_FAILED
+          == barcode_char_index('*'));
+    check("lower case 'q' -> failed", BARCODE_CHAR_FAILED
+          == barcode_char_index('q'));
+    check("failed index -> '?'", '?' == barcode_index_char(
+          BARCODE_CHAR_FAILED));
+    check("reserved index 45 -> '?'", '?' == barcode_index_char(45U));
+    check("reserved index 63 -> '?'", '?' == barcode_index_char(63U));
+}
+
+
 int
 main(void)
 {
@@ -1208,6 +1250,7 @@ main(void)
     test_track_captures();
     test_storage_round_trip();
     test_raw_storage();
+    test_char_index();
     jitter_ms = 2;
     report_speed_sweep(6000, "narrow 6 mm (4 Nov track print)");
     report_speed_sweep(3000, "narrow 3 mm (course spec)");

@@ -488,22 +488,6 @@ nav_from_buddy3 (nav_command_t nav)
 }
 
 
-/* Buddy 3 barcode -> the character sent to the laptop. */
-static char
-barcode_char (barcode_t code)
-{
-    static char const g_chars[] = "-AFZYX?";   /* NONE, A, F, Z, Y, X, INVALID */
-    char              c         = '?';
-
-    if ((uint32_t) code < (sizeof(g_chars) - 1U))
-    {
-        c = g_chars[code];
-    }
-
-    return c;
-}
-
-
 /* Line telemetry and barcode events to the laptop (comms, Buddy 1). */
 static void
 report_line (buddy3_status_t const * p_status, vc_nav_t nav)
@@ -518,7 +502,7 @@ report_line (buddy3_status_t const * p_status, vc_nav_t nav)
 
     if (BARCODE_NONE != p_status->barcode)
     {
-        (void) comms_event_barcode(barcode_char(p_status->barcode),
+        (void) comms_event_barcode(barcode_index_char(p_status->barcode_char),
                                    (comms_nav_t) nav);         /* Same order. */
     }
 }

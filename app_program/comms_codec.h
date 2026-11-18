@@ -123,7 +123,7 @@ void codec_text(comms_link_msg_t * p_msg, char const * p_topic, uint8_t qos,
 #define CODEC_BITS_TILT               (11U)   /* signed, milli-g       */
 #define CODEC_BITS_HUMP               (10U)   /* 0.1 mm                */
 #define CODEC_BITS_TURN               (11U)   /* signed, deg/s         */
-#define CODEC_BITS_BARCODE            (3U)
+#define CODEC_BITS_BARCODE            (6U)    /* 0 none, 1..43, 44 bad */
 #define CODEC_BITS_NAV                (3U)
 #define CODEC_BITS_OBST_DIST          (12U)   /* mm                    */
 #define CODEC_BITS_ANGLE              (8U)    /* deg                   */

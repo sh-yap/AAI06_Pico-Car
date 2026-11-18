@@ -365,6 +365,8 @@ void buddy3_task(INT stacd, void *exinf)
     int8_t line_error;
     uint8_t line_sensors;
     barcode_t barcode_code;
+    char barcode_character;
+    uint8_t barcode_char;
     nav_command_t nav_command;
 
     SYSTIM sys_time;
@@ -514,6 +516,27 @@ void buddy3_task(INT stacd, void *exinf)
          */
         barcode_code = barcode_get_code();
 
+        /* 6-bit character index for the laptop, read before
+         * barcode_get_command() clears the capture: 0 when nothing is ready,
+         * 44 when the capture did not decode, else the Code 39 position. */
+        if (BARCODE_NONE == barcode_code)
+        {
+            barcode_char = BARCODE_CHAR_NONE;
+        }
+        else
+        {
+            barcode_character = barcode_get_char();
+
+            if ('\0' == barcode_character)
+            {
+                barcode_char = BARCODE_CHAR_FAILED;
+            }
+            else
+            {
+                barcode_char = barcode_char_index(barcode_character);
+            }
+        }
+
 #if VC_RECORDER
         /* Sample the capture state before barcode_get_command() clears it.
          * Nothing here changes what Buddy 3 sends. */
@@ -607,6 +630,7 @@ void buddy3_task(INT stacd, void *exinf)
         status.line_error   = line_error;
         status.line_sensors = line_sensors;
         status.barcode      = barcode_code;
+        status.barcode_char = barcode_char;
         status.nav_command  = nav_command;
         status.cal_state    = line_cal_state();
         /* Same active rule as the recorder: edges stored, not finished. */

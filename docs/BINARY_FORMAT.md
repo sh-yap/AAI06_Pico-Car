@@ -101,10 +101,10 @@ All 11 fields the firmware sends, in this order:
 
 | Field | Bits | Range / meaning | Status |
 |---|---:|---|---|
-| `code` | 3 | 0 NONE, 1 A, 2 Y, 3 X, 4 spare, 5 F, 6 Z, 7 INVALID | Course set (3 Nov): Y and X replaced the unused B and C; A, F, Z kept their codes |
-| `command` | 3 | 0 NONE, 1 LEFT, 2 RIGHT, 3 STRAIGHT, 4 UTURN | Code + Tribunal |
+| `code` | 6 | 0 NONE, 1…43 Code 39 in the decoder's table order, 44 INVALID | Any Code 39 character is reported (18 Nov): the index is the character's position in `c39_table` (`'0'`…`'9'`, `'A'`…`'Z'`, `- . space $ / + %`) + 1; 44 = decode failed, 45-63 reserved |
+| `command` | 3 | 0 NONE, 1 LEFT, 2 RIGHT, 3 STRAIGHT, 4 UTURN | Code + Tribunal; a non-course character sends NONE |
 
-6 + 34 = 40 bits → **5 bytes** (JSON 49 B).
+6 + 3 + 34 = 43 bits → **6 bytes**.
 
 ### robot/event/hump
 

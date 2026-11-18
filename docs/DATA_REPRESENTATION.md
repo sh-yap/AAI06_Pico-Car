@@ -191,14 +191,14 @@ no static RAM in this phase.
 ## 2. Line and barcode sensing
 
 Sources: `line_follow.h` (LINE_ERROR_MAX 127, 2 sensor bits), `buddy3_status.h`
-(already a packed 23-bit word), `barcode.h`/`barcode.c` (64 edges, 480 raw
+(already a packed 29-bit word), `barcode.h`/`barcode.c` (64 edges, 480 raw
 samples, 128 histogram bins, 63 elements), `obstacle_config.h` (servo 60..120).
 
 ### 2.1 `buddy3_status_t` and the Buddy 3 words
 
 | Field | Where | Valid range and unit | Bits | Current | Proposed | Shared? |
 |---|---|---|---|---|---|---|
-| whole status | buddy3_status.h:buddy3_packed_t | 23 bits used, 9 reserved `[code]` | 23 | uint32 word, 4 B | keep: already minimum-bit, one writer, one aligned store | Buddy 3 task -> VC (mbf), radio |
+| whole status | buddy3_status.h:buddy3_packed_t | 29 bits used, 3 reserved `[code]` | 29 | uint32 word, 4 B | keep: already minimum-bit, one writer, one aligned store | Buddy 3 task -> VC (mbf), radio |
 | `line_state` | buddy3_status.h:buddy3_status_t.line_state | 0..4 `[code]` LINE_* | 3 U | same word `B3_LINE_STATE` | keep (`W[0:2]`) | decode view only |
 | `line_error` | .line_error | -127..+127 `[code]` LINE_ERROR_MAX | 8 s | `B3_LINE_ERROR` | keep (`W[3:10]`) | decode view |
 | `line_sensors` | .line_sensors | 0..3, 2 sensors `[code]` | 2 U | `B3_LINE_SENSORS` | keep (`W[11:12]`) | decode view |
@@ -206,6 +206,7 @@ samples, 128 histogram bins, 63 elements), `obstacle_config.h` (servo 60..120).
 | `nav_command` | .nav_command | 0..4 `[code]` `nav_command_t` | 3 U | `B3_NAV` | keep (`W[16:18]`) | decode view |
 | `cal_state` | .cal_state | 0..5 `[code]` `line_cal_state_t` | 3 U | `B3_CAL` | keep (`W[19:21]`) | decode view |
 | `b_barcode_capture` | .b_barcode_capture | 0/1 | 1 U | `B3_CAPTURE` | keep (`W[22]`) | decode view |
+| `barcode_char` | .barcode_char | 0 none, 1..43 Code 39 in `c39_table` order, 44 failed `[code]` | 6 U | `B3_CHAR` | new (`W[23:28]`), reserved `W[29:31]` | decode view |
 | `buddy3_reading_word` | buddy3_task.c:buddy3_reading_word | centre ADC 12, right ADC 12 `[code]` | 24 | uint32 volatile, 4 B | keep: already 12+12, one writer | Buddy 3 task -> VC task |
 | `buddy3_cal_word` | buddy3_task.c:buddy3_cal_word | request 3 bits + 29-bit counter `[code]` | 32 | uint32 volatile, 4 B | keep | VC task -> Buddy 3 task |
 | `ir_readings_t` | ir_sensor.h:ir_readings_t | 3 x 12-bit ADC 0..4095 `[ds/code]` | 36 | struct, 6 B | keep: transient by-value, never stored | driver -> Buddy 3 task (local) |

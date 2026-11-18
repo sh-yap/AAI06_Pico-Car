@@ -238,7 +238,7 @@ const AVOID=['STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY'];
 const CMD=['unknown','start','stop','status'];
 const RUN=['END','BEGIN'];
 const CALRES=['OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP'];
-const BARCODE=['','A','Y','X','?','F','Z','INVALID'];
+const BARCODE=['','0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z','-','.',' ','$','/','+','%','INVALID'];
 const F=(k,kind,bits,names)=>({k,kind,bits,names});
 const FMT={
   'robot/telemetry/motion':[F('spd_l_mm_s','s',10),F('spd_r_mm_s','s',10),F('enc_l','s',19),F('enc_r','s',19),F('dist_mm','s',16),F('tgt_l_mm_s','s',10),F('tgt_r_mm_s','s',10),F('slew_l_mm_s','s',10),F('slew_r_mm_s','s',10),F('pwm_l','s',11),F('pwm_r','s',11)],
@@ -246,7 +246,7 @@ const FMT={
   'robot/telemetry/terrain':[F('motion','n',3,MOTION),F('tilt_mg','s',11),F('hump_dmm','u',10),F('max_hump_dmm','u',10),F('turn_dps','s',11)],
   'robot/heartbeat':[F('seq','u',16),F('state','n',4,STATES),F('fault','u',10),F('ev_drop','u',8)],
   'robot/state':[F('state','n',4,STATES),F('fault','u',10)],
-  'robot/event/barcode':[F('code','n',3,BARCODE),F('command','n',3,NAV)],
+  'robot/event/barcode':[F('code','n',6,BARCODE),F('command','n',3,NAV)],
   'robot/event/hump':[F('peak_dmm','u',10),F('max_dmm','u',10)],
   'robot/event/calibration':[F('result','n',3,CALRES),F('centre_low','u',12),F('centre_high','u',12),F('centre_thr','u',12),F('centre_full','u',12),F('right_low','u',12),F('right_high','u',12),F('right_thr','u',12),F('barcode_low','u',12),F('barcode_high','u',12),F('barcode_thr','u',12),F('barcode_learned','u',1),F('first_right','u',1),F('overlap','s',9),F('b4_floor_mg','u',9),F('b4_samples','u',15),F('sweep_deg','u',8)],
   'robot/event/obstacle':[F('dist_mm','u',12),F('angle_deg','u',8),F('width_mm','u',10),F('clear_l_mm','u',12),F('clear_r_mm','u',12),F('action','n',3,AVOID)],
@@ -492,8 +492,8 @@ function renderBarViz(M){
   let h='';
   if(B.length){const isBad=c=>c==='INVALID'||c==='?';const L=B[B.length-1],bad=isBad(L.code),nav=L.command&&L.command!=='NONE';
     h+=`<div style="display:flex;gap:14px;align-items:center;margin-top:4px"><div class="bigcode" style="color:${bad?'var(--bad)':'var(--fg)'}">${esc(bad?'✕':(L.code||'?'))}</div>`+
-       `<div><span class="pill ${bad?'bad':nav?'ok':''}">${esc(bad?'not read':navText(L.command))}</span><div class="cap" style="margin:6px 0 0">${esc(shortTime(L.ts))} · ${B.length} read${B.length>1?'s':''}, ${B.filter(b=>isBad(b.code)).length} invalid</div></div></div>`;
-    h+='<div class="barlist">'+B.slice(-6).reverse().map(b=>`<div>${esc(shortTime(b.ts))} <b>${esc(b.code||'?')}</b> → ${esc(navText(b.command))}</div>`).join('')+'</div>';}
+       `<div><span class="pill ${bad?'bad':nav?'ok':''}">${esc(bad?'not read':nav?navText(L.command):'no action')}</span><div class="cap" style="margin:6px 0 0">${esc(shortTime(L.ts))} · ${B.length} read${B.length>1?'s':''}, ${B.filter(b=>isBad(b.code)).length} invalid</div></div></div>`;
+    h+='<div class="barlist">'+B.slice(-6).reverse().map(b=>{const bd=isBad(b.code),nv=b.command&&b.command!=='NONE';return `<div>${esc(shortTime(b.ts))} <b>${esc(bd?'?':(b.code||'?'))}</b> → ${esc(bd?'INVALID':(nv?navText(b.command):'no action'))}</div>`;}).join('')+'</div>';}
   else h+='<div class="cap">No barcode read yet.</div>';
   if(C){const pc=v=>100*Math.max(0,Math.min(4095,v))/4095,lo=Math.min(C.low,C.high),hi=Math.max(C.low,C.high);
     h+=`<div class="vrow" style="margin-top:12px"><div class="nm">Range</div><div class="vtrack"><div class="fill" style="position:absolute;left:${pc(lo)}%;width:${Math.max(1,pc(hi)-pc(lo))}%;background:var(--err)"></div><div class="thr" style="left:${pc(C.thr)}%" title="threshold ${C.thr}"></div></div><div class="num">${lo}–${hi}</div></div>`+

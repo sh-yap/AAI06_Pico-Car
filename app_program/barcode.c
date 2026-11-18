@@ -245,6 +245,51 @@ static c39_symbol_t const c39_table[] =
 
 
 /*
+ * 6-bit index of a decoded character (BARCODE_CHAR_* in barcode.h).
+ * Used for the Buddy 3 status word and the barcode event, so the
+ * laptop can show any Code 39 character, not just the course set.
+ */
+uint8_t barcode_char_index(char character)
+{
+    uint8_t i;
+
+    if (C39_CHAR_NONE == character)
+    {
+        return BARCODE_CHAR_NONE;
+    }
+
+    for (i = 0U; i < (sizeof c39_table / sizeof c39_table[0]); i++)
+    {
+        if (c39_table[i].character == character)
+        {
+            return (uint8_t)(i + 1U);
+        }
+    }
+
+    return BARCODE_CHAR_FAILED;
+}
+
+
+/* Inverse of barcode_char_index(); '?' marks a failed or reserved index. */
+char barcode_index_char(uint8_t index)
+{
+    uint8_t count = (uint8_t)(sizeof c39_table / sizeof c39_table[0]);
+
+    if (BARCODE_CHAR_NONE == index)
+    {
+        return C39_CHAR_NONE;
+    }
+
+    if (index <= count)
+    {
+        return c39_table[index - 1U].character;
+    }
+
+    return '?';
+}
+
+
+/*
  * Course characters and the barcode they report.
  * Course barcodes are *A*, *F*, *Z*, *Y* and *X*.
  * HARDCODED for now: update this table and barcode_get_command()
