@@ -38,6 +38,16 @@
  * 20 ms on the 10 ms kernel tick (a relative wait adds one extra tick). */
 #define BUDDY3_TASK_PERIOD_MS    10U
 
+/*
+ * Barcode sensor offset from the car's centre line, + = left (measured
+ * 71 mm, 18 Nov), and the wheel track (motion_config.c track_width_um).
+ * While the car steers, a point at offset y travels L/2 + R/2 +
+ * (L - R) * y / track, so the sensor's own distance over the print is
+ * used for bar widths instead of the wheel mean (weave correction).
+ */
+#define BUDDY3_BARCODE_OFFSET_MM 71
+#define BUDDY3_TRACK_MM          119
+
 static ID g_buddy3_tid;
 
 
@@ -461,11 +471,16 @@ void buddy3_task(INT stacd, void *exinf)
         timestamp_ms = sys_time.lo;
 
         /*
-         * Average of both wheels - reasonable for a robot driving
-         * roughly straight over a barcode. 
+         * Distance the barcode sensor itself travelled. Equals the wheel
+         * mean when driving straight (L = R); during a weave it follows
+         * the sensor's arc instead. 64-bit so no product can overflow.
          */
-        encoder_position =
-            (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
+        encoder_position = (int32_t)(
+            (((int64_t)enc_snapshot.left_counts
+              + (int64_t)enc_snapshot.right_counts) / 2)
+            + ((((int64_t)enc_snapshot.left_counts
+                 - (int64_t)enc_snapshot.right_counts)
+                * BUDDY3_BARCODE_OFFSET_MM) / BUDDY3_TRACK_MM));
 
         barcode_update_raw(readings.barcode, timestamp_ms, encoder_position);
         barcode_check_end(encoder_position);
