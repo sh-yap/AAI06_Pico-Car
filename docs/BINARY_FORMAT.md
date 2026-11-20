@@ -77,6 +77,20 @@ All 11 fields the firmware sends, in this order:
 
 45 + 34 = 79 bits → **10 bytes** (JSON ≈ 81 B).
 
+### robot/telemetry/obstacle  (Buddy 5, up to 5 per second)
+
+The latest forward ultrasonic reading.  Added 2026-11-20 so a sensor fault
+(fault bit 5) can be traced in the laptop log.
+
+| Field | Bits | Range / meaning | Status |
+|---|---:|---|---|
+| `dist_mm` | 12 | 0 … 4095 mm; 0 = no valid reading | Buddy 5 |
+| `status` | 3 | 0 OK, 1 NO_ECHO (sensor did not answer), 2 TOO_CLOSE, 3 TOO_FAR, 4 TIMEOUT (nothing reflected), 5 NOT_READY | Buddy 5 |
+| `state` | 3 | 0 INIT, 1 MONITOR, 2 SCANNING, 3 SIDE_WATCH, 4 LINE_RECOVERY, 5 SENSOR_FAULT | Buddy 5 |
+| `silent` | 8 | NO_ECHO + NOT_READY readings since boot, wraps at 256.  A running count, so readings between two snapshots are not lost: compare consecutive values. | Buddy 5 |
+
+26 + 34 = 60 bits → **8 bytes** (JSON ≈ 70 B).
+
 ### robot/heartbeat  (Buddy 1, once per second)
 
 | Field | Bits | Range / meaning | Status |

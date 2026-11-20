@@ -993,6 +993,28 @@ is_running (vc_state_t state)
 }
 
 
+/* Buddy 5's latest forward reading -> robot/telemetry/obstacle, so a
+ * sensor fault shows its NO_ECHO readings in the laptop log.  The enums
+ * share their order with comms.h (comms_range_t, comms_sonar_state_t). */
+static void
+report_sonar (void)
+{
+    obstacle_status_t status;
+    comms_sonar_t     report;
+
+    if (obstacle_calc_unpack_status(obstacle_task_get_word(), &status))
+    {
+        report.distance_mm = (int32_t) status.distance_mm;
+        report.status      = (comms_range_t) status.range_status;
+        report.state       = (comms_sonar_state_t) status.state;
+        /* Cast to uint8_t: the wire field is a wrapping 8-bit count. */
+        report.silent      = (uint8_t) (obstacle_task_get_silent_count()
+                                        & 0xFFU);
+        comms_report_sonar(&report);
+    }
+}
+
+
 /* Buddy 5's event flag: OBSTACLE_EVT_AHEAD stays set until acknowledged;
  * OBSTACLE_EVT_FAULT is set while the sensor is faulty (a serious fault:
  * the car must not drive blind).  Read without clearing: only Buddy 5
@@ -1007,6 +1029,8 @@ read_obstacle (vc_inputs_t * p_in, vc_state_t state)
 {
     T_RFLG    rflg;
     ID const  flg = obstacle_task_get_flag();
+
+    report_sonar();
 
     if ((0 < flg) && (E_OK == tk_ref_flg(flg, &rflg)))
     {

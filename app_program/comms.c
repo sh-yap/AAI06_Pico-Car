@@ -87,6 +87,9 @@
 #define BITS_WIDTH               CODEC_BITS_WIDTH
 #define BITS_CLEARANCE           CODEC_BITS_CLEARANCE
 #define BITS_ACTION              CODEC_BITS_ACTION
+#define BITS_RANGE               CODEC_BITS_RANGE
+#define BITS_SONAR_STATE         CODEC_BITS_SONAR_STATE
+#define BITS_SILENT              CODEC_BITS_SILENT
 #define BITS_RUN                 1U
 #define BITS_RUN_MS              20U
 #define BITS_COUNT               8U
@@ -138,6 +141,12 @@ typedef struct
     uint32_t          words[CODEC_TERRAIN_WORDS];
 } terrain_slot_t;
 
+typedef struct
+{
+    volatile uint32_t seq;
+    uint32_t          words[CODEC_SONAR_WORDS];
+} sonar_slot_t;
+
 #if COMMS_JSON
 /* ------------------------------------------------------------------ *
  *  Names used in JSON payloads only (order must match comms.h and
@@ -169,6 +178,17 @@ static char const * const g_motion_names[COMMS_MOTION_COUNT] =
 static char const * const g_avoid_names[COMMS_AVOID_COUNT] =
 {
     "STOP", "CONTINUE", "TURN_LEFT", "TURN_RIGHT", "REVERSE_RETRY"
+};
+
+static char const * const g_range_names[COMMS_RANGE_COUNT] =
+{
+    "OK", "NO_ECHO", "TOO_CLOSE", "TOO_FAR", "TIMEOUT", "NOT_READY"
+};
+
+static char const * const g_sonar_names[COMMS_SONAR_COUNT] =
+{
+    "INIT", "MONITOR", "SCANNING", "SIDE_WATCH", "LINE_RECOVERY",
+    "SENSOR_FAULT"
 };
 
 static char const * const g_cmd_names[CMD_CODE_COUNT] =
@@ -206,6 +226,7 @@ static volatile uint32_t g_commands_received;
 static motion_slot_t     g_motion_slot;
 static line_slot_t       g_line_slot;
 static terrain_slot_t    g_terrain_slot;
+static sonar_slot_t      g_sonar_slot;
 
 static UW g_event_buf[(COMMS_EVENT_QUEUE_LEN
                        * ((CODEC_EVENT_WORDS * sizeof(uint32_t))
@@ -526,6 +547,20 @@ comms_report_terrain (comms_terrain_t const * p_terrain)
 }
 
 
+void
+comms_report_sonar (comms_sonar_t const * p_sonar)
+{
+    uint32_t words[CODEC_SONAR_WORDS];
+
+    if (NULL != p_sonar)
+    {
+        codec_pack_sonar(words, p_sonar);
+        slot_write(&g_sonar_slot.seq, g_sonar_slot.words, words,
+                   (uint32_t) sizeof(words));
+    }
+}
+
+
 bool
 comms_event_barcode (char code, comms_nav_t command)
 {
@@ -613,6 +648,7 @@ typedef struct
 static snapshot_tx_t g_motion_tx;
 static snapshot_tx_t g_line_tx;
 static snapshot_tx_t g_terrain_tx;
+static snapshot_tx_t g_sonar_tx;
 
 static uint32_t g_published_state = 0xFFFFFFFFU;
 static uint32_t g_published_fault = 0xFFFFFFFFU;
@@ -669,6 +705,7 @@ resend_all (void)
     g_motion_tx.b_force  = true;
     g_line_tx.b_force    = true;
     g_terrain_tx.b_force = true;
+    g_sonar_tx.b_force   = true;
 }
 
 
@@ -1081,6 +1118,46 @@ next_terrain (comms_link_msg_t * p_msg, uint32_t now)
 }
 
 
+static bool
+next_sonar (comms_link_msg_t * p_msg, uint32_t now)
+{
+    comms_sonar_t  sonar;
+    uint32_t       words[CODEC_SONAR_WORDS];
+    codec_writer_t w;
+    uint32_t       seq;
+    uint32_t       hash;
+    bool           b_built = false;
+
+    if (slot_read(&g_sonar_slot.seq, g_sonar_slot.words, words,
+                  (uint32_t) sizeof(words), &seq))
+    {
+        codec_unpack_sonar(words, &sonar);
+
+        if (snapshot_due(&g_sonar_tx, seq, words, CODEC_SONAR_WORDS, now,
+                         COMMS_TELEMETRY_MS, &hash))
+        {
+            codec_begin(&w, p_msg, "robot/telemetry/obstacle", QOS_0, false,
+                        now);
+            codec_put_uint(&w, CODEC_KEY("dist_mm"),
+                           non_negative(sonar.distance_mm), BITS_OBST_DIST);
+            codec_put_name(&w, CODEC_KEY("status"), CODEC_NAMES(g_range_names),
+                           COMMS_RANGE_COUNT, (uint32_t) sonar.status,
+                           BITS_RANGE);
+            codec_put_name(&w, CODEC_KEY("state"), CODEC_NAMES(g_sonar_names),
+                           COMMS_SONAR_COUNT, (uint32_t) sonar.state,
+                           BITS_SONAR_STATE);
+            codec_put_uint(&w, CODEC_KEY("silent"), sonar.silent,
+                           BITS_SILENT);
+            codec_end(&w);
+            snapshot_sent(&g_sonar_tx, seq, hash, now);
+            b_built = true;
+        }
+    }
+
+    return b_built;
+}
+
+
 /* One queued event, unpacked.  An unknown event type (a corrupted element)
  * is dropped and counted, as the out-of-range rule requires. */
 static bool
@@ -1184,7 +1261,8 @@ comms_link_next (comms_link_msg_t * p_msg)
         {
             /* 5. Telemetry snapshots, in turn. */
             b_built = next_motion(p_msg, now) || next_line(p_msg, now)
-                      || next_terrain(p_msg, now);
+                      || next_terrain(p_msg, now)
+                      || next_sonar(p_msg, now);
         }
     }
 

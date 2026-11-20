@@ -148,6 +148,41 @@ typedef struct
                                         left                            */
 } comms_terrain_t;
 
+/* Buddy 5 - one forward reading's status (same order as
+ * obstacle_range_status_t). */
+typedef enum
+{
+    COMMS_RANGE_OK = 0,
+    COMMS_RANGE_NO_ECHO,        /* sensor did not answer                */
+    COMMS_RANGE_TOO_CLOSE,
+    COMMS_RANGE_TOO_FAR,
+    COMMS_RANGE_TIMEOUT,        /* nothing reflected                    */
+    COMMS_RANGE_NOT_READY,
+    COMMS_RANGE_COUNT
+} comms_range_t;
+
+/* Buddy 5 - obstacle task state (same order as obstacle_state_t). */
+typedef enum
+{
+    COMMS_SONAR_INIT = 0,
+    COMMS_SONAR_MONITOR,
+    COMMS_SONAR_SCANNING,
+    COMMS_SONAR_SIDE_WATCH,
+    COMMS_SONAR_LINE_RECOVERY,
+    COMMS_SONAR_SENSOR_FAULT,
+    COMMS_SONAR_COUNT
+} comms_sonar_state_t;
+
+/* Buddy 5 - latest forward reading (telemetry). */
+typedef struct
+{
+    int32_t             distance_mm;  /* 0 = no valid reading           */
+    comms_range_t       status;
+    comms_sonar_state_t state;
+    uint8_t             silent;       /* unanswered readings since boot,
+                                         wraps at 256                   */
+} comms_sonar_t;
+
 /* Buddy 5 - obstacle profile (sent as an event). */
 typedef struct
 {
@@ -234,6 +269,7 @@ bool comms_get_command(comms_cmd_t * p_cmd);    /* true if one waiting  */
 void comms_report_motion(comms_motion_t const * p_motion);
 void comms_report_line(comms_line_t const * p_line);
 void comms_report_terrain(comms_terrain_t const * p_terrain);
+void comms_report_sonar(comms_sonar_t const * p_sonar);
 
 /* Events: queued and sent reliably.  false = queue full, event dropped. */
 bool comms_event_barcode(char code, comms_nav_t command);

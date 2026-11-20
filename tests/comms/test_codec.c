@@ -371,6 +371,21 @@ test_golden (void)
     CHECK(9U == g_m.msg.payload_len);
     CHECK(0 == strcmp("3a5900001c030481ff", hex));
 
+    /* robot/telemetry/obstacle: 283 mm, NO_ECHO (1), SENSOR_FAULT (5),
+     * 17 silent readings. */
+    fresh();
+    codec_begin(&w, &g_m.msg, "robot/telemetry/obstacle", 0U, false,
+                117830U);
+    codec_put_uint(&w, CODEC_KEY("dist_mm"), 283U, CODEC_BITS_OBST_DIST);
+    codec_put_uint(&w, CODEC_KEY("status"), 1U, CODEC_BITS_RANGE);
+    codec_put_uint(&w, CODEC_KEY("state"), 5U, CODEC_BITS_SONAR_STATE);
+    codec_put_uint(&w, CODEC_KEY("silent"), 17U, CODEC_BITS_SILENT);
+    codec_end(&w);
+    to_hex(hex);
+    printf("  obstacle  %s\n", hex);
+    CHECK(8U == g_m.msg.payload_len);
+    CHECK(0 == strcmp("1a3107006c441a01", hex));
+
     /* robot/event/calibration: index 4 of 5 (sensor gap), a 6 sample gap. */
     fresh();
     codec_begin(&w, &g_m.msg, "robot/event/calibration", 1U, false, 8000U);
@@ -692,6 +707,65 @@ test_pack_terrain (void)
 }
 
 
+static void
+test_pack_sonar (void)
+{
+    comms_sonar_t in;
+    comms_sonar_t out;
+    uint32_t      words[CODEC_SONAR_WORDS];
+
+    printf("packed obstacle reading record, %u word\n",
+           (unsigned) CODEC_SONAR_WORDS);
+    CHECK(4U == (CODEC_SONAR_WORDS * sizeof(uint32_t)));
+    CHECK(32U >= (CODEC_BITS_OBST_DIST + CODEC_BITS_RANGE
+                  + CODEC_BITS_SONAR_STATE + CODEC_BITS_SILENT));
+
+    /* Zero. */
+    memset(&in, 0, sizeof(in));
+    codec_pack_sonar(words, &in);
+    memset(&out, 0xFF, sizeof(out));
+    codec_unpack_sonar(words, &out);
+    CHECK(0 == out.distance_mm);
+    CHECK(COMMS_RANGE_OK == out.status);
+    CHECK(COMMS_SONAR_INIT == out.state);
+    CHECK(0U == out.silent);
+
+    /* Every field at its end value, and each field kept apart. */
+    in.distance_mm = 4095;
+    in.status      = COMMS_RANGE_NOT_READY;
+    in.state       = COMMS_SONAR_SENSOR_FAULT;
+    in.silent      = 255U;
+    codec_pack_sonar(words, &in);
+    memset(&out, 0, sizeof(out));
+    codec_unpack_sonar(words, &out);
+    CHECK(4095 == out.distance_mm);
+    CHECK(COMMS_RANGE_NOT_READY == out.status);
+    CHECK(COMMS_SONAR_SENSOR_FAULT == out.state);
+    CHECK(255U == out.silent);
+
+    in.distance_mm = 0;
+    in.status      = COMMS_RANGE_NO_ECHO;
+    in.state       = COMMS_SONAR_MONITOR;
+    in.silent      = 0U;
+    codec_pack_sonar(words, &in);
+    codec_unpack_sonar(words, &out);
+    CHECK(0 == out.distance_mm);
+    CHECK(COMMS_RANGE_NO_ECHO == out.status);
+    CHECK(COMMS_SONAR_MONITOR == out.state);
+    CHECK(0U == out.silent);
+
+    /* Out of range: clamped (distance is unsigned and 12 bits). */
+    in.distance_mm = 5000;
+    codec_pack_sonar(words, &in);
+    codec_unpack_sonar(words, &out);
+    CHECK(4095 == out.distance_mm);
+    in.distance_mm = -3;
+    codec_pack_sonar(words, &in);
+    codec_unpack_sonar(words, &out);
+    CHECK(0 == out.distance_mm);
+}
+
+
 /* Pack, unpack and return whether the type was known. */
 static bool
 event_round_trip (codec_event_t * p_in, codec_event_t * p_out)
@@ -928,6 +1002,7 @@ main (void)
     test_pack_motion();
     test_pack_line();
     test_pack_terrain();
+    test_pack_sonar();
     test_pack_event();
 
     printf("\n%u checks, %u failed\n", (unsigned) g_checks,

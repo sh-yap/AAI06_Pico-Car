@@ -78,6 +78,12 @@ static uint32_t volatile status_word = 0U;
 static uint32_t volatile status_time_ms = 0U;
 static bool volatile     b_published = false;
 
+/* Forward readings the sensor did not answer (NO_ECHO or NOT_READY) since
+ * start-up, for telemetry.  Written only by the task with one aligned
+ * store; wraps.  A running count, so a short silent spell between two
+ * telemetry snapshots still shows (track test 2026-11-20). */
+static uint32_t volatile silent_count = 0U;
+
 /* Latest scan, in its packed stored form (obstacle_pack.h): written only
  * by the task.  The full-width value type is the task's stack copy. */
 static obstacle_scan_packed_t scan_result;
@@ -350,6 +356,12 @@ task_entry(INT stacd, void * p_exinf)
         obstacle_ultrasonic_measure(&range);
         obstacle_monitor_step(&monitor, &range, &report);
 
+        if ((OBSTACLE_RANGE_NO_ECHO == range.status)
+            || (OBSTACLE_RANGE_NOT_READY == range.status))
+        {
+            silent_count++;
+        }
+
         /* Consume an acknowledgement (polling, clears only that bit). */
         if (E_OK == tk_wai_flg(flag_id, TASK_REQ_ACK,
                                TWF_ORW | TWF_BITCLR, &pattern, TMO_POL))
@@ -491,6 +503,17 @@ obstacle_task_get_word(void)
     }
 
     return (word);
+}
+
+/*!
+ * @brief Forward readings the sensor did not answer, for telemetry.
+ *
+ * @return NO_ECHO and NOT_READY readings since start-up (wraps).
+ */
+uint32_t
+obstacle_task_get_silent_count(void)
+{
+    return (silent_count);
 }
 
 /*!

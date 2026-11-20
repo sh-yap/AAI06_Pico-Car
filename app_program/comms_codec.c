@@ -562,6 +562,49 @@ codec_unpack_terrain (uint32_t const * p_words,
                                      CODEC_BITS_TURN);
 }
 
+/* ---- robot/telemetry/obstacle: 1 word ----
+ *
+ *   W0  dist_mm [0:11]  status [12:14]  state [15:17]  silent [18:25]
+ */
+#define S_W_A                (0U)
+
+#define S_DIST_SHIFT         (0U)
+#define S_STATUS_SHIFT       (S_DIST_SHIFT + CODEC_BITS_OBST_DIST)
+#define S_STATE_SHIFT        (S_STATUS_SHIFT + CODEC_BITS_RANGE)
+#define S_SILENT_SHIFT       (S_STATE_SHIFT + CODEC_BITS_SONAR_STATE)
+
+
+void
+codec_pack_sonar (uint32_t * p_words, comms_sonar_t const * p_sonar)
+{
+    p_words[S_W_A] =
+        pack_uint(non_negative(p_sonar->distance_mm), S_DIST_SHIFT,
+                  CODEC_BITS_OBST_DIST)
+        | pack_uint((uint32_t) p_sonar->status, S_STATUS_SHIFT,
+                    CODEC_BITS_RANGE)
+        | pack_uint((uint32_t) p_sonar->state, S_STATE_SHIFT,
+                    CODEC_BITS_SONAR_STATE)
+        | pack_uint((uint32_t) p_sonar->silent, S_SILENT_SHIFT,
+                    CODEC_BITS_SILENT);
+}
+
+
+void
+codec_unpack_sonar (uint32_t const * p_words, comms_sonar_t * p_sonar)
+{
+    p_sonar->distance_mm = (int32_t) unpack_uint(p_words[S_W_A],
+                                                 S_DIST_SHIFT,
+                                                 CODEC_BITS_OBST_DIST);
+    p_sonar->status = (comms_range_t) unpack_uint(p_words[S_W_A],
+                                                  S_STATUS_SHIFT,
+                                                  CODEC_BITS_RANGE);
+    p_sonar->state = (comms_sonar_state_t) unpack_uint(p_words[S_W_A],
+                                                       S_STATE_SHIFT,
+                                                       CODEC_BITS_SONAR_STATE);
+    p_sonar->silent = (uint8_t) unpack_uint(p_words[S_W_A], S_SILENT_SHIFT,
+                                            CODEC_BITS_SILENT);
+}
+
 /* ---- Queued event: 7 words ----
  *
  *   W0  time_ms [0:31]

@@ -130,6 +130,9 @@ void codec_text(comms_link_msg_t * p_msg, char const * p_topic, uint8_t qos,
 #define CODEC_BITS_WIDTH              (10U)   /* mm                    */
 #define CODEC_BITS_CLEARANCE          (12U)   /* mm                    */
 #define CODEC_BITS_ACTION             (3U)
+#define CODEC_BITS_RANGE              (3U)    /* comms_range_t         */
+#define CODEC_BITS_SONAR_STATE        (3U)    /* comms_sonar_state_t   */
+#define CODEC_BITS_SILENT             (8U)    /* wrapping count        */
 #define CODEC_BITS_CAL_RESULT         (3U)
 #define CODEC_BITS_CAL_OVERLAP        (9U)    /* signed, -256 = none   */
 #define CODEC_BITS_CAL_LEARNED        (1U)
@@ -143,6 +146,7 @@ void codec_text(comms_link_msg_t * p_msg, char const * p_topic, uint8_t qos,
 #define CODEC_MOTION_WORDS            (6U)    /* 24 B, was 44 B        */
 #define CODEC_LINE_WORDS              (2U)    /*  8 B, was 16 B        */
 #define CODEC_TERRAIN_WORDS           (2U)    /*  8 B, was 16 B        */
+#define CODEC_SONAR_WORDS             (1U)    /*  4 B, new             */
 #define CODEC_EVENT_WORDS             (7U)    /* 28 B, was 76 B        */
 
 /* Event codes: the queued element's type field (7 types, 3 bits). */
@@ -183,6 +187,10 @@ void codec_pack_terrain(uint32_t * p_words,
                         comms_terrain_t const * p_terrain);
 void codec_unpack_terrain(uint32_t const * p_words,
                           comms_terrain_t * p_terrain);
+
+/* Ultrasonic telemetry record: 1 word, robot/telemetry/obstacle fields. */
+void codec_pack_sonar(uint32_t * p_words, comms_sonar_t const * p_sonar);
+void codec_unpack_sonar(uint32_t const * p_words, comms_sonar_t * p_sonar);
 
 /* Queued event element: 7 words.  Unpack returns false for an unknown event
  * type: the caller drops the element (the out-of-range rule: reject, never
