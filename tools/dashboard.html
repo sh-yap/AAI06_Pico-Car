@@ -138,7 +138,7 @@
   .replay input{flex:1;min-width:0;accent-color:var(--accent)}
   .replay .btn{padding:4px 12px}
   .replay span{font-family:var(--mono);font-size:12px;color:var(--muted);min-width:180px;text-align:right;font-variant-numeric:tabular-nums}
-  .scantable{margin-top:10px;display:grid;grid-template-columns:44px 74px 1fr 1fr;font-size:12.5px;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .scantable{margin-top:10px;display:grid;grid-template-columns:44px 74px 1fr max-content 1fr;font-size:12.5px;border:1px solid var(--border);border-radius:10px;overflow:hidden}
   .scantable div{padding:6px 10px;border-bottom:1px solid var(--border);font-family:var(--mono);min-width:0;overflow-wrap:anywhere}
   .scantable .hd{font-family:var(--font);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);background:var(--surface-2)}
   .scantable .row{cursor:pointer}
@@ -342,7 +342,7 @@ function handle(M,ts,topic,j){
   else if(topic==='robot/event/barcode'){M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode '+j.code+' → '+(j.command==='UTURN'?'U-TURN':j.command)});
     const b={ts,t:tt,code:j.code,command:j.command};if(M.cur&&M.pose){Object.assign(b,carPoint(M.pose,SENSOR_AHEAD_MM,0));M.cur.barcodes.push(b);}
     M.barcodes.push(b);if(M.barcodes.length>CAP_EV)M.barcodes.splice(0,M.barcodes.length-CAP_EV);trim(M);}
-  else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0,a=+j.angle_deg||90;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm at '+a+'°'+(+j.clear_l_mm?', left clear '+j.clear_l_mm+' mm':'')+(+j.clear_r_mm?', right clear '+j.clear_r_mm+' mm':'')+' → '+j.action+(d===0?' (no reading)':'')});
+  else if(topic==='robot/event/obstacle'){const d=+j.dist_mm||0,a=+j.angle_deg||90;M.events.push({ts,t:tt,tag:'obst',txt:'Obstacle '+d+' mm at '+a+'°, width '+widthText(+j.width_mm||0)+(+j.clear_l_mm?', left clear '+j.clear_l_mm+' mm':'')+(+j.clear_r_mm?', right clear '+j.clear_r_mm+' mm':'')+' → '+j.action+(d===0?' (no reading)':'')});
     const sc={ts,t:tt,dist:d,angle:a,width:+j.width_mm||0,cl:+j.clear_l_mm||0,cr:+j.clear_r_mm||0,action:j.action,run:M.cur?M.cur.label:''};
     if(M.cur&&M.pose){const s=carPoint(M.pose,US_AHEAD_MM,0),h2=(M.pose.h+(90-a))*Math.PI/180;sc.sx=s.x;sc.sy=s.y;sc.h=M.pose.h;if(d>0){sc.ox=s.x+d*Math.sin(h2);sc.oy=s.y+d*Math.cos(h2);}M.cur.scans.push(sc);}
     M.scans.push(sc);trim(M);}
@@ -465,7 +465,7 @@ function renderScanViz(M){
   g+=`<rect x="${ox-14}" y="${oy-6}" width="28" height="12" rx="3" fill="${fg}"/>`;
   const act=S.action||'—',actCls=act==='REVERSE_RETRY'||act==='STOP'?'warn':'ok';
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="ultrasonic scan">${g}</svg>
-    <div class="vline"><span class="pill ${actCls}">${esc(act)}</span><span class="pill">closest ${S.dist?S.dist+' mm @ '+S.angle+'°':'none'}</span><span class="pill">width ${S.width>=1023?'≥1023':S.width} mm</span></div>`;
+    <div class="vline"><span class="pill ${actCls}">${esc(act)}</span><span class="pill">closest ${S.dist?S.dist+' mm @ '+S.angle+'°':'none'}</span><span class="pill">width ${esc(widthText(S.width))}</span></div>`;
   document.getElementById('scanCap').textContent='Servo sweep 60°–120° (90° = straight ahead, above 90° = left). Red = closest point, green = side proven clear (length = distance seen), ? = not proven. The car sends this summary, not every angle.';
 }
 
@@ -555,15 +555,21 @@ function updateFocusSel(groups){
   if(focusSel!=='all'&&+focusSel>=groups.length)focusSel='all';
   if(sel.value!==focusSel)sel.value=focusSel;
 }
+/* Obstacle width from Buddy 5's scan (width_mm, 10 bits).  1023 is the
+ * cap: background was not found on both sides inside the 60-120° sweep,
+ * so the obstacle is at least that wide, not measured.  0 = no width
+ * (nothing measured, or no obstacle in the path). */
+const WIDTH_CAP_MM=1023;
+function widthText(w,b_short){return w>=WIDTH_CAP_MM?'≥'+WIDTH_CAP_MM+' mm'+(b_short?'':' (wider than view)'):w>0?w+' mm':'—';}
 function renderScanTable(P,groups){
   const el=document.getElementById('scanTable');
   if(!P||!P.scans.length){el.innerHTML='';el.style.display='none';return;}
   el.style.display='';
   const t0=P.pts[0].t||0;
-  let h='<div class="hd">#</div><div class="hd">Time</div><div class="hd">Closest</div><div class="hd">Decision</div>';
+  let h='<div class="hd">#</div><div class="hd">Time</div><div class="hd">Closest</div><div class="hd">Width</div><div class="hd">Decision</div>';
   groups.forEach((G,gi)=>G.scans.forEach(s=>{const on=String(gi)===focusSel?' on':'';
     const a=`class="row${on}" data-g="${gi}"`;
-    h+=`<div ${a}>${esc(s.tag)}</div><div ${a}>${s.t!=null?((s.t-t0)/1000).toFixed(1)+' s':'—'}</div><div ${a}>${s.dist?s.dist+' mm @ '+s.angle+'°':'none'}</div><div ${a}>${esc(s.action||'')}</div>`;}));
+    h+=`<div ${a}>${esc(s.tag)}</div><div ${a}>${s.t!=null?((s.t-t0)/1000).toFixed(1)+' s':'—'}</div><div ${a}>${s.dist?s.dist+' mm @ '+s.angle+'°':'none'}</div><div ${a}${s.width>=WIDTH_CAP_MM?' title="wider than the 60–120° sweep: not measured"':''}>${esc(widthText(s.width,true))}</div><div ${a}>${esc(s.action||'')}</div>`;}));
   el.innerHTML=h;
   el.querySelectorAll('.row').forEach(d=>d.onclick=()=>{const g=d.getAttribute('data-g');focusSel=(focusSel===g)?'all':g;resetMapView();replayPos=1000;drawMap(model);});
 }

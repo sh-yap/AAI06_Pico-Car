@@ -100,6 +100,10 @@ static bool encoder_sample_valid;
 static uint32_t previous_irq_count;
 static float left_applied_output;
 static float right_applied_output;
+/* Pivot stall ramp (permille), TURN_ANGLE only: extra drive for a wheel
+   that is told to turn but is not moving. See motion_pivot_ramp(). */
+static float left_pivot_ramp;
+static float right_pivot_ramp;
 /* Learns how the wheels respond to power, for the velocity feedforward. */
 static motion_learn_t learner;
 
@@ -126,7 +130,51 @@ static void reset_velocity_control(void)
     right_stall_ms = 0U;
     left_applied_output = 0.0f;
     right_applied_output = 0.0f;
+    left_pivot_ramp = 0.0f;
+    right_pivot_ramp = 0.0f;
     motion_learn_flush(&learner);
+}
+
+/* Pivot stall ramp, one wheel, TURN_ANGLE commands only.
+   A pivot drags both tyres and the caster sideways, so it needs more power
+   than driving straight, and how much depends on the floor, the battery
+   and the caster. The PID integral adds only about 2 permille per 20 ms
+   (ki 1.2 x 80 mm/s x 0.02 s), so a wheel that has not broken away by
+   about 320 permille reaches the 1 s stall fault first (19 and 20 Nov:
+   four stall faults, all with power at 300-320 of 900). While the wheel
+   is told to turn but is not moving, the ramp grows by the PWM slew step
+   up to max_pwm_permille. It holds while the wheel moves below its
+   target and falls by the same step once the wheel reaches it, so the
+   PID takes over again. A jammed wheel still reaches the stall fault:
+   the ramp reaches 900 in about 0.6 s, and the stall time counts from
+   there, so a wheel still at full power for MOTION_STALL_MS faults.
+   Not applied to straight legs or line following: a per-wheel ramp there
+   raised the slower wheel past the moving one and yawed every leg start
+   (19 Nov, rejected). */
+static float motion_pivot_ramp(float ramp, int32_t target_mm_s,
+                               int32_t speed_mm_s, float step)
+{
+    float const maximum = (float)motion_config.max_pwm_permille;
+    int32_t const target = motion_abs_i32(target_mm_s);
+    int32_t const speed = motion_abs_i32(speed_mm_s);
+    float next = ramp;
+
+    if (target < MOTION_MIN_ACTIVE_SPEED_MM_S) {
+        next = 0.0f;
+    } else if (speed < MOTION_ZERO_SPEED_MM_S) {
+        next = ramp + step;
+    } else if (speed >= target) {
+        next = ramp - step;
+    } else {
+        /* Moving, below target: hold. */
+    }
+    if (next > maximum) {
+        next = maximum;
+    }
+    if (next < 0.0f) {
+        next = 0.0f;
+    }
+    return next;
 }
 
 static uint64_t motion_timestamp_us(void)
@@ -687,6 +735,22 @@ static void motion_loop(void)
         if (slewed_left_target < 0.0f && left_output.output > 0.0f) left_output.output = 0.0f;
         if (slewed_right_target > 0.0f && right_output.output < 0.0f) right_output.output = 0.0f;
         if (slewed_right_target < 0.0f && right_output.output > 0.0f) right_output.output = 0.0f;
+        if (active_type == MOTION_COMMAND_TURN_ANGLE) {
+            float const ramp_step = MOTION_PWM_SLEW_PER_PERIOD
+                * ((float)elapsed_ms / (float)MOTION_PERIOD_MS);
+
+            left_pivot_ramp = motion_pivot_ramp(left_pivot_ramp,
+                left_target_speed, left_speed, ramp_step);
+            right_pivot_ramp = motion_pivot_ramp(right_pivot_ramp,
+                right_target_speed, right_speed, ramp_step);
+            left_output.output += (left_target_speed < 0)
+                ? -left_pivot_ramp : left_pivot_ramp;
+            right_output.output += (right_target_speed < 0)
+                ? -right_pivot_ramp : right_pivot_ramp;
+        } else {
+            left_pivot_ramp = 0.0f;
+            right_pivot_ramp = 0.0f;
+        }
         /* A steered wheel told to go slower than the deadband power can
            drive is braked, and its PID forgets the error so it does not
            wind up while it waits.  Done before the startup boost, which
@@ -816,6 +880,7 @@ static void motion_loop(void)
         learn_mode = MOTION_LEARN_NONE;
         if (motion_status.state == MOTION_STATE_RUNNING
             && !left_boost && !right_boost
+            && (left_pivot_ramp <= 0.0f) && (right_pivot_ramp <= 0.0f)
             && motion_abs_i32(left_drive) > (int32_t)motion_config.deadband_permille
             && motion_abs_i32(left_drive) < (int32_t)motion_config.max_pwm_permille
             && motion_abs_i32(right_drive) > (int32_t)motion_config.deadband_permille
@@ -856,14 +921,30 @@ static void motion_loop(void)
             /* Each driven wheel is monitored independently. Requiring both
                wheels to be stationary would miss a disconnected encoder or
                a single jammed wheel while its partner continued moving. */
-            if (motion_abs_i32(left_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
-                motion_abs_i32(left_speed) < MOTION_ZERO_SPEED_MM_S) {
+            /* In a pivot a still wheel only counts towards the stall while
+               its ramp is at full drive, so the fault means "still at full
+               power", not "the PID was too slow". */
+            bool const b_pivot = (active_type == MOTION_COMMAND_TURN_ANGLE);
+            float const full = (float)motion_config.max_pwm_permille;
+            bool const left_ramping = b_pivot && (left_pivot_ramp < full);
+            bool const right_ramping = b_pivot && (right_pivot_ramp < full);
+
+            if (left_ramping) {
+                left_stall_ms = 0U;
+            } else if ((motion_abs_i32(left_target_speed)
+                        >= MOTION_MIN_ACTIVE_SPEED_MM_S)
+                       && (motion_abs_i32(left_speed)
+                           < MOTION_ZERO_SPEED_MM_S)) {
                 left_stall_ms += elapsed_ms;
             } else {
                 left_stall_ms = 0U;
             }
-            if (motion_abs_i32(right_target_speed) >= MOTION_MIN_ACTIVE_SPEED_MM_S &&
-                motion_abs_i32(right_speed) < MOTION_ZERO_SPEED_MM_S) {
+            if (right_ramping) {
+                right_stall_ms = 0U;
+            } else if ((motion_abs_i32(right_target_speed)
+                        >= MOTION_MIN_ACTIVE_SPEED_MM_S)
+                       && (motion_abs_i32(right_speed)
+                           < MOTION_ZERO_SPEED_MM_S)) {
                 right_stall_ms += elapsed_ms;
             } else {
                 right_stall_ms = 0U;

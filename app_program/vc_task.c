@@ -156,11 +156,29 @@
  * on the line left line following to swing 45 deg, which it rarely managed
  * (track tests 2026-11-02).  So as soon as Buddy 3 sees the line the car
  * drives on SNAP_MM (rear axle to the line sensors) to bring the axle over
- * the line, turns straight and hands over.  The way back is
- * RETURN_MAX_PCT % of back_mm, so with the +-10 deg turn slip
- * (2026-11-01) it still crosses the line. */
-#define VC_BYPASS_RETURN_MAX_PCT (130U)
+ * the line, turns straight and hands over. */
 #define VC_BYPASS_SNAP_MM        (100U)
+/* Heading-tracked bypass (2026-11-20).  With fixed turn angles and fixed
+ * leg lengths, heading drift on the straight legs (6 to 8 deg per leg,
+ * 19 and 20 Nov) was never corrected: the car crossed the line and the
+ * fixed straightening turn took it past (19 Nov), or the way back ended
+ * 90 mm short of the line and the straightening turn faced it away (20
+ * Nov).  The VC now keeps the car's heading and its sideways offset from
+ * the line, from the wheel encoders, from the start of the bypass.  Every
+ * turn after the first aims at a heading in that frame (along the line,
+ * or back_deg towards it), and the way back is as long as the measured
+ * offset needs, plus BACK_OVER_MM.
+ * UDEG_PER_COUNT: pivot turn per count of left minus right encoder,
+ * (pi * 57.7 mm / 2536 counts) / 119 mm track (motion_config.c), in
+ * micro-degrees. */
+#define VC_BYPASS_UDEG_PER_COUNT (34420)
+#define VC_BYPASS_MIN_TURN_MDEG  (1000)    /* Closer: no turn is sent.     */
+#define VC_BYPASS_BACK_OVER_MM   (50)      /* Way back: on until the axle
+                                              is this far past the line.  */
+#define VC_BYPASS_BACK_MIN_MDEG  (15000)   /* Way back length worked out
+                                              at no shallower than this.  */
+#define VC_BYPASS_BACK_LIMIT_MM  (700)     /* Longest way back.            */
+#define VC_SIN_UNIT              (10000)   /* sin_unit() scale.            */
 /* A line crossed on the parallel leg is the course bending towards the
  * bypass side, so its way on lies further that way: pivot that way until a
  * line sensor sees it, at most this far (track test 2026-11-02: on the
@@ -202,6 +220,8 @@ static uint16_t g_faults_seen;         /* Faults since the run started.   */
 static int32_t  g_left_mm_s;           /* Measured wheel speeds, for the  */
 static int32_t  g_right_mm_s;          /* run trace.                      */
 static int32_t  g_diff_counts;         /* Left minus right encoder counts. */
+static int32_t  g_left_counts;         /* Boot-relative encoder counts,   */
+static int32_t  g_right_counts;        /* for the bypass heading.         */
 static int32_t  g_sweep_origin_counts; /* g_diff_counts when the sweep began.*/
 static int32_t  g_manoeuvre_mm;        /* Motion's distance in its current
                                           command (bypass leg progress).  */
@@ -356,6 +376,8 @@ read_motion (vc_inputs_t * p_in)
         g_rec_pwm_right         = status.right_drive_permille;
 #endif
         g_manoeuvre_mm          = status.travelled_mm;
+        g_left_counts           = status.left_encoder_counts;
+        g_right_counts          = status.right_encoder_counts;
         g_diff_counts           = status.left_encoder_counts
                                   - status.right_encoder_counts;
         p_in->cal_angle_mdeg    = (g_diff_counts - g_sweep_origin_counts)
@@ -1351,6 +1373,16 @@ static bypass_step_t         g_bypass_step;
 static obst_req_t            g_path_req;
 static obstacle_line_watch_t g_line_watch;   /* Parallel leg only. */
 
+/* Bypass pose from the wheel encoders, from the start of the bypass.
+ * Heading and offset are positive towards the bypass side; the line is
+ * offset 0 and heading 0 faces along it. */
+static int32_t g_byp_diff_origin;     /* Left minus right counts at start. */
+static int32_t g_byp_prev_sum;        /* Left plus right counts, last step.*/
+static int32_t g_byp_heading_mdeg;
+static int32_t g_byp_offset_um;       /* Rear axle from the line.          */
+static bool    g_b_byp_skip;          /* Turn too small to send: the step
+                                         counts as done next time.        */
+
 
 static obstacle_action_t
 other_side (obstacle_action_t side)
@@ -1360,18 +1392,19 @@ other_side (obstacle_action_t side)
 }
 
 
-/* Encoder turn of deg towards side, calibrated per direction
+/* Encoder turn of angle_mdeg towards side, calibrated per direction
  * (OBSTACLE_TURN_LEFT_PCT / _RIGHT_PCT). */
 static void
-queue_bypass_turn (obstacle_action_t side, uint32_t deg)
+queue_bypass_turn_mdeg (obstacle_action_t side, uint32_t angle_mdeg)
 {
     motion_command_t cmd = {0};
     int32_t          mdeg;
     uint32_t const   pct = (OBSTACLE_ACTION_TURN_LEFT == side)
                            ? OBSTACLE_TURN_LEFT_PCT : OBSTACLE_TURN_RIGHT_PCT;
 
-    /* deg is at most VC_BYPASS_ATTACH_DEG, so this fits easily. */
-    mdeg = (int32_t) ((deg * 1000U * pct) / 100U);
+    /* angle_mdeg is at most 180000 (a heading error), so the product
+     * stays below 2^32 and the result fits an int32_t. */
+    mdeg = (int32_t) ((angle_mdeg * pct) / 100U);
 
     cmd.type                        = MOTION_COMMAND_TURN_ANGLE;
     cmd.timeout_ms                  = VC_BYPASS_TURN_MS;
@@ -1380,6 +1413,134 @@ queue_bypass_turn (obstacle_action_t side, uint32_t deg)
     cmd.value.turn.angle_mdeg = (OBSTACLE_ACTION_TURN_LEFT == side) ? -mdeg
                                                                     : mdeg;
     queue_manoeuvre(&cmd);
+}
+
+
+/* Encoder turn of deg towards side. */
+static void
+queue_bypass_turn (obstacle_action_t side, uint32_t deg)
+{
+    queue_bypass_turn_mdeg(side, deg * 1000U);
+}
+
+
+/* sin(angle_mdeg) x VC_SIN_UNIT, for -180..180 deg.  Bhaskara I's formula,
+ * within 0.2 percent: enough for a dead-reckoned offset. */
+static int32_t
+sin_unit (int32_t angle_mdeg)
+{
+    int64_t angle = (int64_t) abs_i32(angle_mdeg);
+    int64_t prod;
+    int64_t value;
+
+    if (angle > 180000)
+    {
+        angle = 180000;
+    }
+
+    /* In mdeg: sin x = 4 x (180 - x) / (40500 - x (180 - x)). */
+    prod  = angle * (180000 - angle);
+    value = (4 * prod * VC_SIN_UNIT) / ((40500LL * 1000000LL) - prod);
+
+    /* value is 0..VC_SIN_UNIT, so it fits an int32_t. */
+    return (0 > angle_mdeg) ? -(int32_t) value : (int32_t) value;
+}
+
+
+/* Start the bypass pose at the current encoder counts. */
+static void
+bypass_pose_reset (void)
+{
+    g_byp_diff_origin  = g_left_counts - g_right_counts;
+    g_byp_prev_sum     = g_left_counts + g_right_counts;
+    g_byp_heading_mdeg = 0;
+    g_byp_offset_um    = 0;
+    g_b_byp_skip       = false;
+}
+
+
+/* Each step: heading from the left-minus-right counts since the start,
+ * offset from the distance driven this step at that heading. */
+static void
+bypass_pose_update (obstacle_action_t side)
+{
+    int32_t const sum  = g_left_counts + g_right_counts;
+    int32_t const diff = (g_left_counts - g_right_counts) - g_byp_diff_origin;
+    int64_t       right_mdeg;
+    int64_t       step_um;
+
+    /* Left ahead of right is a right turn (Motion: positive = right). */
+    right_mdeg = ((int64_t) diff * VC_BYPASS_UDEG_PER_COUNT) / 1000;
+
+    /* Narrowed: a bypass turns far less than 2^31 mdeg. */
+    g_byp_heading_mdeg = (OBSTACLE_ACTION_TURN_LEFT == side)
+                         ? -(int32_t) right_mdeg : (int32_t) right_mdeg;
+
+    /* Mean wheel travel: (sum step / 2) counts x 181 mm / 2536 counts. */
+    step_um = ((int64_t) (sum - g_byp_prev_sum) * VC_WHEEL_MM * 1000)
+              / (2 * VC_WHEEL_COUNTS);
+    g_byp_prev_sum = sum;
+
+    /* Narrowed: one 20 ms step moves well under 1 m. */
+    g_byp_offset_um += (int32_t) ((step_um * sin_unit(g_byp_heading_mdeg))
+                                  / VC_SIN_UNIT);
+}
+
+
+/* Turn to face target_mdeg in the bypass frame, from the measured
+ * heading.  A turn under VC_BYPASS_MIN_TURN_MDEG is not sent. */
+static void
+queue_bypass_heading (obstacle_action_t side, int32_t target_mdeg)
+{
+    int32_t const error = target_mdeg - g_byp_heading_mdeg;
+
+    tm_printf((UB *) "[vc] bypass: heading %d mdeg, offset %d mm, "
+              "turn %d mdeg\n", (INT) g_byp_heading_mdeg,
+              (INT) (g_byp_offset_um / 1000), (INT) error);
+
+    if (VC_BYPASS_MIN_TURN_MDEG > abs_i32(error))
+    {
+        g_b_byp_skip = true;
+    }
+    else
+    {
+        /* abs_i32() of a difference of two headings is non-negative. */
+        queue_bypass_turn_mdeg((0 < error) ? side : other_side(side),
+                               (uint32_t) abs_i32(error));
+    }
+}
+
+
+/* Way back: far enough at the measured heading to bring the rear axle
+ * VC_BYPASS_BACK_OVER_MM past the line, at most BACK_LIMIT_MM. */
+static uint32_t
+bypass_back_mm (void)
+{
+    int32_t towards = -g_byp_heading_mdeg;
+    int64_t need_um = (int64_t) g_byp_offset_um
+                      + ((int64_t) VC_BYPASS_BACK_OVER_MM * 1000);
+    int64_t length_mm;
+
+    if (VC_BYPASS_BACK_MIN_MDEG > towards)
+    {
+        towards = VC_BYPASS_BACK_MIN_MDEG;
+    }
+
+    if (((int64_t) VC_BYPASS_BACK_OVER_MM * 1000) > need_um)
+    {
+        need_um = (int64_t) VC_BYPASS_BACK_OVER_MM * 1000;
+    }
+
+    length_mm = (need_um * VC_SIN_UNIT)
+                / ((int64_t) sin_unit(towards) * 1000);
+
+    if ((int64_t) VC_BYPASS_BACK_LIMIT_MM < length_mm)
+    {
+        length_mm = VC_BYPASS_BACK_LIMIT_MM;
+    }
+
+    /* 0..VC_BYPASS_BACK_LIMIT_MM after the limit above. */
+    return (uint32_t) length_mm;
 }
 
 
@@ -1418,6 +1579,7 @@ bypass_start (void)
 
     g_bypass_step = BYPASS_TURN_OUT;
     g_path_req    = OBST_REQ_IDLE;
+    bypass_pose_reset();
     queue_bypass_turn(plan.side, plan.turn_deg);
     tm_printf((UB *) "[vc] bypass %s: turn %u deg, out %u mm, along %u mm\n",
               (UB *) ((OBSTACLE_ACTION_TURN_LEFT == plan.side) ? "LEFT"
@@ -1490,6 +1652,7 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
     obstacle_line_seen_t   along;
     UINT                   flags = 0U;
     bool                   b_fail = false;
+    bool                   b_done = false;
 
     if (VC_STATE_BYPASS != state)
     {
@@ -1508,7 +1671,10 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
             flags = rflg.flgptn;
         }
 
-        along = watch_line_along(plan.along_mm);
+        bypass_pose_update(plan.side);
+        b_done       = p_in->b_motion_done || g_b_byp_skip;
+        g_b_byp_skip = false;
+        along        = watch_line_along(plan.along_mm);
 
         if (((BYPASS_LEG_OUT == g_bypass_step)
              || (BYPASS_LEG_ALONG == g_bypass_step)
@@ -1598,14 +1764,15 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
                 case BYPASS_LEG_OUT:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_turn(other_side(plan.side),
-                                          plan.turn_deg);
+                        /* Parallel to the line, whatever the leg out
+                         * drifted. */
+                        queue_bypass_heading(plan.side, 0);
                         g_bypass_step = BYPASS_TURN_ALONG;
                     }
                     break;
 
                 case BYPASS_TURN_ALONG:
-                    if (p_in->b_motion_done)
+                    if (b_done)
                     {
                         queue_bypass_leg(plan.along_mm);
                         obstacle_plan_line_reset(&g_line_watch);
@@ -1626,8 +1793,10 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
                     }
                     else if (p_in->b_motion_done)
                     {
-                        queue_bypass_turn(other_side(plan.side),
-                                          plan.back_deg);
+                        /* Face back_deg towards the line. */
+                        queue_bypass_heading(plan.side,
+                                             -(int32_t) (plan.back_deg
+                                                         * 1000U));
                         g_bypass_step = BYPASS_TURN_BACK;
                     }
                     else
@@ -1637,10 +1806,12 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
                     break;
 
                 case BYPASS_TURN_BACK:
-                    if (p_in->b_motion_done)
+                    if (b_done)
                     {
-                        queue_bypass_leg((plan.back_mm
-                                          * VC_BYPASS_RETURN_MAX_PCT) / 100U);
+                        /* As far as the measured offset needs, so the
+                         * axle ends just past the line if it is not
+                         * seen. */
+                        queue_bypass_leg(bypass_back_mm());
                         g_bypass_step = BYPASS_LEG_BACK;
                     }
                     break;
@@ -1648,10 +1819,11 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
                 case BYPASS_LEG_BACK:
                     if (p_in->b_motion_done)
                     {
-                        /* No line seen: by the turns the car is near it;
-                         * turn straight and let line following search. */
+                        /* No line seen: the axle is on or just past it
+                         * by the encoders; face along it and let line
+                         * following search. */
                         tm_printf((UB *) "[vc] bypass: no line seen\n");
-                        queue_bypass_turn(plan.side, plan.back_deg);
+                        queue_bypass_heading(plan.side, 0);
                         g_bypass_step = BYPASS_TURN_STRAIGHT;
                     }
                     break;
@@ -1659,13 +1831,13 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
                 case BYPASS_SNAP:
                     if (p_in->b_motion_done)
                     {
-                        queue_bypass_turn(plan.side, plan.back_deg);
+                        queue_bypass_heading(plan.side, 0);
                         g_bypass_step = BYPASS_TURN_STRAIGHT;
                     }
                     break;
 
                 case BYPASS_TURN_STRAIGHT:
-                    if (p_in->b_motion_done)
+                    if (b_done)
                     {
                         bypass_finish(p_in);
                         tm_printf((UB *) "[vc] bypass done: line following\n");
