@@ -3,9 +3,9 @@
  *
  * Buddy 3 - packed status word
  *
- * Packs line state, line error, line sensors, barcode and
- * navigation command into one 32-bit word using masks and
- * shifts, and unpacks it with reserved-code validation.
+ * Packs line state, line error, line sensors, barcode, barcode
+ * character and navigation command into one 32-bit word using masks
+ * and shifts, and unpacks it with reserved-code validation.
  * Plain C with no kernel calls, so it can be host-tested.
  */
 
@@ -39,6 +39,9 @@ buddy3_packed_t buddy3_status_pack(buddy3_status_t const *p_status)
                & B3_CAPTURE_MASK)
               << B3_CAPTURE_SHIFT;
 
+    packed |= ((uint32_t)p_status->barcode_char & B3_CHAR_MASK)
+              << B3_CHAR_SHIFT;
+
     return packed;
 }
 
@@ -51,6 +54,7 @@ bool buddy3_status_unpack(buddy3_packed_t packed, buddy3_status_t *p_status)
     uint32_t nav;
     uint32_t cal;
     uint32_t barcode_capture;
+    uint32_t barcode_char;
     int32_t line_error;
 
     if ((packed & B3_RESERVED_MASK) != 0U)
@@ -65,10 +69,12 @@ bool buddy3_status_unpack(buddy3_packed_t packed, buddy3_status_t *p_status)
     cal        = (packed >> B3_CAL_SHIFT) & B3_CAL_MASK;
     barcode_capture = (packed >> B3_CAPTURE_SHIFT)
                       & B3_CAPTURE_MASK;
+    barcode_char = (packed >> B3_CHAR_SHIFT) & B3_CHAR_MASK;
 
     /* Reserved codes: anything past the last defined enum value. */
     if ((line_state > (uint32_t)LINE_JUNCTION) ||
         (barcode > (uint32_t)BARCODE_INVALID) ||
+        (barcode_char > (uint32_t)BARCODE_CHAR_FAILED) ||
         (nav > (uint32_t)NAV_UTURN) ||
         (cal > (uint32_t)LINE_CAL_FAIL_GAP))
     {
@@ -96,6 +102,7 @@ bool buddy3_status_unpack(buddy3_packed_t packed, buddy3_status_t *p_status)
     p_status->nav_command  = (nav_command_t)nav;
     p_status->cal_state    = (line_cal_state_t)cal;
     p_status->b_barcode_capture = (0U != barcode_capture);
+    p_status->barcode_char = (uint8_t)barcode_char;
 
     return true;
 }

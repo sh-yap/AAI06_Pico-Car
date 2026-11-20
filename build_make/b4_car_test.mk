@@ -64,7 +64,8 @@ EXE_FILE := b4_robopico_car_test
 # dedicated test modules. It never links app_main.c or demo_tasks.c.
 B4_APP_SRCS := ../app_program/b4_cfg.c \
                ../app_program/b4_imu.c \
-               ../app_program/b4_proc.c
+               ../app_program/b4_proc.c \
+               ../app_program/b4_pack.c
 B4_TEST_SRCS := ../tests/buddy4/b4_car_test.c \
                 ../tests/buddy4/b4_car_test_log.c \
                 ../tests/buddy4/b4_car_test_main.c

@@ -22,7 +22,8 @@
  *     is older than the word: the age check errs towards "stale".
  *   - The scan and path results are each guarded by a counter that is
  *     odd while they are being written, so a reader can tell whether its
- *     copy is whole.
+ *     copy is whole.  The stored copies are packed (obstacle_pack.h):
+ *     68 B and 12 B, unpacked by the reader under the same counter.
  *   - Only this task writes the event-flag bits.  The controller's
  *     acknowledgement arrives as a request bit that this task consumes.
  *   - Timing uses the kernel clock, not the RP2040 TIMER, which runs at
@@ -39,6 +40,7 @@
 #include "obstacle_calc.h"
 #include "obstacle_monitor.h"
 #include "obstacle_scan.h"
+#include "obstacle_pack.h"
 #include "obstacle_servo.h"
 #include "obstacle_ultrasonic.h"
 #include "obstacle_task.h"
@@ -76,17 +78,28 @@ static uint32_t volatile status_word = 0U;
 static uint32_t volatile status_time_ms = 0U;
 static bool volatile     b_published = false;
 
-/* Latest scan (see the file comment): written only by the task. */
-static obstacle_scan_result_t scan_result;
+/* Forward readings the sensor did not answer (NO_ECHO or NOT_READY) since
+ * start-up, for telemetry.  Written only by the task with one aligned
+ * store; wraps.  A running count, so a short silent spell between two
+ * telemetry snapshots still shows (track test 2026-11-20). */
+static uint32_t volatile silent_count = 0U;
+
+/* Latest scan, in its packed stored form (obstacle_pack.h): written only
+ * by the task.  The full-width value type is the task's stack copy. */
+static obstacle_scan_packed_t scan_result;
 static uint32_t volatile      scan_counter = 0U;   /* Odd while writing. */
 static obstacle_status_t      last_report;
 
 /* Latest path check, guarded the same way. */
-static obstacle_path_t   path_result;
-static uint32_t volatile path_counter = 0U;      /* Odd while writing. */
-static uint32_t volatile path_need_mm = 0U;      /* Set by the request. */
-static uint32_t volatile path_known_mm = 0U;     /* Set by the request. */
-static obstacle_action_t volatile path_side = OBSTACLE_ACTION_TURN_RIGHT;
+static obstacle_path_packed_t path_result;
+static uint32_t volatile      path_counter = 0U;   /* Odd while writing. */
+
+/* The controller's path-check request: side, need_mm and known_mm in one
+ * word, so that the task reads one consistent set of values (one writer,
+ * one aligned 32-bit store; see obstacle_pack.h).  Zero decodes to
+ * "no need, nothing known, look straight ahead", and every request
+ * writes the word before it sets TASK_REQ_PATH. */
+static uint32_t volatile path_request = 0U;
 
 
 /*!
@@ -197,13 +210,14 @@ task_settle(uint32_t            wait_ms,
 static void
 task_scan(uint32_t * p_seq)
 {
-    obstacle_range_t  pings[OBSTACLE_SCAN_PINGS];
-    obstacle_status_t report = last_report;
-    uint32_t          start_ms = task_now_ms();
-    uint32_t          settle_ms = 0U;
-    uint32_t          angle_deg;
-    uint32_t          idx;
-    uint32_t          ping;
+    obstacle_range_t       pings[OBSTACLE_SCAN_PINGS];
+    obstacle_scan_result_t scan = { 0 };      /* Working copy (stack).  */
+    obstacle_status_t      report = last_report;
+    uint32_t               start_ms = task_now_ms();
+    uint32_t               settle_ms = 0U;
+    uint32_t               angle_deg;
+    uint32_t               idx;
+    uint32_t               ping;
 
     (void)tk_clr_flg(flag_id, ~OBSTACLE_EVT_SCAN_DONE);
     scan_counter++;                               /* Odd: being written. */
@@ -224,12 +238,13 @@ task_scan(uint32_t * p_seq)
         }
 
         obstacle_scan_reduce(angle_deg, pings, OBSTACLE_SCAN_PINGS,
-                             &scan_result.points[idx]);
+                             &scan.points[idx]);
     }
 
-    scan_result.count = OBSTACLE_SCAN_COUNT;
-    obstacle_scan_analyse(&scan_result);
-    scan_result.duration_ms = task_now_ms() - start_ms;
+    scan.count = OBSTACLE_SCAN_COUNT;
+    obstacle_scan_analyse(&scan);
+    scan.duration_ms = task_now_ms() - start_ms;
+    obstacle_pack_scan(&scan, &scan_result);
 
     scan_counter++;                               /* Even: complete.     */
     (void)tk_set_flg(flag_id, OBSTACLE_EVT_SCAN_DONE);
@@ -250,7 +265,9 @@ static void
 task_path_check(uint32_t * p_seq)
 {
     obstacle_range_t  pings[OBSTACLE_SCAN_PINGS];
+    obstacle_path_t   path = { 0 };            /* Working copy (stack).  */
     obstacle_status_t report = last_report;
+    obstacle_action_t side = OBSTACLE_ACTION_TURN_RIGHT;
     uint32_t          settle_ms = 0U;
     uint32_t          angle_deg;
     uint32_t          idx;
@@ -259,15 +276,17 @@ task_path_check(uint32_t * p_seq)
     (void)tk_clr_flg(flag_id, ~OBSTACLE_EVT_PATH_DONE);
     path_counter++;                               /* Odd: being written. */
 
-    path_result.need_mm  = path_need_mm;
-    path_result.known_mm = path_known_mm;
-    path_result.count    = 0U;
+    /* One read: the request is one word, so need_mm, known_mm and side
+     * always belong together. */
+    obstacle_unpack_path_request(path_request, &side, &path.need_mm,
+                                 &path.known_mm);
+    path.count = 0U;
     task_publish_scanning(&report, p_seq);
 
     /* Ends facing straight ahead, ready for MONITOR. */
     for (idx = 0U; idx < OBSTACLE_PATH_MAX_POINTS; idx++)
     {
-        angle_deg = obstacle_scan_path_angle(path_side, idx);
+        angle_deg = obstacle_scan_path_angle(side, idx);
         (void)obstacle_servo_set_angle(angle_deg, &settle_ms);
         task_settle(settle_ms, &report, p_seq);
 
@@ -277,11 +296,12 @@ task_path_check(uint32_t * p_seq)
             task_publish_scanning(&report, p_seq);
         }
 
-        obstacle_scan_path_add(&path_result, angle_deg, pings,
+        obstacle_scan_path_add(&path, angle_deg, pings,
                                OBSTACLE_SCAN_PINGS);
     }
 
-    obstacle_scan_path_verdict(&path_result);
+    obstacle_scan_path_verdict(&path);
+    obstacle_pack_path(&path, &path_result);
 
     path_counter++;                               /* Even: complete.     */
     (void)tk_set_flg(flag_id, OBSTACLE_EVT_PATH_DONE);
@@ -335,6 +355,12 @@ task_entry(INT stacd, void * p_exinf)
         /* Sleeps about 60 ms per reading, so lower-priority tasks run. */
         obstacle_ultrasonic_measure(&range);
         obstacle_monitor_step(&monitor, &range, &report);
+
+        if ((OBSTACLE_RANGE_NO_ECHO == range.status)
+            || (OBSTACLE_RANGE_NOT_READY == range.status))
+        {
+            silent_count++;
+        }
 
         /* Consume an acknowledgement (polling, clears only that bit). */
         if (E_OK == tk_wai_flg(flag_id, TASK_REQ_ACK,
@@ -480,6 +506,17 @@ obstacle_task_get_word(void)
 }
 
 /*!
+ * @brief Forward readings the sensor did not answer, for telemetry.
+ *
+ * @return NO_ECHO and NOT_READY readings since start-up (wraps).
+ */
+uint32_t
+obstacle_task_get_silent_count(void)
+{
+    return (silent_count);
+}
+
+/*!
  * @brief Ask for a scan.  OBSTACLE_EVT_SCAN_DONE is cleared when it starts
  *        and set when the result is ready (about 2 s).
  */
@@ -502,13 +539,24 @@ obstacle_task_request_scan(void)
 bool
 obstacle_task_get_scan(obstacle_scan_result_t * p_scan)
 {
-    bool     b_whole = false;
-    uint32_t before = scan_counter;
+    obstacle_scan_packed_t packed;
+    bool                   b_whole = false;
+    uint32_t               before;
+    uint32_t               tries;
 
-    if ((NULL != p_scan) && (0U != before) && (0U == (before % 2U)))
+    if (NULL != p_scan)
     {
-        *p_scan = scan_result;
-        b_whole = (before == scan_counter);
+        for (tries = 0U; (tries < TASK_READ_TRIES) && (!b_whole); tries++)
+        {
+            before = scan_counter;
+
+            if ((0U != before) && (0U == (before % 2U)))
+            {
+                packed = scan_result;
+                b_whole = (before == scan_counter)
+                          && obstacle_unpack_scan(&packed, p_scan);
+            }
+        }
     }
 
     return (b_whole);
@@ -524,13 +572,31 @@ obstacle_task_get_scan(obstacle_scan_result_t * p_scan)
 bool
 obstacle_task_get_profile(obstacle_profile_t * p_profile)
 {
-    obstacle_scan_result_t copy;
-    bool                   b_ok = false;
+    bool     b_ok = false;
+    bool     b_whole = false;
+    uint64_t word = 0U;
+    uint32_t before;
+    uint32_t tries;
 
-    if ((NULL != p_profile) && obstacle_task_get_scan(&copy))
+    if (NULL != p_profile)
     {
-        *p_profile = copy.profile;
-        b_ok = true;
+        /* Only the two profile words are needed, so the controller's
+         * stack does not need room for all 13 points. */
+        for (tries = 0U; (tries < TASK_READ_TRIES) && (!b_whole); tries++)
+        {
+            before = scan_counter;
+
+            if ((0U != before) && (0U == (before % 2U)))
+            {
+                word = obstacle_unpack_scan_profile(&scan_result);
+                b_whole = (before == scan_counter);
+            }
+        }
+
+        if (b_whole)
+        {
+            b_ok = obstacle_calc_unpack_profile(word, p_profile);
+        }
     }
 
     return (b_ok);
@@ -550,9 +616,9 @@ obstacle_task_request_path_check(obstacle_action_t side,
 {
     if (b_initialised)
     {
-        path_side = side;
-        path_need_mm = need_mm;
-        path_known_mm = known_mm;
+        /* One word, one store: the task can never see a new side with an
+         * old need_mm or known_mm. */
+        path_request = obstacle_pack_path_request(side, need_mm, known_mm);
         (void)tk_set_flg(flag_id, TASK_REQ_PATH);
     }
 }
@@ -567,18 +633,23 @@ obstacle_task_request_path_check(obstacle_action_t side,
 bool
 obstacle_task_get_path(obstacle_path_t * p_path)
 {
-    obstacle_path_t copy;
-    bool            b_whole = false;
-    uint32_t        before = path_counter;
+    obstacle_path_packed_t packed;
+    bool                   b_whole = false;
+    uint32_t               before;
+    uint32_t               tries;
 
-    if ((NULL != p_path) && (0U != before) && (0U == (before % 2U)))
+    if (NULL != p_path)
     {
-        copy = path_result;
-        b_whole = (before == path_counter);
-
-        if (b_whole)
+        for (tries = 0U; (tries < TASK_READ_TRIES) && (!b_whole); tries++)
         {
-            *p_path = copy;
+            before = path_counter;
+
+            if ((0U != before) && (0U == (before % 2U)))
+            {
+                packed = path_result;
+                b_whole = (before == path_counter)
+                          && obstacle_unpack_path(&packed, p_path);
+            }
         }
     }
 

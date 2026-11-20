@@ -38,6 +38,16 @@
  * 20 ms on the 10 ms kernel tick (a relative wait adds one extra tick). */
 #define BUDDY3_TASK_PERIOD_MS    10U
 
+/*
+ * Barcode sensor offset from the car's centre line, + = left (measured
+ * 71 mm, 18 Nov), and the wheel track (motion_config.c track_width_um).
+ * While the car steers, a point at offset y travels L/2 + R/2 +
+ * (L - R) * y / track, so the sensor's own distance over the print is
+ * used for bar widths instead of the wheel mean (weave correction).
+ */
+#define BUDDY3_BARCODE_OFFSET_MM 71
+#define BUDDY3_TRACK_MM          119
+
 static ID g_buddy3_tid;
 
 
@@ -355,6 +365,8 @@ void buddy3_task(INT stacd, void *exinf)
     int8_t line_error;
     uint8_t line_sensors;
     barcode_t barcode_code;
+    char barcode_character;
+    uint8_t barcode_char;
     nav_command_t nav_command;
 
     SYSTIM sys_time;
@@ -461,11 +473,16 @@ void buddy3_task(INT stacd, void *exinf)
         timestamp_ms = sys_time.lo;
 
         /*
-         * Average of both wheels - reasonable for a robot driving
-         * roughly straight over a barcode. 
+         * Distance the barcode sensor itself travelled. Equals the wheel
+         * mean when driving straight (L = R); during a weave it follows
+         * the sensor's arc instead. 64-bit so no product can overflow.
          */
-        encoder_position =
-            (enc_snapshot.left_counts + enc_snapshot.right_counts) / 2;
+        encoder_position = (int32_t)(
+            (((int64_t)enc_snapshot.left_counts
+              + (int64_t)enc_snapshot.right_counts) / 2)
+            + ((((int64_t)enc_snapshot.left_counts
+                 - (int64_t)enc_snapshot.right_counts)
+                * BUDDY3_BARCODE_OFFSET_MM) / BUDDY3_TRACK_MM));
 
         barcode_update_raw(readings.barcode, timestamp_ms, encoder_position);
         barcode_check_end(encoder_position);
@@ -498,6 +515,27 @@ void buddy3_task(INT stacd, void *exinf)
          * Both safely return NONE if nothing is ready.
          */
         barcode_code = barcode_get_code();
+
+        /* 6-bit character index for the laptop, read before
+         * barcode_get_command() clears the capture: 0 when nothing is ready,
+         * 44 when the capture did not decode, else the Code 39 position. */
+        if (BARCODE_NONE == barcode_code)
+        {
+            barcode_char = BARCODE_CHAR_NONE;
+        }
+        else
+        {
+            barcode_character = barcode_get_char();
+
+            if ('\0' == barcode_character)
+            {
+                barcode_char = BARCODE_CHAR_FAILED;
+            }
+            else
+            {
+                barcode_char = barcode_char_index(barcode_character);
+            }
+        }
 
 #if VC_RECORDER
         /* Sample the capture state before barcode_get_command() clears it.
@@ -592,6 +630,7 @@ void buddy3_task(INT stacd, void *exinf)
         status.line_error   = line_error;
         status.line_sensors = line_sensors;
         status.barcode      = barcode_code;
+        status.barcode_char = barcode_char;
         status.nav_command  = nav_command;
         status.cal_state    = line_cal_state();
         /* Same active rule as the recorder: edges stored, not finished. */

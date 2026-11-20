@@ -58,7 +58,8 @@ typedef enum
     COMMS_NAV_COUNT
 } comms_nav_t;
 
-/* Same numbering as Buddy 3's line_state_t (docs/DATA_DEFINITIONS.md). */
+/* Same numbering as Buddy 3's line_state_t
+ * (docs/DATA_REPRESENTATION.md section 2). */
 typedef enum
 {
     COMMS_LINE_LEFT = 0,
@@ -147,6 +148,41 @@ typedef struct
                                         left                            */
 } comms_terrain_t;
 
+/* Buddy 5 - one forward reading's status (same order as
+ * obstacle_range_status_t). */
+typedef enum
+{
+    COMMS_RANGE_OK = 0,
+    COMMS_RANGE_NO_ECHO,        /* sensor did not answer                */
+    COMMS_RANGE_TOO_CLOSE,
+    COMMS_RANGE_TOO_FAR,
+    COMMS_RANGE_TIMEOUT,        /* nothing reflected                    */
+    COMMS_RANGE_NOT_READY,
+    COMMS_RANGE_COUNT
+} comms_range_t;
+
+/* Buddy 5 - obstacle task state (same order as obstacle_state_t). */
+typedef enum
+{
+    COMMS_SONAR_INIT = 0,
+    COMMS_SONAR_MONITOR,
+    COMMS_SONAR_SCANNING,
+    COMMS_SONAR_SIDE_WATCH,
+    COMMS_SONAR_LINE_RECOVERY,
+    COMMS_SONAR_SENSOR_FAULT,
+    COMMS_SONAR_COUNT
+} comms_sonar_state_t;
+
+/* Buddy 5 - latest forward reading (telemetry). */
+typedef struct
+{
+    int32_t             distance_mm;  /* 0 = no valid reading           */
+    comms_range_t       status;
+    comms_sonar_state_t state;
+    uint8_t             silent;       /* unanswered readings since boot,
+                                         wraps at 256                   */
+} comms_sonar_t;
+
 /* Buddy 5 - obstacle profile (sent as an event). */
 typedef struct
 {
@@ -202,7 +238,8 @@ typedef struct
 {
     bool     b_connected;
     uint32_t events_sent;
-    uint32_t events_dropped;    /* queue full: event discarded          */
+    uint32_t events_dropped;    /* queue full or unusable: discarded;
+                                   stops at 255 (8-bit wire)           */
     uint32_t telemetry_sent;
     uint32_t commands_received;
 } comms_stats_t;
@@ -218,8 +255,12 @@ void comms_get_stats(comms_stats_t * p_stats);
 /* Vehicle controller ONLY: these replace the whole state / fault word, so a
  * second caller would overwrite the controller's value. */
 void comms_set_state(comms_state_t state);
-void comms_set_fault(uint32_t fault_flags);     /* 0 = no fault; bits 0-15
-                                                   are sent (DATA_DEFS §6) */
+void comms_set_fault(uint32_t fault_flags);     /* 0 = no fault; fault bits
+                                                   0-9 are sent, bit 4 is
+                                                   reserved.  Names and set/
+                                                   clear rules: VC_FAULT_* in
+                                                   vc_task.h (docs/DATA_/
+                                                   REPRESENTATION.md §9) */
 bool comms_begin_run(void);     /* resets the run summary               */
 bool comms_end_run(void);       /* publishes the run summary            */
 bool comms_get_command(comms_cmd_t * p_cmd);    /* true if one waiting  */
@@ -228,6 +269,7 @@ bool comms_get_command(comms_cmd_t * p_cmd);    /* true if one waiting  */
 void comms_report_motion(comms_motion_t const * p_motion);
 void comms_report_line(comms_line_t const * p_line);
 void comms_report_terrain(comms_terrain_t const * p_terrain);
+void comms_report_sonar(comms_sonar_t const * p_sonar);
 
 /* Events: queued and sent reliably.  false = queue full, event dropped. */
 bool comms_event_barcode(char code, comms_nav_t command);

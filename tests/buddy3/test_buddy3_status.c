@@ -45,25 +45,30 @@ round_trip(buddy3_status_t const * p_in)
            (out.line_error == p_in->line_error) &&
            (out.line_sensors == p_in->line_sensors) &&
            (out.barcode == p_in->barcode) &&
+           (out.barcode_char == p_in->barcode_char) &&
            (out.nav_command == p_in->nav_command) &&
            (out.cal_state == p_in->cal_state) &&
            (out.b_barcode_capture == p_in->b_barcode_capture);
 }
 
 
-/* Every combination of enum values, sensors and error boundaries. */
+/* Every combination of enum values, sensors and error boundaries; a few
+ * barcode characters, the full 0..44 range has its own loop below. */
 static void
 test_all_valid_values(void)
 {
     static int8_t const errors[] = { -127, -1, 0, 1, 64, 127 };
+    static uint8_t const chars[] = { BARCODE_CHAR_NONE, 1U, 27U,
+                                     BARCODE_CHAR_FAILED };
     buddy3_status_t s;
-    uint32_t ls, e, sn, bc, nav, cal, cap;
+    uint32_t ls, e, sn, bc, ch, nav, cal, cap;
     bool all_ok = true;
 
     for (ls = 0U; ls <= (uint32_t)LINE_JUNCTION; ls++)
     for (e = 0U; e < (sizeof errors / sizeof errors[0]); e++)
     for (sn = 0U; sn <= 3U; sn++)
     for (bc = 0U; bc <= (uint32_t)BARCODE_INVALID; bc++)
+    for (ch = 0U; ch < (sizeof chars / sizeof chars[0]); ch++)
     for (nav = 0U; nav <= (uint32_t)NAV_UTURN; nav++)
     for (cal = 0U; cal <= (uint32_t)LINE_CAL_FAIL_GAP; cal++)
     for (cap = 0U; cap <= 1U; cap++)
@@ -72,6 +77,7 @@ test_all_valid_values(void)
         s.line_error   = errors[e];
         s.line_sensors = (uint8_t)sn;
         s.barcode      = (barcode_t)bc;
+        s.barcode_char = chars[ch];
         s.nav_command  = (nav_command_t)nav;
         s.cal_state    = (line_cal_state_t)cal;
         s.b_barcode_capture = (0U != cap);
@@ -80,10 +86,10 @@ test_all_valid_values(void)
         {
             all_ok = false;
             (void)printf("  round trip failed: ls=%u err=%d sn=%u bc=%u"
-                         " nav=%u cal=%u cap=%u\n",
+                         " ch=%u nav=%u cal=%u cap=%u\n",
                          (unsigned)ls, (int)errors[e], (unsigned)sn,
-                         (unsigned)bc, (unsigned)nav, (unsigned)cal,
-                         (unsigned)cap);
+                         (unsigned)bc, (unsigned)chars[ch],
+                         (unsigned)nav, (unsigned)cal, (unsigned)cap);
         }
     }
 
@@ -91,17 +97,52 @@ test_all_valid_values(void)
 }
 
 
-/* Packed word uses only bits 0-22. */
+/* Every barcode character index 0..44 with the other fields fixed. */
+static void
+test_all_barcode_chars(void)
+{
+    buddy3_status_t s;
+    uint32_t ch;
+    bool all_ok = true;
+
+    s.line_state   = LINE_CENTRE;
+    s.line_error   = -5;
+    s.line_sensors = 2U;
+    s.barcode      = BARCODE_INVALID;
+    s.nav_command  = NAV_STRAIGHT;
+    s.cal_state    = LINE_CAL_OK;
+    s.b_barcode_capture = false;
+
+    for (ch = BARCODE_CHAR_NONE; ch <= BARCODE_CHAR_FAILED; ch++)
+    {
+        s.barcode_char = (uint8_t)ch;
+
+        if (!round_trip(&s))
+        {
+            all_ok = false;
+            (void)printf("  barcode char %u failed\n", (unsigned)ch);
+        }
+    }
+
+    check("every barcode char round-trips", all_ok);
+}
+
+
+/* Packed word uses only bits 0-28. */
 static void
 test_width(void)
 {
-    buddy3_status_t s = { LINE_JUNCTION, -127, 3U, BARCODE_INVALID, NAV_UTURN,
+    buddy3_status_t s = { LINE_JUNCTION, -127, 3U, BARCODE_INVALID,
+                          BARCODE_CHAR_FAILED, NAV_UTURN,
                           LINE_CAL_FAIL_GAP, true };
 
-    check("no bits above bit 22",
+    check("no bits above bit 28",
           (buddy3_status_pack(&s) & B3_RESERVED_MASK) == 0U);
     check("capture flag uses bit 22",
           (buddy3_status_pack(&s) & (1UL << B3_CAPTURE_SHIFT)) != 0U);
+    check("barcode char uses bits 23-28",
+          (((buddy3_status_pack(&s) >> B3_CHAR_SHIFT) & B3_CHAR_MASK)
+           == BARCODE_CHAR_FAILED));
 }
 
 
@@ -133,14 +174,20 @@ test_reserved_rejected(void)
     check("line error -128 rejected",
           !buddy3_status_unpack(0x80UL << B3_LINE_ERROR_SHIFT, &out));
 
+    for (code = BARCODE_CHAR_FAILED + 1U; code <= B3_CHAR_MASK; code++)
+    {
+        check("reserved barcode char index rejected",
+              !buddy3_status_unpack(code << B3_CHAR_SHIFT, &out));
+    }
+
     for (code = (uint32_t)LINE_CAL_FAIL_GAP + 1U; code <= B3_CAL_MASK; code++)
     {
         check("reserved calibration state rejected",
               !buddy3_status_unpack(code << B3_CAL_SHIFT, &out));
     }
 
-    check("reserved bit 23 rejected",
-          !buddy3_status_unpack(1UL << 23, &out));
+    check("reserved bit 29 rejected",
+          !buddy3_status_unpack(1UL << 29, &out));
 
     check("reserved bit 31 rejected",
           !buddy3_status_unpack(1UL << 31, &out));
@@ -151,7 +198,7 @@ test_reserved_rejected(void)
 static void
 test_reject_keeps_output(void)
 {
-    buddy3_status_t out = { LINE_RIGHT, 42, 2U, BARCODE_F, NAV_RIGHT,
+    buddy3_status_t out = { LINE_RIGHT, 42, 2U, BARCODE_F, 27U, NAV_RIGHT,
                             LINE_CAL_OK, true };
 
     (void)buddy3_status_unpack(7UL << B3_NAV_SHIFT, &out);
@@ -159,6 +206,7 @@ test_reject_keeps_output(void)
     check("rejected unpack leaves output unchanged",
           (out.line_state == LINE_RIGHT) && (out.line_error == 42) &&
           (out.line_sensors == 2U) && (out.barcode == BARCODE_F) &&
+          (out.barcode_char == 27U) &&
           (out.nav_command == NAV_RIGHT) && (out.cal_state == LINE_CAL_OK) &&
           out.b_barcode_capture);
 }
@@ -168,6 +216,7 @@ int
 main(void)
 {
     test_all_valid_values();
+    test_all_barcode_chars();
     test_width();
     test_reserved_rejected();
     test_reject_keeps_output();

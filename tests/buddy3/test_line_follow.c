@@ -1075,6 +1075,67 @@ test_ref_reset_on_recalibration(void)
 }
 
 
+/*
+ * CR1 Phase 4: the packed 3-byte sweep-history samples must read back
+ * exactly what was written for every 12-bit value, and mask (never wrap)
+ * outside it.
+ */
+
+/* LINE_CAL_HISTORY is 256 in line_follow.c (depth is not a CR1 item). */
+#define TEST_HISTORY_SAMPLES    256U
+
+static void
+test_history_storage_round_trip(void)
+{
+    uint8_t store[TEST_HISTORY_SAMPLES * LINE_CAL_SAMPLE_BYTES];
+    uint16_t centre;
+    uint16_t right;
+    uint32_t i;
+
+    for (i = 0U; i < (uint32_t)sizeof store; i++)
+    {
+        store[i] = 0U;
+    }
+
+    check("history store: 256 samples in 768 bytes", sizeof store == 768U);
+
+    line_cal_sample_pack(store, 0U, 0U, 0U);
+    line_cal_sample_unpack(store, 0U, &centre, &right);
+    check("history store: zero round-trips", (centre == 0U) && (right == 0U));
+
+    line_cal_sample_pack(store, 0U, 4095U, 0U);
+    line_cal_sample_unpack(store, 0U, &centre, &right);
+    check("history store: centre max round-trips", centre == 4095U);
+    check("history store: right 0 round-trips", right == 0U);
+
+    line_cal_sample_pack(store, 0U, 0U, 4095U);
+    line_cal_sample_unpack(store, 0U, &centre, &right);
+    check("history store: right max round-trips", right == 4095U);
+    check("history store: centre 0 round-trips", centre == 0U);
+
+    line_cal_sample_pack(store, 0U, 0x0ABU, 0x0CDU);
+    line_cal_sample_pack(store, 1U, 0x123U, 0x456U);
+    line_cal_sample_pack(store, TEST_HISTORY_SAMPLES - 1U, 0x789U, 0x0FEU);
+    line_cal_sample_unpack(store, 0U, &centre, &right);
+    check("history store: 0x0AB round-trips", centre == 0x0ABU);
+    check("history store: 0x0CD round-trips", right == 0x0CDU);
+    line_cal_sample_unpack(store, 1U, &centre, &right);
+    check("history store: next sample is independent",
+          (centre == 0x123U) && (right == 0x456U));
+    line_cal_sample_unpack(store, TEST_HISTORY_SAMPLES - 1U, &centre, &right);
+    check("history store: last ring slot round-trips",
+          (centre == 0x789U) && (right == 0x0FEU));
+
+    line_cal_sample_pack(store, 0U, 0x1FFFU, 0x1FFFU);   /* 13 bits */
+    line_cal_sample_unpack(store, 0U, &centre, &right);
+    check("history store: above 12 bits is masked",
+          (centre == 4095U) && (right == 4095U));
+    line_cal_sample_unpack(store, 1U, &centre, &right);
+    check("history store: masked write leaves the next sample",
+          (centre == 0x123U) && (right == 0x456U));
+}
+
+
 int
 main(void)
 {
@@ -1095,6 +1156,7 @@ main(void)
     test_ref_centred_no_white();
     test_ref_no_tape_or_stationary();
     test_ref_reset_on_recalibration();
+    test_history_storage_round_trip();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

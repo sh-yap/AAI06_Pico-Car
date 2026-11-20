@@ -30,6 +30,7 @@
 
 #include <tk/tkernel.h>
 
+#include "barcode.h"
 #include "build_info.h"
 #include "comms.h"
 #include "comms_link.h"
@@ -58,48 +59,54 @@
 #define QOS_1                    1U
 
 /* ------------------------------------------------------------------ *
- *  Field widths in bits (docs/BINARY_FORMAT.md, from the team's shared
- *  data definitions).  Values outside a range are clamped.
+ *  Field widths in bits (docs/BINARY_FORMAT.md).  Values outside a
+ *  range are clamped.  A width that the packed records also use comes
+ *  from comms_codec.h, so the wire format and the stored format cannot
+ *  drift apart.
  * ------------------------------------------------------------------ */
 
-#define BITS_SPEED               10U    /* signed */
-#define BITS_DRIVE               11U    /* signed, PWM permille +-1000    */
-#define BITS_ENCODER             19U    /* signed */
-#define BITS_DISTANCE            16U    /* signed */
-#define BITS_LINE_POS            3U
-#define BITS_LINE_ERROR          8U     /* signed */
-#define BITS_SENSORS             2U     /* centre, right (Buddy 3)        */
-#define BITS_MOTION_CLASS        3U
-#define BITS_TILT                11U    /* signed */
-#define BITS_HUMP                10U
-#define BITS_TURN                11U    /* signed, yaw rate in deg/s      */
+#define BITS_SPEED               CODEC_BITS_SPEED   /* signed           */
+#define BITS_DRIVE               CODEC_BITS_DRIVE   /* signed, permille */
+#define BITS_ENCODER             CODEC_BITS_ENCODER /* signed, counts   */
+#define BITS_DISTANCE            CODEC_BITS_DISTANCE /* signed, mm      */
+#define BITS_LINE_POS            CODEC_BITS_LINE_POS
+#define BITS_LINE_ERROR          CODEC_BITS_LINE_ERROR     /* signed    */
+#define BITS_SENSORS             CODEC_BITS_SENSORS
+#define BITS_MOTION_CLASS        CODEC_BITS_MOTION_CLASS
+#define BITS_TILT                CODEC_BITS_TILT     /* signed, mg      */
+#define BITS_HUMP                CODEC_BITS_HUMP     /* 0.1 mm          */
+#define BITS_TURN                CODEC_BITS_TURN     /* signed, deg/s   */
 #define BITS_SEQ                 16U
 #define BITS_STATE               4U
-#define BITS_FAULT               10U    /* ten faults (DATA_DEFS §6)      */
+#define BITS_FAULT               10U    /* fault bits 0-9, see FAULT_MASK */
 #define BITS_DROPS               8U
-#define BITS_BARCODE             3U
-#define BITS_NAV                 3U
-#define BITS_OBST_DIST           12U
-#define BITS_ANGLE               8U
-#define BITS_WIDTH               10U
-#define BITS_CLEARANCE           12U
-#define BITS_ACTION              3U
+#define BITS_BARCODE             CODEC_BITS_BARCODE
+#define BITS_NAV                 CODEC_BITS_NAV
+#define BITS_OBST_DIST           CODEC_BITS_OBST_DIST
+#define BITS_ANGLE               CODEC_BITS_ANGLE
+#define BITS_WIDTH               CODEC_BITS_WIDTH
+#define BITS_CLEARANCE           CODEC_BITS_CLEARANCE
+#define BITS_ACTION              CODEC_BITS_ACTION
+#define BITS_RANGE               CODEC_BITS_RANGE
+#define BITS_SONAR_STATE         CODEC_BITS_SONAR_STATE
+#define BITS_SILENT              CODEC_BITS_SILENT
 #define BITS_RUN                 1U
 #define BITS_RUN_MS              20U
 #define BITS_COUNT               8U
 #define BITS_CMD                 2U
 #define BITS_OK                  1U
-#define BITS_CAL_RESULT          3U
-#define BITS_CAL_OVERLAP         9U     /* signed, -256 = not measured    */
-#define BITS_ADC                 12U    /* RP2040 ADC reading             */
-#define BITS_CAL_LEARNED         1U
-#define BITS_CAL_FIRST_RIGHT     1U
-#define BITS_CAL_FLOOR           9U     /* Buddy 4 validates 1 .. 500 mg  */
-#define BITS_CAL_SAMPLES         15U    /* Buddy 4 stops at 20000         */
-#define BITS_CAL_ANGLE           8U     /* whole degrees, limit is 90     */
+#define BITS_CAL_RESULT          CODEC_BITS_CAL_RESULT
+#define BITS_CAL_OVERLAP         CODEC_BITS_CAL_OVERLAP
+#define BITS_ADC                 CODEC_BITS_ADC
+#define BITS_CAL_LEARNED         CODEC_BITS_CAL_LEARNED
+#define BITS_CAL_FIRST_RIGHT     CODEC_BITS_CAL_FIRST_RIGHT
+#define BITS_CAL_FLOOR           CODEC_BITS_CAL_FLOOR
+#define BITS_CAL_SAMPLES         CODEC_BITS_CAL_SAMPLES
+#define BITS_CAL_ANGLE           CODEC_BITS_CAL_ANGLE
 
-#define SEQ_MASK                 0xFFFFU   /* heartbeat number wraps     */
-#define FAULT_MASK               0x3FFU    /* fault bits that are sent   */
+/* Fault levels and counter limits. */
+#define FAULT_MASK               0x3FFU    /* fault bits sent: 0-9       */
+#define EVENT_DROPS_MAX          255U      /* 8-bit wire, saturates      */
 #define RUN_BEGIN                1U        /* robot/event/run: 1 = BEGIN */
 #define RUN_CODE_COUNT           2U        /* END, BEGIN                 */
 
@@ -114,46 +121,31 @@
  *  Types
  * ------------------------------------------------------------------ */
 
-typedef enum
-{
-    EVENT_BARCODE = 0,
-    EVENT_HUMP,
-    EVENT_OBSTACLE,
-    EVENT_MOTION,
-    EVENT_RUN_BEGIN,
-    EVENT_RUN_END,
-    EVENT_CALIBRATION
-} event_type_t;
-
-typedef struct
-{
-    uint32_t         time_ms;
-    uint8_t          type;          /* event_type_t                      */
-    uint8_t          code;          /* barcode character                 */
-    uint8_t          kind;          /* nav command / motion class        */
-    int32_t          value;         /* hump peak height, 0.1 mm          */
-    comms_obstacle_t obstacle;
-    comms_calibration_t calibration;
-} comms_event_t;
-
-/* Seqlock-protected latest value.  One writer task, one reader (radio). */
+/* Seqlock-protected latest value, stored packed.  One writer task, one
+ * reader (the radio task); each word is written with one aligned store. */
 typedef struct
 {
     volatile uint32_t seq;          /* odd while the writer is copying   */
-    comms_motion_t    data;
+    uint32_t          words[CODEC_MOTION_WORDS];
 } motion_slot_t;
 
 typedef struct
 {
     volatile uint32_t seq;
-    comms_line_t      data;
+    uint32_t          words[CODEC_LINE_WORDS];
 } line_slot_t;
 
 typedef struct
 {
     volatile uint32_t seq;
-    comms_terrain_t   data;
+    uint32_t          words[CODEC_TERRAIN_WORDS];
 } terrain_slot_t;
+
+typedef struct
+{
+    volatile uint32_t seq;
+    uint32_t          words[CODEC_SONAR_WORDS];
+} sonar_slot_t;
 
 #if COMMS_JSON
 /* ------------------------------------------------------------------ *
@@ -188,6 +180,17 @@ static char const * const g_avoid_names[COMMS_AVOID_COUNT] =
     "STOP", "CONTINUE", "TURN_LEFT", "TURN_RIGHT", "REVERSE_RETRY"
 };
 
+static char const * const g_range_names[COMMS_RANGE_COUNT] =
+{
+    "OK", "NO_ECHO", "TOO_CLOSE", "TOO_FAR", "TIMEOUT", "NOT_READY"
+};
+
+static char const * const g_sonar_names[COMMS_SONAR_COUNT] =
+{
+    "INIT", "MONITOR", "SCANNING", "SIDE_WATCH", "LINE_RECOVERY",
+    "SENSOR_FAULT"
+};
+
 static char const * const g_cmd_names[CMD_CODE_COUNT] =
 {
     "unknown", "start", "stop", "status"
@@ -214,18 +217,20 @@ static ID                g_drop_mtx;     /* guards g_events_dropped      */
 static volatile bool     g_b_ready;
 static volatile bool     g_b_connected;
 static volatile uint32_t g_state = (uint32_t) COMMS_STATE_INIT;
-static volatile uint32_t g_fault;
+static volatile uint16_t g_fault;           /* bits 0-9 (FAULT_MASK)      */
 static volatile uint32_t g_events_sent;
-static volatile uint32_t g_events_dropped;
+static volatile uint8_t  g_events_dropped;  /* saturates, 8-bit wire      */
 static volatile uint32_t g_telemetry_sent;
 static volatile uint32_t g_commands_received;
 
 static motion_slot_t     g_motion_slot;
 static line_slot_t       g_line_slot;
 static terrain_slot_t    g_terrain_slot;
+static sonar_slot_t      g_sonar_slot;
 
 static UW g_event_buf[(COMMS_EVENT_QUEUE_LEN
-                       * (sizeof(comms_event_t) + COMMS_MBF_OVERHEAD))
+                       * ((CODEC_EVENT_WORDS * sizeof(uint32_t))
+                          + COMMS_MBF_OVERHEAD))
                       / sizeof(UW)];
 static UW g_cmd_buf[(COMMS_CMD_QUEUE_LEN
                      * (sizeof(uint32_t) + COMMS_MBF_OVERHEAD))
@@ -311,28 +316,36 @@ slot_read (volatile uint32_t const * p_seq, void const * p_src,
 }
 
 
+/* One event dropped: saturates at the 8-bit wire width, so the heartbeat
+ * counter cannot wrap.  Callers may be on both cores. */
 static void
 count_drop (void)
 {
     if (E_OK == tk_loc_mtx(g_drop_mtx, TMO_FEVR))
     {
-        g_events_dropped++;             /* Callers may be on both cores. */
+        if (EVENT_DROPS_MAX > g_events_dropped)
+        {
+            g_events_dropped++;
+        }
+
         (void) tk_unl_mtx(g_drop_mtx);
     }
 }
 
 
 static bool
-queue_event (comms_event_t * p_event)
+queue_event (codec_event_t * p_event)
 {
-    bool b_queued = false;
+    uint32_t words[CODEC_EVENT_WORDS];
+    bool     b_queued = false;
 
     if (g_b_ready)
     {
         p_event->time_ms = now_ms();
+        codec_pack_event(words, p_event);
 
-        if (E_OK == tk_snd_mbf(g_event_mbf, p_event,
-                               (INT) sizeof(*p_event), TMO_POL))
+        if (E_OK == tk_snd_mbf(g_event_mbf, words, (INT) sizeof(words),
+                               TMO_POL))
         {
             b_queued = true;
         }
@@ -359,7 +372,7 @@ comms_init (void)
     {
         cmbf.mbfatr = TA_TFIFO;
         cmbf.bufsz  = (SZ) sizeof(g_event_buf);
-        cmbf.maxmsz = (INT) sizeof(comms_event_t);
+        cmbf.maxmsz = (INT) (CODEC_EVENT_WORDS * sizeof(uint32_t));
         cmbf.bufptr = g_event_buf;
         g_event_mbf = tk_cre_mbf(&cmbf);
 
@@ -448,16 +461,19 @@ comms_set_state (comms_state_t state)
 void
 comms_set_fault (uint32_t fault_flags)
 {
-    g_fault = fault_flags;      /* One 32-bit store: never torn. */
+    /* Fault bits 0-9 (FAULT_MASK); bit 4 is reserved.  Names and rules:
+       VC_FAULT_* in vc_task.h (docs/DATA_REPRESENTATION.md section 9).
+       One aligned 16-bit store by the single writer: never torn. */
+    g_fault = (uint16_t) (fault_flags & FAULT_MASK);
 }
 
 
 bool
 comms_begin_run (void)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
 
-    event.type = (uint8_t) EVENT_RUN_BEGIN;
+    event.type = (uint8_t) CODEC_EVENT_RUN_BEGIN;
     return queue_event(&event);
 }
 
@@ -465,9 +481,9 @@ comms_begin_run (void)
 bool
 comms_end_run (void)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
 
-    event.type = (uint8_t) EVENT_RUN_END;
+    event.type = (uint8_t) CODEC_EVENT_RUN_END;
     return queue_event(&event);
 }
 
@@ -492,10 +508,13 @@ comms_get_command (comms_cmd_t * p_cmd)
 void
 comms_report_motion (comms_motion_t const * p_motion)
 {
+    uint32_t words[CODEC_MOTION_WORDS];
+
     if (NULL != p_motion)
     {
-        slot_write(&g_motion_slot.seq, &g_motion_slot.data, p_motion,
-                   sizeof(*p_motion));
+        codec_pack_motion(words, p_motion);
+        slot_write(&g_motion_slot.seq, g_motion_slot.words, words,
+                   (uint32_t) sizeof(words));
     }
 }
 
@@ -503,10 +522,13 @@ comms_report_motion (comms_motion_t const * p_motion)
 void
 comms_report_line (comms_line_t const * p_line)
 {
+    uint32_t words[CODEC_LINE_WORDS];
+
     if (NULL != p_line)
     {
-        slot_write(&g_line_slot.seq, &g_line_slot.data, p_line,
-                   sizeof(*p_line));
+        codec_pack_line(words, p_line);
+        slot_write(&g_line_slot.seq, g_line_slot.words, words,
+                   (uint32_t) sizeof(words));
     }
 }
 
@@ -514,10 +536,27 @@ comms_report_line (comms_line_t const * p_line)
 void
 comms_report_terrain (comms_terrain_t const * p_terrain)
 {
+    uint32_t words[CODEC_TERRAIN_WORDS];
+
     if (NULL != p_terrain)
     {
-        slot_write(&g_terrain_slot.seq, &g_terrain_slot.data, p_terrain,
-                   sizeof(*p_terrain));
+        codec_pack_terrain(words, p_terrain);
+        slot_write(&g_terrain_slot.seq, g_terrain_slot.words, words,
+                   (uint32_t) sizeof(words));
+    }
+}
+
+
+void
+comms_report_sonar (comms_sonar_t const * p_sonar)
+{
+    uint32_t words[CODEC_SONAR_WORDS];
+
+    if (NULL != p_sonar)
+    {
+        codec_pack_sonar(words, p_sonar);
+        slot_write(&g_sonar_slot.seq, g_sonar_slot.words, words,
+                   (uint32_t) sizeof(words));
     }
 }
 
@@ -525,9 +564,9 @@ comms_report_terrain (comms_terrain_t const * p_terrain)
 bool
 comms_event_barcode (char code, comms_nav_t command)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
 
-    event.type = (uint8_t) EVENT_BARCODE;
+    event.type = (uint8_t) CODEC_EVENT_BARCODE;
     event.code = (uint8_t) code;
     event.kind = (uint8_t) command;
     return queue_event(&event);
@@ -537,9 +576,9 @@ comms_event_barcode (char code, comms_nav_t command)
 bool
 comms_event_hump (int32_t peak_dmm)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
 
-    event.type  = (uint8_t) EVENT_HUMP;
+    event.type  = (uint8_t) CODEC_EVENT_HUMP;
     event.value = peak_dmm;
     return queue_event(&event);
 }
@@ -548,12 +587,12 @@ comms_event_hump (int32_t peak_dmm)
 bool
 comms_event_obstacle (comms_obstacle_t const * p_obstacle)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
     bool          b_queued = false;
 
     if (NULL != p_obstacle)
     {
-        event.type     = (uint8_t) EVENT_OBSTACLE;
+        event.type     = (uint8_t) CODEC_EVENT_OBSTACLE;
         event.obstacle = *p_obstacle;
         b_queued       = queue_event(&event);
     }
@@ -565,9 +604,9 @@ comms_event_obstacle (comms_obstacle_t const * p_obstacle)
 bool
 comms_event_motion (comms_motion_class_t motion)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
 
-    event.type = (uint8_t) EVENT_MOTION;
+    event.type = (uint8_t) CODEC_EVENT_MOTION;
     event.kind = (uint8_t) motion;
     return queue_event(&event);
 }
@@ -575,12 +614,12 @@ comms_event_motion (comms_motion_class_t motion)
 bool
 comms_event_calibration (comms_calibration_t const * p_calibration)
 {
-    comms_event_t event = {0};
+    codec_event_t event = {0};
     bool          b_queued = false;
 
     if (NULL != p_calibration)
     {
-        event.type        = (uint8_t) EVENT_CALIBRATION;
+        event.type        = (uint8_t) CODEC_EVENT_CALIBRATION;
         event.calibration = *p_calibration;
         b_queued          = queue_event(&event);
     }
@@ -609,11 +648,12 @@ typedef struct
 static snapshot_tx_t g_motion_tx;
 static snapshot_tx_t g_line_tx;
 static snapshot_tx_t g_terrain_tx;
+static snapshot_tx_t g_sonar_tx;
 
 static uint32_t g_published_state = 0xFFFFFFFFU;
 static uint32_t g_published_fault = 0xFFFFFFFFU;
 static uint32_t g_heartbeat_ms;
-static uint32_t g_heartbeat_seq;
+static uint16_t g_heartbeat_seq;        /* wraps at the 16-bit wire width */
 static bool     g_b_info_pending;
 
 /* Acknowledgements of commands received, oldest first. */
@@ -645,33 +685,14 @@ non_negative (int32_t value)
 }
 
 
-/* Barcode character -> 3-bit code, the course set (Buddy 3's barcode.c):
- * 0 NONE, 1 A, 2 Y, 3 X, 4 spare, 5 F, 6 Z, 7 INVALID.  Y and X took the
- * design's unused B and C (3 Nov); A, F and Z keep their codes so older
- * logs still decode them. */
+/* Barcode character -> 6-bit code: 0 NONE, 1..43 Code 39 in the decoder's
+ * table order ('0'..'9', 'A'..'Z', '-', '.', ' ', '$', '/', '+', '%'),
+ * 44 INVALID (barcode.c owns the table; the laptop lists the same 45
+ * names).  '?' is the failed-decode character vc_task sends. */
 static uint32_t
 barcode_code (char code)
 {
-    static char const g_letters[] = { 'A', 'Y', 'X', '\0', 'F', 'Z' };
-    uint32_t          result = 7U;
-    uint32_t          i;
-
-    if ('\0' == code)
-    {
-        result = 0U;
-    }
-    else
-    {
-        for (i = 0U; (7U == result) && (i < sizeof(g_letters)); i++)
-        {
-            if (g_letters[i] == code)
-            {
-                result = i + 1U;
-            }
-        }
-    }
-
-    return result;
+    return (uint32_t) barcode_char_index(code);
 }
 
 
@@ -684,6 +705,7 @@ resend_all (void)
     g_motion_tx.b_force  = true;
     g_line_tx.b_force    = true;
     g_terrain_tx.b_force = true;
+    g_sonar_tx.b_force   = true;
 }
 
 
@@ -719,15 +741,17 @@ ack_pop (ack_t * p_ack)
 }
 
 
-/* FNV-1a over the field values: a cheap fingerprint of a snapshot. */
+/* FNV-1a over the packed words: a cheap fingerprint of a snapshot.  The
+ * slot already holds the clamped values, so this hashes exactly what would
+ * be published. */
 static uint32_t
-hash_fields (int32_t const * p_fields, uint32_t count)
+hash_words (uint32_t const * p_words, uint32_t count)
 {
-    uint8_t const * p_byte = (uint8_t const *) p_fields;
+    uint8_t const * p_byte = (uint8_t const *) p_words;
     uint32_t        hash   = 2166136261U;
     uint32_t        i;
 
-    for (i = 0U; i < (count * (uint32_t) sizeof(int32_t)); i++)
+    for (i = 0U; i < (count * (uint32_t) sizeof(uint32_t)); i++)
     {
         hash ^= p_byte[i];
         hash *= 16777619U;
@@ -752,7 +776,7 @@ run_period_ms (void)
    interval passed (late subscribers catch up), or its content changed.
    An unchanged seq means nothing new was written: no hashing needed. */
 static bool
-snapshot_due (snapshot_tx_t * p_tx, uint32_t seq, int32_t const * p_fields,
+snapshot_due (snapshot_tx_t * p_tx, uint32_t seq, uint32_t const * p_words,
               uint32_t count, uint32_t now, uint32_t period_ms,
               uint32_t * p_hash)
 {
@@ -765,12 +789,12 @@ snapshot_due (snapshot_tx_t * p_tx, uint32_t seq, int32_t const * p_fields,
     {
         if (p_tx->b_force || (age >= COMMS_REFRESH_MS))
         {
-            *p_hash = hash_fields(p_fields, count);
+            *p_hash = hash_words(p_words, count);
             b_due   = true;
         }
         else if (seq != p_tx->last_seq)
         {
-            *p_hash        = hash_fields(p_fields, count);
+            *p_hash        = hash_words(p_words, count);
             b_due          = (*p_hash != p_tx->last_hash);
             p_tx->last_seq = seq;       /* Looked at; don't hash again. */
         }
@@ -799,7 +823,7 @@ snapshot_sent (snapshot_tx_t * p_tx, uint32_t seq, uint32_t hash,
 
 static void
 build_calibration (codec_writer_t * p_w, comms_link_msg_t * p_msg,
-                   comms_event_t const * p_event)
+                   codec_event_t const * p_event)
 {
     comms_calibration_t const * const p_cal = &p_event->calibration;
 
@@ -841,15 +865,15 @@ build_calibration (codec_writer_t * p_w, comms_link_msg_t * p_msg,
 
 
 static void
-build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
+build_event (comms_link_msg_t * p_msg, codec_event_t const * p_event)
 {
     codec_writer_t                 w;
     comms_obstacle_t const * const p_obs = &p_event->obstacle;
     char                           code[2];
 
-    switch ((event_type_t) p_event->type)
+    switch ((codec_event_type_t) p_event->type)
     {
-        case EVENT_BARCODE:
+        case CODEC_EVENT_BARCODE:
             code[0] = (char) p_event->code;
             code[1] = '\0';
             g_barcode_count++;
@@ -862,7 +886,7 @@ build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
                            p_event->kind, BITS_NAV);
             break;
 
-        case EVENT_HUMP:
+        case CODEC_EVENT_HUMP:
             g_hump_count++;
 
             if (p_event->value > g_max_hump_dmm)
@@ -878,7 +902,7 @@ build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
                            non_negative(g_max_hump_dmm), BITS_HUMP);
             break;
 
-        case EVENT_OBSTACLE:
+        case CODEC_EVENT_OBSTACLE:
             g_obstacle_count++;
             codec_begin(&w, p_msg, "robot/event/obstacle", QOS_1, false,
                         p_event->time_ms);
@@ -899,7 +923,7 @@ build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
                            (uint32_t) p_obs->action, BITS_ACTION);
             break;
 
-        case EVENT_MOTION:
+        case CODEC_EVENT_MOTION:
             codec_begin(&w, p_msg, "robot/event/motion", QOS_1, false,
                         p_event->time_ms);
             codec_put_name(&w, CODEC_KEY("motion"),
@@ -907,11 +931,11 @@ build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
                            p_event->kind, BITS_MOTION_CLASS);
             break;
 
-        case EVENT_CALIBRATION:
+        case CODEC_EVENT_CALIBRATION:
             build_calibration(&w, p_msg, p_event);
             break;
 
-        case EVENT_RUN_BEGIN:
+        case CODEC_EVENT_RUN_BEGIN:
             g_b_run_active   = true;
             g_run_start_ms   = p_event->time_ms;
             g_run_start_mm   = g_last_distance_mm;
@@ -925,7 +949,7 @@ build_event (comms_link_msg_t * p_msg, comms_event_t const * p_event)
                            RUN_CODE_COUNT, RUN_BEGIN, BITS_RUN);
             break;
 
-        case EVENT_RUN_END:
+        case CODEC_EVENT_RUN_END:
         default:
             /* Retained, so a dashboard that connects later still sees
                the result of the last run. */
@@ -956,44 +980,45 @@ static bool
 next_motion (comms_link_msg_t * p_msg, uint32_t now)
 {
     comms_motion_t motion;
+    uint32_t       words[CODEC_MOTION_WORDS];
     codec_writer_t w;
-    int32_t        fields[11];
     uint32_t       seq;
     uint32_t       hash;
     bool           b_built = false;
 
-    if (slot_read(&g_motion_slot.seq, &g_motion_slot.data, &motion,
-                  sizeof(motion), &seq))
+    if (slot_read(&g_motion_slot.seq, g_motion_slot.words, words,
+                  (uint32_t) sizeof(words), &seq))
     {
+        codec_unpack_motion(words, &motion);
         g_last_distance_mm = motion.distance_mm;
-        fields[0] = motion.speed_left_mm_s;
-        fields[1] = motion.speed_right_mm_s;
-        fields[2] = motion.encoder_left;
-        fields[3] = motion.encoder_right;
-        fields[4] = motion.distance_mm;
-        fields[5] = motion.target_left_mm_s;
-        fields[6] = motion.target_right_mm_s;
-        fields[7] = motion.slewed_left_mm_s;
-        fields[8] = motion.slewed_right_mm_s;
-        fields[9] = motion.drive_left_permille;
-        fields[10] = motion.drive_right_permille;
 
-        if (snapshot_due(&g_motion_tx, seq, fields, 11U, now, run_period_ms(),
-                         &hash))
+        if (snapshot_due(&g_motion_tx, seq, words, CODEC_MOTION_WORDS, now,
+                         run_period_ms(), &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/motion", QOS_0, false,
                         now);
-            codec_put_int(&w, CODEC_KEY("spd_l_mm_s"), fields[0], BITS_SPEED);
-            codec_put_int(&w, CODEC_KEY("spd_r_mm_s"), fields[1], BITS_SPEED);
-            codec_put_int(&w, CODEC_KEY("enc_l"), fields[2], BITS_ENCODER);
-            codec_put_int(&w, CODEC_KEY("enc_r"), fields[3], BITS_ENCODER);
-            codec_put_int(&w, CODEC_KEY("dist_mm"), fields[4], BITS_DISTANCE);
-            codec_put_int(&w, CODEC_KEY("tgt_l_mm_s"), fields[5], BITS_SPEED);
-            codec_put_int(&w, CODEC_KEY("tgt_r_mm_s"), fields[6], BITS_SPEED);
-            codec_put_int(&w, CODEC_KEY("slew_l_mm_s"), fields[7], BITS_SPEED);
-            codec_put_int(&w, CODEC_KEY("slew_r_mm_s"), fields[8], BITS_SPEED);
-            codec_put_int(&w, CODEC_KEY("pwm_l"), fields[9], BITS_DRIVE);
-            codec_put_int(&w, CODEC_KEY("pwm_r"), fields[10], BITS_DRIVE);
+            codec_put_int(&w, CODEC_KEY("spd_l_mm_s"),
+                          motion.speed_left_mm_s, BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("spd_r_mm_s"),
+                          motion.speed_right_mm_s, BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("enc_l"), motion.encoder_left,
+                          BITS_ENCODER);
+            codec_put_int(&w, CODEC_KEY("enc_r"), motion.encoder_right,
+                          BITS_ENCODER);
+            codec_put_int(&w, CODEC_KEY("dist_mm"), motion.distance_mm,
+                          BITS_DISTANCE);
+            codec_put_int(&w, CODEC_KEY("tgt_l_mm_s"),
+                          motion.target_left_mm_s, BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("tgt_r_mm_s"),
+                          motion.target_right_mm_s, BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("slew_l_mm_s"),
+                          motion.slewed_left_mm_s, BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("slew_r_mm_s"),
+                          motion.slewed_right_mm_s, BITS_SPEED);
+            codec_put_int(&w, CODEC_KEY("pwm_l"),
+                          motion.drive_left_permille, BITS_DRIVE);
+            codec_put_int(&w, CODEC_KEY("pwm_r"),
+                          motion.drive_right_permille, BITS_DRIVE);
             codec_end(&w);
             snapshot_sent(&g_motion_tx, seq, hash, now);
             b_built = true;
@@ -1008,23 +1033,19 @@ static bool
 next_line (comms_link_msg_t * p_msg, uint32_t now)
 {
     comms_line_t   line;
+    uint32_t       words[CODEC_LINE_WORDS];
     codec_writer_t w;
-    int32_t        fields[5];
     uint32_t       seq;
     uint32_t       hash;
     bool           b_built = false;
 
-    if (slot_read(&g_line_slot.seq, &g_line_slot.data, &line,
-                  sizeof(line), &seq))
+    if (slot_read(&g_line_slot.seq, g_line_slot.words, words,
+                  (uint32_t) sizeof(words), &seq))
     {
-        fields[0] = (int32_t) line.position;
-        fields[1] = line.error;
-        fields[2] = (int32_t) line.sensors;
-        fields[3] = (int32_t) line.centre_adc;
-        fields[4] = (int32_t) line.right_adc;
+        codec_unpack_line(words, &line);
 
-        if (snapshot_due(&g_line_tx, seq, fields, 5U, now, run_period_ms(),
-                         &hash))
+        if (snapshot_due(&g_line_tx, seq, words, CODEC_LINE_WORDS, now,
+                         run_period_ms(), &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/line", QOS_0, false,
                         now);
@@ -1052,23 +1073,27 @@ static bool
 next_terrain (comms_link_msg_t * p_msg, uint32_t now)
 {
     comms_terrain_t terrain;
+    uint32_t        words[CODEC_TERRAIN_WORDS];
+    uint32_t        fields[CODEC_TERRAIN_WORDS + 1U];
     codec_writer_t  w;
-    int32_t         fields[5];
     uint32_t        seq;
     uint32_t        hash;
     bool            b_built = false;
 
-    if (slot_read(&g_terrain_slot.seq, &g_terrain_slot.data, &terrain,
-                  sizeof(terrain), &seq))
+    if (slot_read(&g_terrain_slot.seq, g_terrain_slot.words, words,
+                  (uint32_t) sizeof(words), &seq))
     {
-        fields[0] = (int32_t) terrain.motion;
-        fields[1] = terrain.tilt_mg;
-        fields[2] = terrain.hump_dmm;
-        fields[3] = g_max_hump_dmm;
-        fields[4] = terrain.turn_dps;
+        codec_unpack_terrain(words, &terrain);
 
-        if (snapshot_due(&g_terrain_tx, seq, fields, 5U, now,
-                         COMMS_TELEMETRY_MS, &hash))
+        /* The run's highest hump is tracked here, not in the slot, so it
+           is hashed too: a new record is sent when it rises. */
+        fields[0] = words[0];
+        fields[1] = words[1];
+        fields[CODEC_TERRAIN_WORDS] = (uint32_t) g_max_hump_dmm;
+
+        if (snapshot_due(&g_terrain_tx, seq, fields,
+                         CODEC_TERRAIN_WORDS + 1U, now, COMMS_TELEMETRY_MS,
+                         &hash))
         {
             codec_begin(&w, p_msg, "robot/telemetry/terrain", QOS_0, false,
                         now);
@@ -1093,10 +1118,74 @@ next_terrain (comms_link_msg_t * p_msg, uint32_t now)
 }
 
 
+static bool
+next_sonar (comms_link_msg_t * p_msg, uint32_t now)
+{
+    comms_sonar_t  sonar;
+    uint32_t       words[CODEC_SONAR_WORDS];
+    codec_writer_t w;
+    uint32_t       seq;
+    uint32_t       hash;
+    bool           b_built = false;
+
+    if (slot_read(&g_sonar_slot.seq, g_sonar_slot.words, words,
+                  (uint32_t) sizeof(words), &seq))
+    {
+        codec_unpack_sonar(words, &sonar);
+
+        if (snapshot_due(&g_sonar_tx, seq, words, CODEC_SONAR_WORDS, now,
+                         COMMS_TELEMETRY_MS, &hash))
+        {
+            codec_begin(&w, p_msg, "robot/telemetry/obstacle", QOS_0, false,
+                        now);
+            codec_put_uint(&w, CODEC_KEY("dist_mm"),
+                           non_negative(sonar.distance_mm), BITS_OBST_DIST);
+            codec_put_name(&w, CODEC_KEY("status"), CODEC_NAMES(g_range_names),
+                           COMMS_RANGE_COUNT, (uint32_t) sonar.status,
+                           BITS_RANGE);
+            codec_put_name(&w, CODEC_KEY("state"), CODEC_NAMES(g_sonar_names),
+                           COMMS_SONAR_COUNT, (uint32_t) sonar.state,
+                           BITS_SONAR_STATE);
+            codec_put_uint(&w, CODEC_KEY("silent"), sonar.silent,
+                           BITS_SILENT);
+            codec_end(&w);
+            snapshot_sent(&g_sonar_tx, seq, hash, now);
+            b_built = true;
+        }
+    }
+
+    return b_built;
+}
+
+
+/* One queued event, unpacked.  An unknown event type (a corrupted element)
+ * is dropped and counted, as the out-of-range rule requires. */
+static bool
+next_event (codec_event_t * p_event)
+{
+    uint32_t words[CODEC_EVENT_WORDS];
+    bool     b_got = false;
+
+    if ((INT) sizeof(words) == tk_rcv_mbf(g_event_mbf, words, TMO_POL))
+    {
+        if (codec_unpack_event(words, p_event))
+        {
+            b_got = true;
+        }
+        else
+        {
+            count_drop();
+        }
+    }
+
+    return b_got;
+}
+
+
 bool
 comms_link_next (comms_link_msg_t * p_msg)
 {
-    comms_event_t  event;
+    codec_event_t  event;
     codec_writer_t w;
     ack_t          ack;
     uint32_t       now;
@@ -1108,7 +1197,7 @@ comms_link_next (comms_link_msg_t * p_msg)
     {
         now     = now_ms();
         state   = g_state;
-        fault   = g_fault & FAULT_MASK;
+        fault   = (uint32_t) g_fault;   /* Masked when it was set. */
         b_built = true;
 
         if (ack_pop(&ack))
@@ -1140,8 +1229,7 @@ comms_link_next (comms_link_msg_t * p_msg)
             codec_put_uint(&w, CODEC_KEY("fault"), fault, BITS_FAULT);
             codec_end(&w);
         }
-        else if ((INT) sizeof(event)
-                 == tk_rcv_mbf(g_event_mbf, &event, TMO_POL))
+        else if (next_event(&event))
         {
             /* 3. Queued events, oldest first. */
             build_event(p_msg, &event);
@@ -1160,7 +1248,7 @@ comms_link_next (comms_link_msg_t * p_msg)
             g_heartbeat_ms = now;
             g_heartbeat_seq++;
             codec_begin(&w, p_msg, "robot/heartbeat", QOS_0, false, now);
-            codec_put_uint(&w, CODEC_KEY("seq"), g_heartbeat_seq & SEQ_MASK,
+            codec_put_uint(&w, CODEC_KEY("seq"), (uint32_t) g_heartbeat_seq,
                            BITS_SEQ);
             codec_put_name(&w, CODEC_KEY("state"), CODEC_NAMES(g_state_names),
                            COMMS_STATE_COUNT, state, BITS_STATE);
@@ -1173,7 +1261,8 @@ comms_link_next (comms_link_msg_t * p_msg)
         {
             /* 5. Telemetry snapshots, in turn. */
             b_built = next_motion(p_msg, now) || next_line(p_msg, now)
-                      || next_terrain(p_msg, now);
+                      || next_terrain(p_msg, now)
+                      || next_sonar(p_msg, now);
         }
     }
 

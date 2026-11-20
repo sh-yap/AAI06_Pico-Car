@@ -25,7 +25,12 @@ $script:Avoid   = @('STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY')
 $script:Cmd     = @('unknown','start','stop','status')
 $script:Run     = @('END','BEGIN')
 $script:CalResult = @('OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP')
-$script:Barcode = @('','A','Y','X','?','F','Z','INVALID')
+$script:Range   = @('OK','NO_ECHO','TOO_CLOSE','TOO_FAR','TIMEOUT','NOT_READY')
+$script:Sonar   = @('INIT','MONITOR','SCANNING','SIDE_WATCH','LINE_RECOVERY','SENSOR_FAULT')
+$script:Barcode = @('','0','1','2','3','4','5','6','7','8','9','A','B','C','D',
+                   'E','F','G','H','I','J','K','L','M','N','O','P','Q','R',
+                   'S','T','U','V','W','X','Y','Z','-','.',' ','$','/','+','%',
+                   'INVALID')
 
 $script:VersionBits = 2          # binary header: 2-bit version (2), 32-bit time
 $script:BinaryVersion = 2
@@ -46,10 +51,12 @@ $script:RobotFormat = @{
     'robot/telemetry/terrain' = @((F motion n 3 $script:Motion), (F tilt_mg s 11),
                                   (F hump_dmm u 10), (F max_hump_dmm u 10),
                                   (F turn_dps s 11))
+    'robot/telemetry/obstacle' = @((F dist_mm u 12), (F status n 3 $script:Range),
+                                   (F state n 3 $script:Sonar), (F silent u 8))
     'robot/heartbeat'         = @((F seq u 16), (F state n 4 $script:States),
                                   (F fault u 10), (F ev_drop u 8))
     'robot/state'             = @((F state n 4 $script:States), (F fault u 10))
-    'robot/event/barcode'     = @((F code n 3 $script:Barcode), (F command n 3 $script:Nav))
+    'robot/event/barcode'     = @((F code n 6 $script:Barcode), (F command n 3 $script:Nav))
     'robot/event/hump'        = @((F peak_dmm u 10), (F max_dmm u 10))
     'robot/event/calibration' = @((F result n 3 $script:CalResult),
                                   (F centre_low u 12), (F centre_high u 12),

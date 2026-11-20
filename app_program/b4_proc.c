@@ -94,6 +94,7 @@
 #include <stdint.h>
 
 #include "b4_proc.h"
+#include "b4_pack.h"
 
 #define B4_PROC_MAX_SAMPLE_MG       4000
 #define B4_PROC_MAX_COUNTER          255U
@@ -221,11 +222,18 @@ typedef struct
 typedef struct
 {
     b4_cfg_config_t   config;
-    b4_types_status_t status;
+    /* Stored in its packed form (b4_pack.h): 17 words instead of the
+     * full-width b4_types_status_t. The working copy is the full-width
+     * local of the current call. */
+    b4_status_packed_t status;
     int32_t           previous_x_mg;
     int32_t           previous_y_mg;
     int32_t           previous_z_mg;
-    int32_t           incline_window_mg[B4_CFG_MAX_SETTLE_SAMPLES];
+    /* Filtered hump-axis incline per sample, milli-g in int16_t. The
+     * validated sample range keeps every entry inside +-4000 mg, and the
+     * store clamps to int16_t. Sums and means over the window stay in
+     * int32_t locals. */
+    int16_t           incline_window_mg[B4_CFG_MAX_SETTLE_SAMPLES];
     int32_t           incline_baseline_mg;
     int32_t           noise_q8;
     int32_t           drive_speed_mm_s;
@@ -296,6 +304,16 @@ typedef struct
 } b4_proc_state_t;
 
 static b4_proc_state_t g_b4_proc_state = {0};
+
+/* Full-width working copy of the status that the current call is updating.
+ *
+ * Only the stored copy is packed (rule 1 and the calculation rule in
+ * docs/DATA_REPRESENTATION.md section 0). Every entry point that changes the
+ * status unpacks the stored record into its own local, points this at that
+ * local, and packs the result back before returning; b4_proc_get_status()
+ * unpacks straight into its caller's snapshot. The pointer is NULL outside
+ * those calls, so no helper can run without a working copy. */
+static b4_types_status_t * g_p_b4_proc_status = NULL;
 
 /** @brief Return an absolute milli-g value without signed overflow.
  *
@@ -696,6 +714,27 @@ b4_proc_complete_hump (void);
 static int32_t
 b4_proc_clamp_cross (int64_t value);
 
+/** @brief Unpack the stored status into the call's full-width working copy.
+ *
+ * @param p_status The working copy owned by the calling entry point.
+ */
+static void
+b4_proc_status_load (b4_types_status_t * p_status)
+{
+    /* A damaged record only yields the enum no-data codes, which the
+     * working copy treats like any other state. */
+    (void)b4_unpack_status(&g_b4_proc_state.status, p_status);
+    g_p_b4_proc_status = p_status;
+}
+
+/** @brief Pack the working copy back into the stored status record. */
+static void
+b4_proc_status_store (void)
+{
+    b4_pack_status(g_p_b4_proc_status, &g_b4_proc_state.status);
+    g_p_b4_proc_status = NULL;
+}
+
 /** @brief Initialize filtering and terrain analysis from a validated config.
  *
  * @param p_config The processing configuration.
@@ -705,7 +744,9 @@ b4_types_result_t
 b4_proc_init (const b4_cfg_config_t * p_config)
 {
     b4_types_result_t result = B4_RESULT_INVALID_ARGUMENT;
+    b4_types_status_t status_view;
 
+    b4_proc_status_load(&status_view);
     g_b4_proc_state.b_initialized = false;
 
     if (NULL != p_config)
@@ -716,6 +757,9 @@ b4_proc_init (const b4_cfg_config_t * p_config)
             b4_proc_state_t initial_state = {0};
 
             g_b4_proc_state = initial_state;
+            /* The whole-struct reset also zeroes the stored status, so the
+             * working copy is reloaded from it. */
+            b4_proc_status_load(&status_view);
             g_b4_proc_state.config = *p_config;
             /* NOTE: Without a START sweep the estimate begins at its
              * lowest allowed value. Every real START seeds it from the
@@ -724,27 +768,29 @@ b4_proc_init (const b4_cfg_config_t * p_config)
             g_b4_proc_state.noise_q8 =
                 (int32_t)B4_PROC_MIN_THRESHOLD_MG * B4_PROC_NOISE_SCALE;
             b4_proc_refresh_thresholds();
-            g_b4_proc_state.status.health = B4_HEALTH_READY;
-            g_b4_proc_state.status.fault = B4_FAULT_NONE;
-            g_b4_proc_state.status.tilt = B4_TILT_UNKNOWN;
-            g_b4_proc_state.status.motion = B4_MOTION_QUIET;
-            g_b4_proc_state.status.hump_state = B4_HUMP_NORMAL;
-            g_b4_proc_state.status.turn = B4_TURN_UNKNOWN;
-            g_b4_proc_state.status.b_sample_stale = true;
+            status_view.health = B4_HEALTH_READY;
+            status_view.fault = B4_FAULT_NONE;
+            status_view.tilt = B4_TILT_UNKNOWN;
+            status_view.motion = B4_MOTION_QUIET;
+            status_view.hump_state = B4_HUMP_NORMAL;
+            status_view.turn = B4_TURN_UNKNOWN;
+            status_view.b_sample_stale = true;
             g_b4_proc_state.b_initialized = true;
         }
         else
         {
-            g_b4_proc_state.status.health = B4_HEALTH_FAULT;
-            g_b4_proc_state.status.fault = B4_FAULT_HARDWARE_CONFIG;
+            status_view.health = B4_HEALTH_FAULT;
+            status_view.fault = B4_FAULT_HARDWARE_CONFIG;
         }
     }
     else
     {
         g_b4_proc_state.b_initialized = false;
-        g_b4_proc_state.status.health = B4_HEALTH_FAULT;
-        g_b4_proc_state.status.fault = B4_FAULT_HARDWARE_CONFIG;
+        status_view.health = B4_HEALTH_FAULT;
+        status_view.fault = B4_FAULT_HARDWARE_CONFIG;
     }
+
+    b4_proc_status_store();
 
     return (result);
 }
@@ -758,6 +804,7 @@ b4_types_result_t
 b4_proc_process (const b4_types_sample_t * p_sample)
 {
     b4_types_result_t result = B4_RESULT_OK;
+    b4_types_status_t status_view;
     uint32_t sample_delta_mg = 0U;
     uint32_t amplitude_mg = 0U;
     uint32_t hump_amplitude_mg = 0U;
@@ -767,6 +814,8 @@ b4_proc_process (const b4_types_sample_t * p_sample)
     int32_t incline_delta_mg = 0;
     bool b_settled = false;
     bool b_sharp_change = false;
+
+    b4_proc_status_load(&status_view);
 
     if (NULL == p_sample)
     {
@@ -779,17 +828,17 @@ b4_proc_process (const b4_types_sample_t * p_sample)
     else if (false == b4_proc_sample_is_valid(p_sample))
     {
         result = B4_RESULT_INVALID_SAMPLE;
-        g_b4_proc_state.status.health = B4_HEALTH_DEGRADED;
-        g_b4_proc_state.status.fault = B4_FAULT_INVALID_SAMPLE;
-        g_b4_proc_state.status.sample.b_valid = false;
-        g_b4_proc_state.status.b_sample_stale = true;
-        g_b4_proc_state.status.b_sharp_change_event = false;
-        g_b4_proc_state.status.b_lift_cue = false;
-        g_b4_proc_state.status.b_hump_started_event = false;
-        g_b4_proc_state.status.b_hump_completed_event = false;
-        g_b4_proc_state.status.b_jolt_window_active = false;
-        g_b4_proc_state.status.tilt = B4_TILT_UNKNOWN;
-        g_b4_proc_state.status.motion = B4_MOTION_QUIET;
+        status_view.health = B4_HEALTH_DEGRADED;
+        status_view.fault = B4_FAULT_INVALID_SAMPLE;
+        status_view.sample.b_valid = false;
+        status_view.b_sample_stale = true;
+        status_view.b_sharp_change_event = false;
+        status_view.b_lift_cue = false;
+        status_view.b_hump_started_event = false;
+        status_view.b_hump_completed_event = false;
+        status_view.b_jolt_window_active = false;
+        status_view.tilt = B4_TILT_UNKNOWN;
+        status_view.motion = B4_MOTION_QUIET;
         g_b4_proc_state.jolt.b_window = false;
         g_b4_proc_state.jolt.b_pending = false;
         b4_proc_abort_hump();
@@ -810,22 +859,22 @@ b4_proc_process (const b4_types_sample_t * p_sample)
             g_b4_proc_state.b_previous_sample_valid = false;
         }
 
-        g_b4_proc_state.status.sample = *p_sample;
-        g_b4_proc_state.status.drive_speed_mm_s =
+        status_view.sample = *p_sample;
+        status_view.drive_speed_mm_s =
             g_b4_proc_state.drive_speed_mm_s;
-        g_b4_proc_state.status.fault = B4_FAULT_NONE;
-        g_b4_proc_state.status.b_sample_stale = false;
-        g_b4_proc_state.status.b_sharp_change_event = false;
-        g_b4_proc_state.status.b_hump_started_event = false;
-        g_b4_proc_state.status.b_hump_completed_event = false;
+        status_view.fault = B4_FAULT_NONE;
+        status_view.b_sample_stale = false;
+        status_view.b_sharp_change_event = false;
+        status_view.b_hump_started_event = false;
+        status_view.b_hump_completed_event = false;
         b4_proc_jolt_update(p_sample->timestamp_ms);
-        g_b4_proc_state.status.b_jolt_window_active =
+        status_view.b_jolt_window_active =
             g_b4_proc_state.jolt.b_window;
 
         sample_delta_mg = b4_proc_sample_delta_mg(p_sample);
         b_sharp_change =
             b4_proc_detect_sharp_change(p_sample, &sharp_score_mg);
-        g_b4_proc_state.status.b_sharp_change_event = b_sharp_change;
+        status_view.b_sharp_change_event = b_sharp_change;
 
         /* Latch the cue for the Vehicle Controller and let it expire on the
          * sample clock, so a dropped word cannot keep it set. */
@@ -839,23 +888,23 @@ b4_proc_process (const b4_types_sample_t * p_sample)
             ((p_sample->timestamp_ms - g_b4_proc_state.cue_start_ms) <
              B4_PROC_CUE_HOLD_MS))
         {
-            g_b4_proc_state.status.b_lift_cue = true;
+            status_view.b_lift_cue = true;
         }
         else
         {
             g_b4_proc_state.b_cue_active = false;
-            g_b4_proc_state.status.b_lift_cue = false;
+            status_view.b_lift_cue = false;
         }
 
         b4_proc_update_filter(p_sample);
         b4_proc_update_tilt();
 
         vertical_mg = b4_proc_status_axis_mg(
-            &g_b4_proc_state.status,
+            g_p_b4_proc_status,
             g_b4_proc_state.config.vertical_axis);
         vertical_mg = b4_proc_oriented_value(
             vertical_mg, g_b4_proc_state.config.vertical_sign);
-        g_b4_proc_state.status.vertical_deviation_mg =
+        status_view.vertical_deviation_mg =
             vertical_mg -
             (int32_t)g_b4_proc_state.config.gravity_reference_mg;
 
@@ -864,17 +913,17 @@ b4_proc_process (const b4_types_sample_t * p_sample)
          * settled-window history before it drives the detector. Only its
          * magnitude is used, so it needs no orientation sign. */
         incline_mg = b4_proc_status_axis_mg(
-            &g_b4_proc_state.status,
+            g_p_b4_proc_status,
             g_b4_proc_state.config.hump_axis);
-        g_b4_proc_state.status.roll_mg = incline_mg;
+        status_view.roll_mg = incline_mg;
         b4_proc_push_incline(incline_mg);
         b_settled = b4_proc_incline_is_settled();
         b4_proc_update_baseline(incline_mg, b_settled);
-        g_b4_proc_state.status.roll_baseline_mg =
+        status_view.roll_baseline_mg =
             g_b4_proc_state.incline_baseline_mg;
         incline_delta_mg = b4_proc_incline_delta_mg();
         amplitude_mg = b4_proc_abs_mg(incline_delta_mg);
-        g_b4_proc_state.status.incline_delta_mg = incline_delta_mg;
+        status_view.incline_delta_mg = incline_delta_mg;
         /* Only the hump detector uses the median of the raw samples. The
          * noise, level, baseline and height keep the filtered signal. */
         hump_amplitude_mg = b4_proc_hump_amplitude_mg(p_sample);
@@ -889,15 +938,14 @@ b4_proc_process (const b4_types_sample_t * p_sample)
              * samples raise the in-window level. The sample that confirms
              * a hump is already part of it and does not train the level. */
             if ((true == g_b4_proc_state.jolt.b_window) &&
-                ((B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state) ||
-                 (B4_HUMP_CANDIDATE ==
-                  g_b4_proc_state.status.hump_state)))
+                ((B4_HUMP_NORMAL == status_view.hump_state) ||
+                 (B4_HUMP_CANDIDATE == status_view.hump_state)))
             {
                 b4_proc_jolt_learn_hump(hump_amplitude_mg);
             }
         }
-        else if ((B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
-                 (B4_HUMP_COMPLETE != g_b4_proc_state.status.hump_state))
+        else if ((B4_HUMP_NORMAL != status_view.hump_state) &&
+                 (B4_HUMP_COMPLETE != status_view.hump_state))
         {
             /* The spike is already in the filter and the height window, so
              * this crossing's height cannot be trusted. */
@@ -919,6 +967,8 @@ b4_proc_process (const b4_types_sample_t * p_sample)
         g_b4_proc_state.b_previous_sample_valid = true;
     }
 
+    b4_proc_status_store();
+
     return (result);
 }
 
@@ -932,6 +982,9 @@ b4_types_result_t
 b4_proc_process_magnetometer (const b4_types_mag_sample_t * p_mag_sample)
 {
     b4_types_result_t result = B4_RESULT_OK;
+    b4_types_status_t status_view;
+
+    b4_proc_status_load(&status_view);
 
     if (NULL == p_mag_sample)
     {
@@ -943,12 +996,12 @@ b4_proc_process_magnetometer (const b4_types_mag_sample_t * p_mag_sample)
     }
     else
     {
-        g_b4_proc_state.status.mag_sample = *p_mag_sample;
+        status_view.mag_sample = *p_mag_sample;
 
         if (false == p_mag_sample->b_valid)
         {
-            g_b4_proc_state.status.b_mag_valid = false;
-            g_b4_proc_state.status.turn = B4_TURN_UNKNOWN;
+            status_view.b_mag_valid = false;
+            status_view.turn = B4_TURN_UNKNOWN;
             g_b4_proc_state.b_mag_previous_valid = false;
             result = B4_RESULT_INVALID_SAMPLE;
         }
@@ -978,30 +1031,32 @@ b4_proc_process_magnetometer (const b4_types_mag_sample_t * p_mag_sample)
             g_b4_proc_state.b_mag_previous_valid = true;
             g_b4_proc_state.b_mag_seen = true;
             g_b4_proc_state.mag_last_timestamp_ms = p_mag_sample->timestamp_ms;
-            g_b4_proc_state.status.b_mag_valid = true;
-            g_b4_proc_state.status.turn_cross = b4_proc_clamp_cross(
+            status_view.b_mag_valid = true;
+            status_view.turn_cross = b4_proc_clamp_cross(
                 g_b4_proc_state.turn_cross_accum);
 
             if (g_b4_proc_state.turn_cross_accum >
                 (int64_t)g_b4_proc_state.config.turn_cross_threshold)
             {
-                g_b4_proc_state.status.turn =
+                status_view.turn =
                     (0 < g_b4_proc_state.config.turn_sign) ?
                     B4_TURN_LEFT : B4_TURN_RIGHT;
             }
             else if (g_b4_proc_state.turn_cross_accum <
                      -(int64_t)g_b4_proc_state.config.turn_cross_threshold)
             {
-                g_b4_proc_state.status.turn =
+                status_view.turn =
                     (0 < g_b4_proc_state.config.turn_sign) ?
                     B4_TURN_RIGHT : B4_TURN_LEFT;
             }
             else
             {
-                g_b4_proc_state.status.turn = B4_TURN_STRAIGHT;
+                status_view.turn = B4_TURN_STRAIGHT;
             }
         }
     }
+
+    b4_proc_status_store();
 
     return (result);
 }
@@ -1024,7 +1079,7 @@ b4_proc_get_status (uint32_t now_ms, b4_types_status_t * p_status)
     }
     else
     {
-        *p_status = g_b4_proc_state.status;
+        (void)b4_unpack_status(&g_b4_proc_state.status, p_status);
 
         if (false == g_b4_proc_state.b_initialized)
         {
@@ -1076,6 +1131,9 @@ b4_types_result_t
 b4_proc_reset_run_stats (void)
 {
     b4_types_result_t result = B4_RESULT_OK;
+    b4_types_status_t status_view;
+
+    b4_proc_status_load(&status_view);
 
     if (false == g_b4_proc_state.b_initialized)
     {
@@ -1083,22 +1141,22 @@ b4_proc_reset_run_stats (void)
     }
     else
     {
-        g_b4_proc_state.status.highest_hump_peak_mg = 0U;
-        g_b4_proc_state.status.current_hump_peak_mg = 0U;
-        g_b4_proc_state.status.hump_peak_height_um = 0U;
-        g_b4_proc_state.status.highest_hump_height_um = 0U;
-        g_b4_proc_state.status.b_hump_height_valid = false;
-        g_b4_proc_state.status.sample.b_valid = false;
-        g_b4_proc_state.status.b_sample_stale = true;
-        g_b4_proc_state.status.b_sharp_change_event = false;
-        g_b4_proc_state.status.b_lift_cue = false;
-        g_b4_proc_state.status.b_hump_started_event = false;
-        g_b4_proc_state.status.b_hump_completed_event = false;
-        g_b4_proc_state.status.b_jolt_window_active = false;
-        g_b4_proc_state.status.fault = B4_FAULT_NONE;
-        g_b4_proc_state.status.health = B4_HEALTH_READY;
-        g_b4_proc_state.status.tilt = B4_TILT_UNKNOWN;
-        g_b4_proc_state.status.motion = B4_MOTION_QUIET;
+        status_view.highest_hump_peak_mg = 0U;
+        status_view.current_hump_peak_mg = 0U;
+        status_view.hump_peak_height_um = 0U;
+        status_view.highest_hump_height_um = 0U;
+        status_view.b_hump_height_valid = false;
+        status_view.sample.b_valid = false;
+        status_view.b_sample_stale = true;
+        status_view.b_sharp_change_event = false;
+        status_view.b_lift_cue = false;
+        status_view.b_hump_started_event = false;
+        status_view.b_hump_completed_event = false;
+        status_view.b_jolt_window_active = false;
+        status_view.fault = B4_FAULT_NONE;
+        status_view.health = B4_HEALTH_READY;
+        status_view.tilt = B4_TILT_UNKNOWN;
+        status_view.motion = B4_MOTION_QUIET;
         g_b4_proc_state.b_filter_ready = false;
         g_b4_proc_state.b_previous_sample_valid = false;
         g_b4_proc_state.b_have_last_change = false;
@@ -1130,21 +1188,23 @@ b4_proc_reset_run_stats (void)
         g_b4_proc_state.noise_q8 =
             (int32_t)B4_PROC_MIN_THRESHOLD_MG * B4_PROC_NOISE_SCALE;
         b4_proc_refresh_thresholds();
-        g_b4_proc_state.status.noise_mg = 0U;
-        g_b4_proc_state.status.incline_delta_mg = 0;
-        g_b4_proc_state.status.detectable_height_um = 0U;
+        status_view.noise_mg = 0U;
+        status_view.incline_delta_mg = 0;
+        status_view.detectable_height_um = 0U;
         g_b4_proc_state.turn_cross_accum = 0;
         g_b4_proc_state.b_mag_previous_valid = false;
-        g_b4_proc_state.status.roll_mg = 0;
-        g_b4_proc_state.status.roll_baseline_mg = 0;
-        g_b4_proc_state.status.learn_count = 0U;
-        g_b4_proc_state.status.drive_speed_mm_s = 0;
+        status_view.roll_mg = 0;
+        status_view.roll_baseline_mg = 0;
+        status_view.learn_count = 0U;
+        status_view.drive_speed_mm_s = 0;
         g_b4_proc_state.b_learn = false;
         g_b4_proc_state.b_forward = false;
         g_b4_proc_state.drive_speed_mm_s = 0;
-        g_b4_proc_state.status.turn_cross = 0;
-        g_b4_proc_state.status.turn = B4_TURN_UNKNOWN;
+        status_view.turn_cross = 0;
+        status_view.turn = B4_TURN_UNKNOWN;
     }
+
+    b4_proc_status_store();
 
     return (result);
 }
@@ -1162,6 +1222,9 @@ b4_types_result_t
 b4_proc_clear_run_maximum (void)
 {
     b4_types_result_t result = B4_RESULT_OK;
+    b4_types_status_t status_view;
+
+    b4_proc_status_load(&status_view);
 
     if (false == g_b4_proc_state.b_initialized)
     {
@@ -1169,13 +1232,13 @@ b4_proc_clear_run_maximum (void)
     }
     else
     {
-        g_b4_proc_state.status.highest_hump_peak_mg = 0U;
-        g_b4_proc_state.status.highest_hump_height_um = 0U;
-        g_b4_proc_state.status.hump_peak_height_um = 0U;
-        g_b4_proc_state.status.b_hump_height_valid = false;
+        status_view.highest_hump_peak_mg = 0U;
+        status_view.highest_hump_height_um = 0U;
+        status_view.hump_peak_height_um = 0U;
+        status_view.b_hump_height_valid = false;
         g_b4_proc_state.learn_count = 0U;
         g_b4_proc_state.travel_um = 0U;
-        g_b4_proc_state.status.learn_count = 0U;
+        status_view.learn_count = 0U;
         /* The sharp-change filters, window and refractory clock restart,
          * and the cue latch is dropped, but the learned sharp-change
          * statistics are kept. */
@@ -1184,13 +1247,15 @@ b4_proc_clear_run_maximum (void)
         g_b4_proc_state.last_change_ms = 0U;
         g_b4_proc_state.b_cue_active = false;
         g_b4_proc_state.cue_start_ms = 0U;
-        g_b4_proc_state.status.b_sharp_change_event = false;
-        g_b4_proc_state.status.b_lift_cue = false;
+        status_view.b_sharp_change_event = false;
+        status_view.b_lift_cue = false;
         g_b4_proc_state.jolt.b_window = false;
         g_b4_proc_state.jolt.b_pending = false;
         g_b4_proc_state.jolt.hump_level_mg = 0U;
-        g_b4_proc_state.status.b_jolt_window_active = false;
+        status_view.b_jolt_window_active = false;
     }
+
+    b4_proc_status_store();
 
     return (result);
 }
@@ -1199,6 +1264,9 @@ b4_types_result_t
 b4_proc_calibrate_level (void)
 {
     b4_types_result_t result = B4_RESULT_OK;
+    b4_types_status_t status_view;
+
+    b4_proc_status_load(&status_view);
 
     if (false == g_b4_proc_state.b_initialized)
     {
@@ -1224,8 +1292,10 @@ b4_proc_calibrate_level (void)
         g_b4_proc_state.jolt.b_window = false;
         g_b4_proc_state.jolt.b_pending = false;
         g_b4_proc_state.jolt.hump_level_mg = 0U;
-        g_b4_proc_state.status.b_jolt_window_active = false;
+        status_view.b_jolt_window_active = false;
     }
+
+    b4_proc_status_store();
 
     return (result);
 }
@@ -1259,7 +1329,10 @@ b4_types_result_t
 b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg)
 {
     b4_types_result_t result = B4_RESULT_INVALID_ARGUMENT;
+    b4_types_status_t status_view;
     uint32_t floor_mg = 0U;
+
+    b4_proc_status_load(&status_view);
 
     if (NULL != p_floor_mg)
     {
@@ -1305,6 +1378,8 @@ b4_proc_calibrate_apply (uint32_t min_samples, uint32_t * p_floor_mg)
             }
         }
     }
+
+    b4_proc_status_store();
 
     return (result);
 }
@@ -1561,24 +1636,24 @@ b4_proc_update_filter (const b4_types_sample_t * p_sample)
 {
     if (false == g_b4_proc_state.b_filter_ready)
     {
-        g_b4_proc_state.status.filtered_x_mg = p_sample->accel_x_mg;
-        g_b4_proc_state.status.filtered_y_mg = p_sample->accel_y_mg;
-        g_b4_proc_state.status.filtered_z_mg = p_sample->accel_z_mg;
+        g_p_b4_proc_status->filtered_x_mg = p_sample->accel_x_mg;
+        g_p_b4_proc_status->filtered_y_mg = p_sample->accel_y_mg;
+        g_p_b4_proc_status->filtered_z_mg = p_sample->accel_z_mg;
         g_b4_proc_state.b_filter_ready = true;
     }
     else
     {
-        g_b4_proc_state.status.filtered_x_mg = b4_proc_filter_value(
+        g_p_b4_proc_status->filtered_x_mg = b4_proc_filter_value(
             p_sample->accel_x_mg,
-            g_b4_proc_state.status.filtered_x_mg,
+            g_p_b4_proc_status->filtered_x_mg,
             g_b4_proc_state.config.filter_divisor);
-        g_b4_proc_state.status.filtered_y_mg = b4_proc_filter_value(
+        g_p_b4_proc_status->filtered_y_mg = b4_proc_filter_value(
             p_sample->accel_y_mg,
-            g_b4_proc_state.status.filtered_y_mg,
+            g_p_b4_proc_status->filtered_y_mg,
             g_b4_proc_state.config.filter_divisor);
-        g_b4_proc_state.status.filtered_z_mg = b4_proc_filter_value(
+        g_p_b4_proc_status->filtered_z_mg = b4_proc_filter_value(
             p_sample->accel_z_mg,
-            g_b4_proc_state.status.filtered_z_mg,
+            g_p_b4_proc_status->filtered_z_mg,
             g_b4_proc_state.config.filter_divisor);
     }
 }
@@ -1595,10 +1670,10 @@ static void
 b4_proc_update_tilt (void)
 {
     int32_t forward_mg = b4_proc_status_axis_mg(
-        &g_b4_proc_state.status,
+        g_p_b4_proc_status,
         g_b4_proc_state.config.forward_axis);
     int32_t lateral_mg = b4_proc_status_axis_mg(
-        &g_b4_proc_state.status,
+        g_p_b4_proc_status,
         g_b4_proc_state.config.lateral_axis);
     uint32_t forward_abs_mg = 0U;
     uint32_t lateral_abs_mg = 0U;
@@ -1618,41 +1693,44 @@ b4_proc_update_tilt (void)
 
     if ((true == b_forward_tilt) && (true == b_lateral_tilt))
     {
-        g_b4_proc_state.status.tilt = B4_TILT_COMPOUND;
+        g_p_b4_proc_status->tilt = B4_TILT_COMPOUND;
     }
     else if (true == b_forward_tilt)
     {
         if (forward_mg > 0)
         {
-            g_b4_proc_state.status.tilt = B4_TILT_FORWARD;
+            g_p_b4_proc_status->tilt = B4_TILT_FORWARD;
         }
         else
         {
-            g_b4_proc_state.status.tilt = B4_TILT_BACKWARD;
+            g_p_b4_proc_status->tilt = B4_TILT_BACKWARD;
         }
     }
     else if (true == b_lateral_tilt)
     {
         if (lateral_mg > 0)
         {
-            g_b4_proc_state.status.tilt = B4_TILT_RIGHT;
+            g_p_b4_proc_status->tilt = B4_TILT_RIGHT;
         }
         else
         {
-            g_b4_proc_state.status.tilt = B4_TILT_LEFT;
+            g_p_b4_proc_status->tilt = B4_TILT_LEFT;
         }
     }
     else
     {
-        g_b4_proc_state.status.tilt = B4_TILT_LEVEL;
+        g_p_b4_proc_status->tilt = B4_TILT_LEVEL;
     }
 }
 
 static void
 b4_proc_push_incline (int32_t incline_mg)
 {
+    /* The entry is stored as int16_t milli-g. Validation keeps the filtered
+     * incline inside the +-4000 mg sample range, so the clamp only guards
+     * the narrower store. */
     g_b4_proc_state.incline_window_mg[g_b4_proc_state.incline_window_next] =
-        incline_mg;
+        b4_pack_mg_i16(incline_mg);
     /* The modulo result is below the 100-entry window size, so this
      * narrowing conversion is exact. */
     g_b4_proc_state.incline_window_next = (uint8_t)(
@@ -1681,7 +1759,8 @@ b4_proc_incline_spread_mg (void)
 
     for (uint8_t sample = 0U; sample < window_samples; sample++)
     {
-        int32_t incline_mg = g_b4_proc_state.incline_window_mg[index];
+        int32_t incline_mg =
+            (int32_t)g_b4_proc_state.incline_window_mg[index];
 
         if (0U == sample)
         {
@@ -1717,7 +1796,7 @@ b4_proc_incline_mean_mg (uint8_t window_samples)
 
     for (uint8_t sample = 0U; sample < window_samples; sample++)
     {
-        sum_mg += g_b4_proc_state.incline_window_mg[index];
+        sum_mg += (int32_t)g_b4_proc_state.incline_window_mg[index];
         index = (uint8_t)((index + 1U) % B4_CFG_MAX_SETTLE_SAMPLES);
     }
 
@@ -1758,7 +1837,7 @@ b4_proc_update_baseline (int32_t incline_mg, bool b_settled)
         }
     }
     else if ((true == b_settled) &&
-             (B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state))
+             (B4_HUMP_NORMAL == g_p_b4_proc_status->hump_state))
     {
         uint32_t delta_mg = b4_proc_difference_mg(
             incline_mg, g_b4_proc_state.incline_baseline_mg);
@@ -1841,8 +1920,8 @@ b4_proc_update_height (void)
 
     if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
         (g_b4_proc_state.incline_window_count >= mean_samples) &&
-        (B4_HUMP_NORMAL != g_b4_proc_state.status.hump_state) &&
-        (B4_HUMP_COMPLETE != g_b4_proc_state.status.hump_state))
+        (B4_HUMP_NORMAL != g_p_b4_proc_status->hump_state) &&
+        (B4_HUMP_COMPLETE != g_p_b4_proc_status->hump_state))
     {
         int32_t delta_mg = b4_proc_incline_mean_mg(mean_samples) -
                            g_b4_proc_state.incline_baseline_mg;
@@ -1854,7 +1933,7 @@ b4_proc_update_height (void)
         }
 
         g_b4_proc_state.b_active_height_measured = true;
-        g_b4_proc_state.status.active_hump_height_um =
+        g_p_b4_proc_status->active_hump_height_um =
             g_b4_proc_state.active_peak_height_um;
     }
 }
@@ -1862,7 +1941,7 @@ b4_proc_update_height (void)
 static void
 b4_proc_abort_hump (void)
 {
-    b4_types_hump_state_t state = g_b4_proc_state.status.hump_state;
+    b4_types_hump_state_t state = g_p_b4_proc_status->hump_state;
 
     /* A candidate is not yet a hump, so only a confirmed one produces an
      * invalid result. The run maximum is never touched here. */
@@ -1870,8 +1949,8 @@ b4_proc_abort_hump (void)
         (B4_HUMP_PEAK == state) ||
         (B4_HUMP_DESCENDING == state))
     {
-        g_b4_proc_state.status.hump_peak_height_um = 0U;
-        g_b4_proc_state.status.b_hump_height_valid = false;
+        g_p_b4_proc_status->hump_peak_height_um = 0U;
+        g_p_b4_proc_status->b_hump_height_valid = false;
     }
 
     b4_proc_reset_active_hump();
@@ -1886,7 +1965,7 @@ b4_proc_abort_hump (void)
     g_b4_proc_state.b_level_since_gap = false;
     g_b4_proc_state.learn_count = 0U;
     g_b4_proc_state.travel_um = 0U;
-    g_b4_proc_state.status.learn_count = 0U;
+    g_p_b4_proc_status->learn_count = 0U;
 }
 
 static uint32_t
@@ -1931,12 +2010,12 @@ b4_proc_refresh_thresholds (void)
 
     g_b4_proc_state.start_threshold_mg = start_mg;
     g_b4_proc_state.complete_threshold_mg = complete_mg;
-    g_b4_proc_state.status.noise_mg = noise_mg;
-    g_b4_proc_state.status.learn_count = g_b4_proc_state.learn_count;
+    g_p_b4_proc_status->noise_mg = noise_mg;
+    g_p_b4_proc_status->learn_count = g_b4_proc_state.learn_count;
     /* The start threshold is at most 8000 times 20, or 160000 milli-g, so
      * the conversion cast is exact and the height product stays within
      * int64_t. */
-    g_b4_proc_state.status.detectable_height_um =
+    g_p_b4_proc_status->detectable_height_um =
         b4_proc_height_um((int32_t)start_mg);
 }
 
@@ -2007,9 +2086,9 @@ b4_proc_update_noise (uint32_t amplitude_mg)
      * uses the same condition. */
     if ((true == g_b4_proc_state.b_incline_baseline_valid) &&
         (g_b4_proc_state.incline_window_count >= mean_samples) &&
-        ((B4_HUMP_NORMAL == g_b4_proc_state.status.hump_state) ||
-         (B4_HUMP_CANDIDATE == g_b4_proc_state.status.hump_state)) &&
-        (false == g_b4_proc_state.status.b_sharp_change_event))
+        ((B4_HUMP_NORMAL == g_p_b4_proc_status->hump_state) ||
+         (B4_HUMP_CANDIDATE == g_p_b4_proc_status->hump_state)) &&
+        (false == g_p_b4_proc_status->b_sharp_change_event))
     {
         int32_t  amplitude_q8 = 0;
         int32_t  speed_mm_s = g_b4_proc_state.drive_speed_mm_s;
@@ -2031,7 +2110,7 @@ b4_proc_update_noise (uint32_t amplitude_mg)
             (true == g_b4_proc_state.b_previous_sample_valid) &&
             (false == g_b4_proc_state.jolt.b_window))
         {
-            elapsed_ms = g_b4_proc_state.status.sample.timestamp_ms -
+            elapsed_ms = g_p_b4_proc_status->sample.timestamp_ms -
                          g_b4_proc_state.previous_timestamp_ms;
 
             /* NOTE: A zero interval adds nothing. An interval longer than
@@ -2080,7 +2159,7 @@ b4_proc_update_noise (uint32_t amplitude_mg)
 static void
 b4_proc_update_level (uint32_t amplitude_mg)
 {
-    b4_types_hump_state_t state = g_b4_proc_state.status.hump_state;
+    b4_types_hump_state_t state = g_p_b4_proc_status->hump_state;
     bool b_level =
         (true == g_b4_proc_state.b_incline_baseline_valid) &&
         ((B4_HUMP_NORMAL == state) || (B4_HUMP_COMPLETE == state)) &&
@@ -2108,11 +2187,11 @@ b4_proc_update_level (uint32_t amplitude_mg)
 
     if (true == g_b4_proc_state.b_level_since_gap)
     {
-        g_b4_proc_state.status.health = B4_HEALTH_READY;
+        g_p_b4_proc_status->health = B4_HEALTH_READY;
     }
     else
     {
-        g_b4_proc_state.status.health = B4_HEALTH_DEGRADED;
+        g_p_b4_proc_status->health = B4_HEALTH_DEGRADED;
     }
 }
 
@@ -2591,7 +2670,7 @@ b4_proc_detect_sharp_change (const b4_types_sample_t * p_sample,
     }
 
     if ((true == b_flagged) && (true == b_refractory_elapsed) &&
-        (B4_HUMP_DESCENDING != g_b4_proc_state.status.hump_state))
+        (B4_HUMP_DESCENDING != g_p_b4_proc_status->hump_state))
     {
         b_detected = true;
         g_b4_proc_state.last_change_ms = p_sample->timestamp_ms;
@@ -2604,12 +2683,12 @@ b4_proc_detect_sharp_change (const b4_types_sample_t * p_sample,
 static void
 b4_proc_reset_active_hump (void)
 {
-    g_b4_proc_state.status.hump_state = B4_HUMP_NORMAL;
-    g_b4_proc_state.status.current_hump_peak_mg = 0U;
+    g_p_b4_proc_status->hump_state = B4_HUMP_NORMAL;
+    g_p_b4_proc_status->current_hump_peak_mg = 0U;
     g_b4_proc_state.hump_confirm_count = 0U;
     g_b4_proc_state.hump_complete_count = 0U;
     g_b4_proc_state.active_peak_height_um = 0U;
-    g_b4_proc_state.status.active_hump_height_um = 0U;
+    g_p_b4_proc_status->active_hump_height_um = 0U;
     g_b4_proc_state.b_active_height_measured = false;
     g_b4_proc_state.b_active_height_tainted = false;
 }
@@ -2617,12 +2696,12 @@ b4_proc_reset_active_hump (void)
 static void
 b4_proc_advance_hump (uint32_t amplitude_mg, bool b_settled)
 {
-    if (B4_HUMP_COMPLETE == g_b4_proc_state.status.hump_state)
+    if (B4_HUMP_COMPLETE == g_p_b4_proc_status->hump_state)
     {
         b4_proc_reset_active_hump();
     }
 
-    switch (g_b4_proc_state.status.hump_state)
+    switch (g_p_b4_proc_status->hump_state)
     {
         case B4_HUMP_NORMAL:
             b4_proc_start_hump(amplitude_mg);
@@ -2683,11 +2762,11 @@ b4_proc_start_hump (uint32_t amplitude_mg)
          ((uint32_t)1U << g_b4_proc_state.config.noise_step_shift)) &&
         (true == b_above))
     {
-        g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
+        g_p_b4_proc_status->current_hump_peak_mg = amplitude_mg;
         g_b4_proc_state.b_active_height_measured = false;
         g_b4_proc_state.b_active_height_tainted = false;
         g_b4_proc_state.active_peak_height_um = 0U;
-        g_b4_proc_state.status.hump_state = B4_HUMP_CANDIDATE;
+        g_p_b4_proc_status->hump_state = B4_HUMP_CANDIDATE;
         g_b4_proc_state.hump_confirm_count = 1U;
     }
 }
@@ -2725,9 +2804,9 @@ b4_proc_update_hump_candidate (uint32_t amplitude_mg)
     else if (true == b_continue)
     {
         if (amplitude_mg >
-            g_b4_proc_state.status.current_hump_peak_mg)
+            g_p_b4_proc_status->current_hump_peak_mg)
         {
-            g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
+            g_p_b4_proc_status->current_hump_peak_mg = amplitude_mg;
         }
 
         if (g_b4_proc_state.hump_confirm_count < B4_PROC_MAX_COUNTER)
@@ -2738,8 +2817,8 @@ b4_proc_update_hump_candidate (uint32_t amplitude_mg)
         if (g_b4_proc_state.hump_confirm_count >=
             g_b4_proc_state.config.hump_confirm_samples)
         {
-            g_b4_proc_state.status.hump_state = B4_HUMP_ASCENDING;
-            g_b4_proc_state.status.b_hump_started_event = true;
+            g_p_b4_proc_status->hump_state = B4_HUMP_ASCENDING;
+            g_p_b4_proc_status->b_hump_started_event = true;
         }
     }
     else
@@ -2756,20 +2835,20 @@ static void
 b4_proc_update_hump_ascending (uint32_t amplitude_mg)
 {
     uint32_t peak_mg =
-        g_b4_proc_state.status.current_hump_peak_mg;
+        g_p_b4_proc_status->current_hump_peak_mg;
     uint32_t hysteresis_mg =
         g_b4_proc_state.complete_threshold_mg;
 
     if (amplitude_mg > peak_mg)
     {
-        g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
+        g_p_b4_proc_status->current_hump_peak_mg = amplitude_mg;
         peak_mg = amplitude_mg;
     }
 
     if ((amplitude_mg < peak_mg) &&
         ((peak_mg - amplitude_mg) >= hysteresis_mg))
     {
-        g_b4_proc_state.status.hump_state = B4_HUMP_PEAK;
+        g_p_b4_proc_status->hump_state = B4_HUMP_PEAK;
     }
 }
 
@@ -2781,23 +2860,23 @@ static void
 b4_proc_update_hump_peak (uint32_t amplitude_mg)
 {
     uint32_t peak_mg =
-        g_b4_proc_state.status.current_hump_peak_mg;
+        g_p_b4_proc_status->current_hump_peak_mg;
     uint32_t hysteresis_mg =
         g_b4_proc_state.complete_threshold_mg;
 
     if (amplitude_mg > peak_mg)
     {
-        g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
-        g_b4_proc_state.status.hump_state = B4_HUMP_ASCENDING;
+        g_p_b4_proc_status->current_hump_peak_mg = amplitude_mg;
+        g_p_b4_proc_status->hump_state = B4_HUMP_ASCENDING;
     }
     else if ((amplitude_mg < peak_mg) &&
              ((peak_mg - amplitude_mg) >= hysteresis_mg))
     {
-        g_b4_proc_state.status.hump_state = B4_HUMP_DESCENDING;
+        g_p_b4_proc_status->hump_state = B4_HUMP_DESCENDING;
     }
     else
     {
-        g_b4_proc_state.status.hump_state = B4_HUMP_PEAK;
+        g_p_b4_proc_status->hump_state = B4_HUMP_PEAK;
     }
 }
 
@@ -2812,9 +2891,9 @@ b4_proc_update_hump_descending (uint32_t amplitude_mg, bool b_settled)
     bool b_back_down = false;
 
     if (amplitude_mg >
-        g_b4_proc_state.status.current_hump_peak_mg)
+        g_p_b4_proc_status->current_hump_peak_mg)
     {
-        g_b4_proc_state.status.current_hump_peak_mg = amplitude_mg;
+        g_p_b4_proc_status->current_hump_peak_mg = amplitude_mg;
     }
 
     /* NOTE: A car resting between the completion and start thresholds is
@@ -2863,25 +2942,25 @@ b4_proc_complete_hump (void)
     bool b_height_valid = (g_b4_proc_state.b_active_height_measured &&
                            !g_b4_proc_state.b_active_height_tainted);
 
-    g_b4_proc_state.status.hump_state = B4_HUMP_COMPLETE;
-    g_b4_proc_state.status.b_hump_completed_event = true;
-    g_b4_proc_state.status.hump_peak_height_um =
+    g_p_b4_proc_status->hump_state = B4_HUMP_COMPLETE;
+    g_p_b4_proc_status->b_hump_completed_event = true;
+    g_p_b4_proc_status->hump_peak_height_um =
         g_b4_proc_state.active_peak_height_um;
-    g_b4_proc_state.status.b_hump_height_valid = b_height_valid;
+    g_p_b4_proc_status->b_hump_height_valid = b_height_valid;
 
-    if (g_b4_proc_state.status.current_hump_peak_mg >
-        g_b4_proc_state.status.highest_hump_peak_mg)
+    if (g_p_b4_proc_status->current_hump_peak_mg >
+        g_p_b4_proc_status->highest_hump_peak_mg)
     {
-        g_b4_proc_state.status.highest_hump_peak_mg =
-            g_b4_proc_state.status.current_hump_peak_mg;
+        g_p_b4_proc_status->highest_hump_peak_mg =
+            g_p_b4_proc_status->current_hump_peak_mg;
     }
 
     /* An invalid height must never raise the run maximum. */
     if ((true == b_height_valid) &&
         (g_b4_proc_state.active_peak_height_um >
-         g_b4_proc_state.status.highest_hump_height_um))
+         g_p_b4_proc_status->highest_hump_height_um))
     {
-        g_b4_proc_state.status.highest_hump_height_um =
+        g_p_b4_proc_status->highest_hump_height_um =
             g_b4_proc_state.active_peak_height_um;
     }
 }
@@ -2911,31 +2990,31 @@ b4_proc_clamp_cross (int64_t value)
 static void
 b4_proc_update_motion (uint32_t sample_delta_mg)
 {
-    if (true == g_b4_proc_state.status.b_lift_cue)
+    if (true == g_p_b4_proc_status->b_lift_cue)
     {
-        g_b4_proc_state.status.motion = B4_MOTION_LIFTED;
+        g_p_b4_proc_status->motion = B4_MOTION_LIFTED;
     }
     else if ((B4_HUMP_CANDIDATE ==
-              g_b4_proc_state.status.hump_state) ||
+              g_p_b4_proc_status->hump_state) ||
              (B4_HUMP_ASCENDING ==
-              g_b4_proc_state.status.hump_state) ||
-             (B4_HUMP_PEAK == g_b4_proc_state.status.hump_state))
+              g_p_b4_proc_status->hump_state) ||
+             (B4_HUMP_PEAK == g_p_b4_proc_status->hump_state))
     {
-        g_b4_proc_state.status.motion = B4_MOTION_CLIMBING_HUMP;
+        g_p_b4_proc_status->motion = B4_MOTION_CLIMBING_HUMP;
     }
     else if (B4_HUMP_DESCENDING ==
-             g_b4_proc_state.status.hump_state)
+             g_p_b4_proc_status->hump_state)
     {
-        g_b4_proc_state.status.motion = B4_MOTION_DESCENDING_HUMP;
+        g_p_b4_proc_status->motion = B4_MOTION_DESCENDING_HUMP;
     }
     else if (sample_delta_mg >=
              g_b4_proc_state.config.motion_threshold_mg)
     {
-        g_b4_proc_state.status.motion = B4_MOTION_ACCELERATING;
+        g_p_b4_proc_status->motion = B4_MOTION_ACCELERATING;
     }
     else
     {
-        g_b4_proc_state.status.motion = B4_MOTION_QUIET;
+        g_p_b4_proc_status->motion = B4_MOTION_QUIET;
     }
 }
 

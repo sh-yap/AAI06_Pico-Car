@@ -959,6 +959,198 @@ test_track_captures(void)
 }
 
 
+/*
+ * CR1 Phase 4: the packed storage must read back exactly what was written
+ * for every in-range value, and saturate (never wrap) outside it.
+ */
+static void
+test_storage_round_trip(void)
+{
+    uint8_t adc_store[6];
+    uint32_t word;
+    int16_t offset;
+    barcode_edge_t edge;
+    uint32_t i;
+
+    for (i = 0U; i < (uint32_t)sizeof adc_store; i++)
+    {
+        adc_store[i] = 0U;
+    }
+
+    check("adc store: 480 samples in 720 bytes",
+          ((480U / 2U) * 3U) == 720U);
+
+    barcode_adc_pack(adc_store, 0U, 0U);
+    barcode_adc_pack(adc_store, 1U, 4095U);
+    barcode_adc_pack(adc_store, 2U, 4095U);
+    barcode_adc_pack(adc_store, 3U, 1U);
+    check("adc store: 0 round-trips", barcode_adc_unpack(adc_store, 0U) == 0U);
+    check("adc store: odd sample max round-trips",
+          barcode_adc_unpack(adc_store, 1U) == 4095U);
+    check("adc store: even sample max round-trips",
+          barcode_adc_unpack(adc_store, 2U) == 4095U);
+    check("adc store: 1 round-trips", barcode_adc_unpack(adc_store, 3U) == 1U);
+
+    barcode_adc_pack(adc_store, 0U, 0x0ABU);
+    barcode_adc_pack(adc_store, 1U, 0x0CDU);
+    check("adc store: 0x0AB round-trips",
+          barcode_adc_unpack(adc_store, 0U) == 0x0ABU);
+    check("adc store: 0x0CD round-trips",
+          barcode_adc_unpack(adc_store, 1U) == 0x0CDU);
+
+    barcode_adc_pack(adc_store, 0U, 0x1234U);     /* 13 bits */
+    check("adc store: above 12 bits is masked",
+          barcode_adc_unpack(adc_store, 0U) == 0x234U);
+    barcode_adc_pack(adc_store, 1U, 0x1FFFU);     /* 13 bits */
+    check("adc store: odd sample above 12 bits is masked",
+          barcode_adc_unpack(adc_store, 1U) == 0x0FFFU);
+    check("adc store: masked write leaves the even sample",
+          barcode_adc_unpack(adc_store, 0U) == 0x234U);
+
+    word = barcode_edge_word(false, 0);
+    check("edge word: position 0 round-trips",
+          barcode_edge_word_position(word) == 0);
+    check("edge word: white flag", !barcode_edge_word_is_black(word));
+
+    word = barcode_edge_word(true, BARCODE_EDGE_POS_MAX);
+    check("edge word: max position round-trips",
+          barcode_edge_word_position(word) == BARCODE_EDGE_POS_MAX);
+    check("edge word: black flag", barcode_edge_word_is_black(word));
+
+    word = barcode_edge_word(true, BARCODE_EDGE_POS_MIN);
+    check("edge word: min position round-trips",
+          barcode_edge_word_position(word) == BARCODE_EDGE_POS_MIN);
+
+    word = barcode_edge_word(false, -1);
+    check("edge word: -1 round-trips", barcode_edge_word_position(word) == -1);
+
+    word = barcode_edge_word(false, BARCODE_EDGE_POS_MAX + 1);
+    check("edge word: above max clamps",
+          barcode_edge_word_position(word) == BARCODE_EDGE_POS_MAX);
+
+    word = barcode_edge_word(false, BARCODE_EDGE_POS_MIN - 1);
+    check("edge word: below min clamps",
+          barcode_edge_word_position(word) == BARCODE_EDGE_POS_MIN);
+
+    check("width: 0 round-trips", barcode_width_counts(0U) == 0U);
+    check("width: 2460 guard round-trips", barcode_width_counts(2460U) == 2460U);
+    check("width: 16-bit max round-trips",
+          barcode_width_counts(65535U) == 65535U);
+    check("width: above 16 bits clamps",
+          barcode_width_counts(65536U) == 65535U);
+
+    offset = 123;
+    check("encoder offset: zero at the base",
+          barcode_encoder_offset(1000, 1000, &offset) && (offset == 0));
+    check("encoder offset: +32767 fits",
+          barcode_encoder_offset(1000, 1000 + 32767, &offset)
+          && (offset == INT16_MAX));
+    check("encoder offset: -32768 fits",
+          barcode_encoder_offset(1000, 1000 - 32768, &offset)
+          && (offset == INT16_MIN));
+    check("encoder offset: +32768 flags overflow",
+          !barcode_encoder_offset(1000, 1000 + 32768, &offset)
+          && (offset == INT16_MAX));
+    check("encoder offset: -32769 flags overflow",
+          !barcode_encoder_offset(1000, 1000 - 32769, &offset)
+          && (offset == INT16_MIN));
+    check("encoder offset: int32 extremes do not wrap",
+          !barcode_encoder_offset(INT32_MAX, INT32_MIN, &offset)
+          && (offset == INT16_MIN));
+
+    /* Stored edges read back through barcode_get_edge() unchanged. */
+    barcode_init();
+    barcode_update(false, 0U, 100);
+    barcode_update(true, 10U, 200);
+    barcode_update(false, 20U, 300);
+
+    check("edge readback: first edge is black",
+          barcode_get_edge(0U, &edge) && edge.is_black);
+    check("edge readback: timestamp_ms round-trips", edge.timestamp_ms == 10U);
+    check("edge readback: position round-trips", edge.encoder_position == 200);
+    check("edge readback: second edge is white",
+          barcode_get_edge(1U, &edge) && !edge.is_black);
+    check("edge readback: second timestamp_ms", edge.timestamp_ms == 20U);
+    check("edge readback: second position", edge.encoder_position == 300);
+
+    barcode_init();
+    barcode_update(false, 0U, 100);
+    barcode_update(true, 10U, BARCODE_EDGE_POS_MAX + 1);
+    check("edge readback: out-of-range position is clamped",
+          barcode_get_edge(0U, &edge)
+          && (edge.encoder_position == BARCODE_EDGE_POS_MAX));
+
+    /* Reviewer reproduction: positions past the old 24-bit field must keep
+       the 111-count element between edges 0 and 1. */
+    barcode_init();
+    barcode_update(false, 0U, 8389000);
+    barcode_update(true, 10U, 8389037);
+    barcode_update(false, 20U, 8389148);
+    check("edge readback: large position keeps edge 0",
+          barcode_get_edge(0U, &edge) && edge.is_black
+          && (edge.encoder_position == 8389037));
+    check("edge readback: large position keeps edge 1",
+          barcode_get_edge(1U, &edge) && !edge.is_black
+          && (edge.encoder_position == 8389148));
+}
+
+
+/*
+ * Raw capture storage: one sample every RAW_STEP_COUNTS over the course
+ * *A* print. raw_capture() appends one last sample at the same level but
+ * jump_counts further on: it adds no edge, so the capture geometry is
+ * unchanged and only the stored encoder offset moves.
+ */
+#define RAW_STEP_COUNTS     6
+#define RAW_WHITE           200U
+#define RAW_BLACK           3000U
+#define RAW_QUIET_COUNTS    240
+#define RAW_TAIL_COUNTS     480
+
+static barcode_t
+raw_capture(int32_t jump_counts)
+{
+    int32_t const end = ((barcode_len_um * COUNTS_PER_M) / 1000000)
+                        + RAW_TAIL_COUNTS;
+    int32_t position;
+    int32_t last_position = -RAW_QUIET_COUNTS;
+    int32_t pos_um;
+    uint32_t t_ms = 0U;
+    uint16_t last_adc = RAW_WHITE;
+
+    barcode_init();
+
+    for (position = -RAW_QUIET_COUNTS; position <= end;
+         position += RAW_STEP_COUNTS)
+    {
+        pos_um = (int32_t)(((int64_t)position * 1000000) / COUNTS_PER_M);
+        last_adc = is_black_at(pos_um) ? RAW_BLACK : RAW_WHITE;
+        barcode_update_raw(last_adc, t_ms, position);
+        last_position = position;
+        t_ms += SAMPLE_MS;
+    }
+
+    barcode_update_raw(last_adc, t_ms, last_position + jump_counts);
+    barcode_finish_capture();
+
+    return barcode_get_code();
+}
+
+
+static void
+test_raw_storage(void)
+{
+    build(PAT_A, false);
+
+    check("raw store: within int16 decodes *A*",
+          raw_capture(0) == BARCODE_A);
+    check("raw store: +30000 counts still decodes *A*",
+          raw_capture(30000) == BARCODE_A);
+    check("raw store: a capture leaving int16 is INVALID",
+          raw_capture(40000) == BARCODE_INVALID);
+}
+
+
 /* Report decode rate vs speed at 100 Hz (information, not pass/fail). */
 static void
 report_speed_sweep(int32_t narrow, char const * p_label)
@@ -1000,6 +1192,48 @@ report_speed_sweep(int32_t narrow, char const * p_label)
     wide_um = WIDE_UM;
 }
 
+/* The 6-bit character index the laptop sees: every Code 39 character,
+ * the none value '\0', and the failure value for anything else. */
+static void
+test_char_index(void)
+{
+    static char const c39[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%";
+    uint8_t count = (uint8_t)(sizeof(c39) - 1U);      /* 43 characters */
+    uint8_t i;
+    bool all_ok = true;
+
+    check("Code 39 table has 43 characters", 43U == count);
+    check("character index is 6 bits", 6U == BARCODE_CHAR_BITS);
+    check("failure index is 44", 44U == BARCODE_CHAR_FAILED);
+
+    for (i = 0U; i < count; i++)
+    {
+        uint8_t index = barcode_char_index(c39[i]);
+
+        if ((index != (uint8_t)(i + 1U)) ||
+            (barcode_index_char(index) != c39[i]))
+        {
+            all_ok = false;
+            (void)printf("  character '%c' failed (index %u)\n",
+                         c39[i], (unsigned)index);
+        }
+    }
+
+    check("all 43 characters round-trip through the index", all_ok);
+    check("no character -> index 0", BARCODE_CHAR_NONE
+          == barcode_char_index('\0'));
+    check("index 0 -> no character", '\0' == barcode_index_char(0U));
+    check("start/stop '*' -> failed", BARCODE_CHAR_FAILED
+          == barcode_char_index('*'));
+    check("lower case 'q' -> failed", BARCODE_CHAR_FAILED
+          == barcode_char_index('q'));
+    check("failed index -> '?'", '?' == barcode_index_char(
+          BARCODE_CHAR_FAILED));
+    check("reserved index 45 -> '?'", '?' == barcode_index_char(45U));
+    check("reserved index 63 -> '?'", '?' == barcode_index_char(63U));
+}
+
+
 int
 main(void)
 {
@@ -1014,6 +1248,9 @@ main(void)
     test_track_faults();
     test_reported_within_quiet_zone();
     test_track_captures();
+    test_storage_round_trip();
+    test_raw_storage();
+    test_char_index();
     jitter_ms = 2;
     report_speed_sweep(6000, "narrow 6 mm (4 Nov track print)");
     report_speed_sweep(3000, "narrow 3 mm (course spec)");

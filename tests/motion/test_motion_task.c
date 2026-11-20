@@ -5,9 +5,20 @@
 #include <string.h>
 #include "../../app_program/motion_task.c"
 
+/* motion_task.c stores a packed record; read it back through the public API
+   so the checks below see the same values a caller does. */
+#undef motion_status
+static motion_status_t test_status_view(void)
+{
+    motion_status_t status = {0};
+    (void)motion_get_status(&status);
+    return status;
+}
+#define motion_status (test_status_view())
+
 static uint64_t test_clock;
 static motion_encoder_snapshot_t test_encoder;
-static motion_command_t test_command;
+static motion_command_packed_t test_command;
 static bool queued;
 static bool stop_pending;
 static unsigned drive_calls;

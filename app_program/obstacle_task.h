@@ -47,6 +47,10 @@ bool obstacle_task_get_status(obstacle_status_t * p_status);
 /* Latest packed status word as published, for telemetry (no age check). */
 uint32_t obstacle_task_get_word(void);
 
+/* Forward readings the sensor did not answer (NO_ECHO or NOT_READY) since
+ * start-up, for telemetry.  Wraps; the laptop looks at the increase. */
+uint32_t obstacle_task_get_silent_count(void);
+
 /* The controller has acted on OBSTACLE_EVT_AHEAD (stopped, will scan).
  * The task clears the bit within one reading, and raises it again if the
  * obstacle is still there. */

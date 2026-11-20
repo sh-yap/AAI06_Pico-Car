@@ -100,4 +100,29 @@ typedef struct {
     bool valid;
 } motion_status_t;
 
+/* Packed copies are what is stored in the Motion task and queued in its mbf.
+   The value types above stay full-width for callers and calculations.  Live
+   words 8 and 9 hold the boot-relative encoder counts full width. */
+#define MOTION_COMMAND_PACKED_WORDS   (2U)
+#define MOTION_STATUS_LIVE_WORDS     (10U)
+#define MOTION_STATUS_DIAG_WORDS     (16U)
+
+typedef struct {
+    uint32_t word[MOTION_COMMAND_PACKED_WORDS];
+} motion_command_packed_t;
+
+typedef struct {
+    uint32_t live[MOTION_STATUS_LIVE_WORDS];
+    uint32_t diag[MOTION_STATUS_DIAG_WORDS];
+} motion_status_packed_t;
+
+bool motion_pack_command(const motion_command_t *command,
+                         motion_command_packed_t *packed);
+bool motion_unpack_command(const motion_command_packed_t *packed,
+                           motion_command_t *command);
+bool motion_pack_status(const motion_status_t *status,
+                        motion_status_packed_t *packed);
+bool motion_unpack_status(const motion_status_packed_t *packed,
+                          motion_status_t *status);
+
 #endif

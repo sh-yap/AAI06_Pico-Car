@@ -4,7 +4,7 @@
 The robot publishes the same topics and the same values as the JSON format,
 but each value is packed into the **fewest bits its agreed range needs**
 (CR1: minimum-bit representation).  Bit widths come from
-`docs/DATA_DEFINITIONS.md`; anything not yet confirmed there is marked TBC.
+`docs/DATA_REPRESENTATION.md`; anything not yet confirmed there is marked TBC.
 
 The firmware builds **binary by default**.  `COMMS_FORMAT=json` builds the
 readable JSON fallback instead (only one format is compiled in).  The laptop
@@ -37,6 +37,8 @@ header included.  JSON size = average from the CR1 baseline
 
 ### robot/telemetry/motion  (Buddy 2, up to 5 per second)
 
+All 11 fields the firmware sends, in this order:
+
 | Field | Bits | Range / meaning | Status |
 |---|---:|---|---|
 | `spd_l_mm_s` | 10 s | −512 … +511 mm/s (max speed 300) | Proposed |
@@ -44,8 +46,14 @@ header included.  JSON size = average from the CR1 baseline
 | `enc_l` | 19 s | encoder counts since power-on | TBC (reset rule, Buddy 2) |
 | `enc_r` | 19 s | as above | TBC |
 | `dist_mm` | 16 s | −32 768 … +32 767 mm since power-on | TBC |
+| `tgt_l_mm_s` | 10 s | commanded wheel target, mm/s | Proposed |
+| `tgt_r_mm_s` | 10 s | as above | Proposed |
+| `slew_l_mm_s` | 10 s | target after the slew limit, mm/s | Proposed |
+| `slew_r_mm_s` | 10 s | as above | Proposed |
+| `pwm_l` | 11 s | applied drive, permille, −1000 … +1000 | Proposed |
+| `pwm_r` | 11 s | as above | Proposed |
 
-74 + 34 = 108 bits → **14 bytes** (JSON ≈ 100 B).
+136 + 34 = 170 bits → **22 bytes** (JSON ≈ 100 B).
 
 ### robot/telemetry/line  (Buddy 3)
 
@@ -69,34 +77,48 @@ header included.  JSON size = average from the CR1 baseline
 
 45 + 34 = 79 bits → **10 bytes** (JSON ≈ 81 B).
 
+### robot/telemetry/obstacle  (Buddy 5, up to 5 per second)
+
+The latest forward ultrasonic reading.  Added 2026-11-20 so a sensor fault
+(fault bit 5) can be traced in the laptop log.
+
+| Field | Bits | Range / meaning | Status |
+|---|---:|---|---|
+| `dist_mm` | 12 | 0 … 4095 mm; 0 = no valid reading | Buddy 5 |
+| `status` | 3 | 0 OK, 1 NO_ECHO (sensor did not answer), 2 TOO_CLOSE, 3 TOO_FAR, 4 TIMEOUT (nothing reflected), 5 NOT_READY | Buddy 5 |
+| `state` | 3 | 0 INIT, 1 MONITOR, 2 SCANNING, 3 SIDE_WATCH, 4 LINE_RECOVERY, 5 SENSOR_FAULT | Buddy 5 |
+| `silent` | 8 | NO_ECHO + NOT_READY readings since boot, wraps at 256.  A running count, so readings between two snapshots are not lost: compare consecutive values. | Buddy 5 |
+
+26 + 34 = 60 bits → **8 bytes** (JSON ≈ 70 B).
+
 ### robot/heartbeat  (Buddy 1, once per second)
 
 | Field | Bits | Range / meaning | Status |
 |---|---:|---|---|
 | `seq` | 16 | 0 … 65 535, wraps | Proposed |
 | `state` | 4 | robot state, see §4 | Proposed |
-| `fault` | 9 | fault bits 0-8, see `DATA_DEFINITIONS.md` §6 | Proposed |
+| `fault` | 10 | fault bits 0-9; bit 4 is reserved.  Names and set/clear rules: `VC_FAULT_*` in `vc_task.h`, `docs/DATA_REPRESENTATION.md` §9 | Proposed |
 | `ev_drop` | 8 | events dropped, 0 … 255, stops at 255 | Proposed |
 
-37 + 34 = 71 bits → **9 bytes** (JSON 74 B).
+38 + 34 = 72 bits → **9 bytes** (JSON 74 B).
 
 ### robot/state  (retained)
 
 | Field | Bits | Status |
 |---|---:|---|
 | `state` | 4 | Proposed |
-| `fault` | 9 | Proposed |
+| `fault` | 10 | Proposed (bits 0-9, bit 4 reserved) |
 
-13 + 34 = 47 bits → **6 bytes** (JSON 51 B).
+14 + 34 = 48 bits → **6 bytes** (JSON 51 B).
 
 ### robot/event/barcode
 
 | Field | Bits | Range / meaning | Status |
 |---|---:|---|---|
-| `code` | 3 | 0 NONE, 1 A, 2 Y, 3 X, 4 spare, 5 F, 6 Z, 7 INVALID | Course set (3 Nov): Y and X replaced the unused B and C; A, F, Z kept their codes |
-| `command` | 3 | 0 NONE, 1 LEFT, 2 RIGHT, 3 STRAIGHT, 4 UTURN | Code + Tribunal |
+| `code` | 6 | 0 NONE, 1…43 Code 39 in the decoder's table order, 44 INVALID | Any Code 39 character is reported (18 Nov): the index is the character's position in `c39_table` (`'0'`…`'9'`, `'A'`…`'Z'`, `- . space $ / + %`) + 1; 44 = decode failed, 45-63 reserved |
+| `command` | 3 | 0 NONE, 1 LEFT, 2 RIGHT, 3 STRAIGHT, 4 UTURN | Code + Tribunal; a non-course character sends NONE |
 
-6 + 34 = 40 bits → **5 bytes** (JSON 49 B).
+6 + 3 + 34 = 43 bits → **6 bytes**.
 
 ### robot/event/hump
 
@@ -119,6 +141,33 @@ header included.  JSON size = average from the CR1 baseline
 | `action` | 3 | 0 STOP, 1 CONTINUE, 2 TURN_LEFT, 3 TURN_RIGHT, 4 REVERSE_RETRY | Code (Buddy 5 + comms agree) |
 
 57 + 34 = 91 bits → **12 bytes** (JSON 117 B).
+
+### robot/event/calibration  (Vehicle Controller, once per START)
+
+The START sweep result: the raw 12-bit ADC readings of the three line
+sensors, and Buddy 4's noise floor.  `result` says why a sweep failed.
+
+| Field | Bits | Range / meaning | Status |
+|---|---:|---|---|
+| `result` | 3 | 0 OK, 1 CONTRAST, 2 LINE_NOT_FOUND, 3 BUDDY4, 4 SENSOR_GAP | Proposed |
+| `centre_low` | 12 | raw ADC, 0 … 4095 | Proposed |
+| `centre_high` | 12 | as above | Proposed |
+| `centre_thr` | 12 | threshold in use, raw ADC | Proposed |
+| `centre_full` | 12 | full-black reading, raw ADC | Proposed |
+| `right_low` | 12 | raw ADC | Proposed |
+| `right_high` | 12 | as above | Proposed |
+| `right_thr` | 12 | as above | Proposed |
+| `barcode_low` | 12 | raw ADC | Proposed |
+| `barcode_high` | 12 | as above | Proposed |
+| `barcode_thr` | 12 | the one in use, learned or fallback | Proposed |
+| `barcode_learned` | 1 | 1 = learned this START, 0 = fallback constant | Proposed |
+| `first_right` | 1 | 1 = the sweep pivoted right first | Proposed |
+| `overlap` | 9 s | samples both line sensors were black at once; negative = a white gap of that many samples; −256 = not measured | Proposed |
+| `b4_floor_mg` | 9 | Buddy 4 noise floor, 1 … 500; 0 = Buddy 4 failed | Proposed |
+| `b4_samples` | 15 | noise samples averaged, 0 … 20 000 | Proposed |
+| `sweep_deg` | 8 | whole degrees turned; the limit is 90 | Proposed |
+
+166 + 34 = 200 bits → **25 bytes**.
 
 ### robot/event/motion  (Buddy 4)
 
@@ -215,10 +264,11 @@ work as text: `mosquitto_pub -t robot/command -m start`.
 message in `comms.c`, written as either format); decoder
 `tools/robot_decode.ps1` (field table must match `comms.c`).
 
-**Tests:** `make -C tests/comms test` (encoder, incl. locked golden bytes)
-and `tools\test_robot_decode.ps1` (decoder, same golden bytes).
+**Tests:** `make -C tests/comms test` (encoder, incl. locked golden bytes,
+and the packed-record round trips) and `tools\test_robot_decode.ps1`
+(decoder, same golden bytes).
 
 ## 7. Expected saving (motion, the busiest topic)
 
-JSON ≈ 100 B → binary 14 B per message (−86 %).  Measured "after" numbers go
+JSON ≈ 100 B → binary 22 B per message (−78 %).  Measured "after" numbers go
 in a new evidence file next to the baseline.

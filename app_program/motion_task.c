@@ -49,7 +49,10 @@
 #define MOTION_MAX_DT_MS 1000U
 
 static motion_config_t motion_config;
-static motion_status_t motion_status;
+static motion_status_packed_t motion_status_stored;
+static motion_status_t *motion_status_current;
+/* The task works on a full-width copy and publishes the packed record. */
+#define motion_status (*motion_status_current)
 /* kp/ki were 0.15/0.30 (unloaded): on the floor a slowed wheel gained only
    ~60 permille per second and stalled (27 Oct closed-loop test).  Faster
    test_integrate values - Buddy 2 to retune loaded. */
@@ -64,7 +67,7 @@ static motion_status_t motion_status;
    turns into about 3 permille of PWM jitter.  ki is unchanged. */
 static motion_pid_t left_pid = { 0.60f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
 static motion_pid_t right_pid = { 0.60f, 1.20f, 0.0f, 0.0f, 0.0f, 400.0f, -200.0f, 200.0f };
-static motion_command_t command_queue[MOTION_QUEUE_DEPTH];
+static motion_command_packed_t command_queue[MOTION_QUEUE_DEPTH];
 static uint8_t command_buffer[sizeof(command_queue) + MOTION_QUEUE_DEPTH * 8U];
 static UW motion_stack[MOTION_STACK_SIZE / sizeof(UW)];
 static ID command_mbf = 0;
@@ -372,7 +375,9 @@ static void motion_loop(void)
     int32_t right_progress_mm;
     motion_pid_result_t left_output;
     motion_pid_result_t right_output;
+    motion_command_packed_t packed_command;
     motion_command_t command;
+    motion_status_t status_work;
     uint64_t now_us;
     uint64_t snapshot_start_us;
     uint32_t elapsed_ms;
@@ -407,6 +412,8 @@ static void motion_loop(void)
         return;
     }
     command_locked = true;
+    motion_unpack_status(&motion_status_stored, &status_work);
+    motion_status_current = &status_work;
 
     left_mm_per_count_q16 = (int32_t)(((int64_t)MOTION_PI_Q16 *
                                        motion_config.left_wheel_diameter_um *
@@ -458,9 +465,10 @@ static void motion_loop(void)
     motion_status.right_invalid_encoder_transitions = enc.right_invalid_transitions;
     motion_status.invalid_encoder_transitions = enc.invalid_transitions;
     motion_status.encoder_irq_count = enc.irq_count;
-    if (tk_rcv_mbf(command_mbf, &command, TMO_POL)
-        >= (INT)sizeof(command)) {
-        if (!motion_command_is_valid(
+    if (tk_rcv_mbf(command_mbf, &packed_command, TMO_POL)
+        >= (INT)sizeof(packed_command)) {
+        if (!motion_unpack_command(&packed_command, &command)
+            || !motion_command_is_valid(
                 &command, motion_config.max_speed_mm_s,
                 (int32_t)(motion_config.track_width_um / 1000),
                 MOTION_MAX_TURN_ANGLE_MDEG)) {
@@ -875,6 +883,7 @@ motion_loop_finish:
     motion_status.left_pwm_permille = motion_motor_last_duty(0U);
     motion_status.right_pwm_permille = motion_motor_last_duty(1U);
     publish_status();
+    (void)motion_pack_status(&status_work, &motion_status_stored);
     if (command_locked) {
         (void)tk_unl_mtx(command_mtx);
     }
@@ -930,9 +939,11 @@ motion_result_t motion_init(void)
     T_CMBF mbf = {0};
     T_CMTX mtx = {0};
     T_CFLG flg = {0};
+    motion_status_t initial_status = {0};
     if (motion_initialised) return MOTION_RESULT_OK;
     motion_config_default(&motion_config);
     if (!motion_config_validate(&motion_config)) return MOTION_RESULT_HARDWARE;
+    motion_status_current = &initial_status;
     motion_status = (motion_status_t){0};
     motion_learn_init(&learner, MOTION_LEARN_DELAY_CYCLES,
                       seed_forward_gain(&motion_config),
@@ -948,7 +959,7 @@ motion_result_t motion_init(void)
     }
     mbf.mbfatr = TA_TFIFO | TA_USERBUF;
     mbf.bufsz = sizeof(command_buffer);
-    mbf.maxmsz = sizeof(motion_command_t);
+    mbf.maxmsz = sizeof(motion_command_packed_t);
     mbf.bufptr = command_buffer;
     command_mbf = tk_cre_mbf(&mbf);
     mtx.mtxatr = TA_TFIFO | TA_INHERIT;
@@ -965,6 +976,8 @@ motion_result_t motion_init(void)
     encoder_sample_valid = false;
     previous_invalid_transitions = 0U;
     motion_set_state(MOTION_STATE_IDLE);
+    (void)motion_pack_status(&initial_status, &motion_status_stored);
+    motion_status_current = NULL;
     motion_initialised = true;
     return MOTION_RESULT_OK;
 }
@@ -988,11 +1001,14 @@ motion_result_t motion_start_task(void)
 
 motion_result_t motion_submit(const motion_command_t *command)
 {
+    motion_command_packed_t packed;
+
     if (!motion_initialised) return MOTION_RESULT_UNINITIALISED;
     if (!motion_command_is_valid(
             command, motion_config.max_speed_mm_s,
             (int32_t)(motion_config.track_width_um / 1000),
             MOTION_MAX_TURN_ANGLE_MDEG)) return MOTION_RESULT_INVALID;
+    if (!motion_pack_command(command, &packed)) return MOTION_RESULT_INVALID;
     /* Wait briefly: the Motion loop holds this lock for its whole body, and
        both tasks run every 20 ms from the same tick, so a single TMO_POL
        try could hit the held lock on every step and the drive command never
@@ -1011,7 +1027,7 @@ motion_result_t motion_submit(const motion_command_t *command)
         (void)tk_unl_mtx(command_mtx);
         return MOTION_RESULT_BUSY;
     }
-    if (tk_snd_mbf(command_mbf, command, sizeof(*command), TMO_POL) < E_OK) {
+    if (tk_snd_mbf(command_mbf, &packed, sizeof(packed), TMO_POL) < E_OK) {
         (void)tk_unl_mtx(command_mtx);
         return MOTION_RESULT_QUEUE_FULL;
     }
@@ -1024,7 +1040,7 @@ motion_result_t motion_submit(const motion_command_t *command)
 
 motion_result_t motion_stop(void)
 {
-    motion_command_t discarded;
+    motion_command_packed_t discarded;
 
     if (!motion_initialised) return MOTION_RESULT_UNINITIALISED;
     if (command_mtx <= E_OK
@@ -1103,13 +1119,16 @@ void motion_get_learned(int16_t *fwd_gain_milli, int16_t *fwd_offset_dmm_s,
 
 motion_result_t motion_get_status(motion_status_t *status)
 {
+    motion_status_packed_t packed;
+
     if (!motion_initialised) return MOTION_RESULT_UNINITIALISED;
     if (status == NULL) return MOTION_RESULT_INVALID;
     if (status_mtx > 0 && tk_loc_mtx(status_mtx, TMO_FEVR) == E_OK) {
-        *status = motion_status;
+        packed = motion_status_stored;
         (void)tk_unl_mtx(status_mtx);
     } else {
         return MOTION_RESULT_HARDWARE;
     }
+    (void)motion_unpack_status(&packed, status);
     return MOTION_RESULT_OK;
 }

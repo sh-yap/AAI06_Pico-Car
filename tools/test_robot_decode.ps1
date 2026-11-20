@@ -40,6 +40,14 @@ Check ($l.sensors -eq 1)       "sensors = 1"
 Check ($l.centre_adc -eq 3100) "centre_adc = 3100"
 Check ($l.right_adc -eq 1800)  "right_adc = 1800"
 
+Write-Host "golden obstacle reading message"
+$o = Read-RobotPayload 'robot/telemetry/obstacle' (ConvertFrom-RobotHex '1a3107006c441a01')
+Check ($o.t -eq 117830)            "t = 117830"
+Check ($o.dist_mm -eq 283)         "dist_mm = 283"
+Check ($o.status -eq 'NO_ECHO')    "status = NO_ECHO"
+Check ($o.state -eq 'SENSOR_FAULT') "state = SENSOR_FAULT"
+Check ($o.silent -eq 17)           "silent = 17"
+
 Write-Host "golden calibration message (sensor gap)"
 $c = Read-RobotPayload 'robot/event/calibration' (ConvertFrom-RobotHex '027d0000103238d8da90953e70d7da580290ad6dfd0000001e')
 Check ($c.result -eq 'SENSOR_GAP') "result = SENSOR_GAP"
@@ -55,14 +63,18 @@ $hb = $json | ConvertFrom-Json
 Check ($hb.fault -eq 516) "heartbeat fault is 10 bits (512 = sensor gap, 4 = motion cmd)"
 Check ($hb.seq -eq 199) "heartbeat readable by ConvertFrom-Json (mqtt_check.ps1)"
 
-Write-Host "barcode codes: the course's A, Y, X, F, Z"
-# Header (v 2, t 0) = 34 bits, then code (3) + command (3).  Bits 34-36 =
-# code, 37-39 = command, all in byte 4: code + (command << 3), shifted by 2.
-foreach ($c in @(@(1,'A'), @(2,'Y'), @(3,'X'), @(5,'F'), @(6,'Z'), @(7,'INVALID'))) {
-    $b4 = (($c[0] + (3 -shl 3)) -shl 2) -band 0xFF          # command 3 = STRAIGHT
-    $bc = Read-RobotPayload 'robot/event/barcode' (ConvertFrom-RobotHex ('02000000' + $b4.ToString('x2')))
+Write-Host "barcode codes: any Code 39 character, 6-bit index + 3-bit command"
+# Header (v 2, t 0) = 34 bits, then code (6) + command (3) = 43 bits, 6 bytes.
+# Bits 34-39 = code, 40-42 = command: byte 4 = code << 2, byte 5 = command.
+foreach ($c in @(@(1,'0'), @(11,'A'), @(27,'Q'), @(34,'X'), @(36,'Z'), @(43,'%'))) {
+    $b4 = ($c[0] -shl 2) -band 0xFF
+    $bc = Read-RobotPayload 'robot/event/barcode' (ConvertFrom-RobotHex ('02000000' + $b4.ToString('x2') + '03'))
     Check (($bc.code -eq $c[1]) -and ($bc.command -eq 'STRAIGHT')) "barcode code $($c[0]) -> $($c[1])"
 }
+$bc = Read-RobotPayload 'robot/event/barcode' (ConvertFrom-RobotHex '02000000b000')
+Check (($bc.code -eq 'INVALID') -and ($bc.command -eq 'NONE')) "barcode code 44 -> INVALID (failed decode)"
+$bc = Read-RobotPayload 'robot/event/barcode' (ConvertFrom-RobotHex '02000000b400')
+Check ($bc.code -eq 'UNKNOWN') "barcode code 45 -> UNKNOWN (reserved)"
 
 Write-Host "text payloads pass through"
 $j = '{"v":1,"t":5,"seq":3}'
