@@ -7,15 +7,16 @@
 #include "navigation.h"
 
 
-/* Barcode identifiers. Course codes *A*, *F*, *Z*, *Y*, *X*; anything else is INVALID. */
+/*
+ * Result of a finished capture.  VALID: the decoded character is one of
+ * the four in the movement mapping received over MQTT (nav_map.h).
+ * INVALID: unreadable, or a readable character that is not mapped (it
+ * is still available from barcode_get_char()).
+ */
 typedef enum
 {
     BARCODE_NONE = 0,
-    BARCODE_A,
-    BARCODE_F,
-    BARCODE_Z,
-    BARCODE_Y,
-    BARCODE_X,
+    BARCODE_VALID,
     BARCODE_INVALID
 } barcode_t;
 
@@ -40,13 +41,13 @@ typedef enum
 typedef struct
 {
     bool is_black;
-    uint32_t timestamp_ms;     
+    uint32_t timestamp_ms;
     int32_t encoder_position;
 } barcode_edge_t;
 
 
 /*
- * CR1 Phase 4 storage helpers.
+ * Packed storage helpers.
  *
  * Only the storage in barcode.c is packed; barcode_edge_t stays the value
  * type of barcode_get_edge().  The helpers are static inline so barcode.c
@@ -251,20 +252,16 @@ bool barcode_get_black_state(void);
 
 
 /*
- * Mark the current barcode capture as complete.
- *
- * The exact condition that ends a barcode will be
- * connected later once the barcode format is confirmed.
+ * Mark the current capture complete: decode it and look the character
+ * up in the MQTT mapping. barcode_check_end() calls this.
  */
 void barcode_finish_capture(void);
 
 /*
- * Call every cycle with the current encoder position. If a capture
- * is in progress and the car has travelled the end gap (twice the
- * widest element so far, see barcode.c) with no transition,
- * automatically finishes the capture (calls
- * barcode_finish_capture() internally). Stopping does not end a
- * capture. Safe to call every cycle regardless of state.
+ * Call every cycle with the current encoder position. Finishes the
+ * capture once the car has travelled the end gap (a multiple of the
+ * widest element so far, see barcode.c) with no transition. Stopping
+ * does not end a capture. Safe to call in any state.
  */
 void barcode_check_end(int32_t encoder_position);
 
@@ -277,7 +274,7 @@ barcode_t barcode_get_code(void);
 /*
  * Raw Code 39 data character of the ready capture (e.g. 'A', 'Z'),
  * or '\0' if none is ready or it could not be read. Lets a character
- * outside the course table still be logged or reported.
+ * outside the mapping still be logged or reported.
  */
 char barcode_get_char(void);
 
@@ -299,13 +296,12 @@ uint8_t barcode_get_edge_count(void);
 bool barcode_get_edge(uint8_t index, barcode_edge_t *p_edge);
 
 /*
- * Converts the decoded barcode to a nav command
- * (A->LEFT, F->RIGHT, Z->STRAIGHT).
+ * Movement of the decoded barcode under the mapping in force when the
+ * capture finished (nav_map.h, set over MQTT); NAV_NONE if nothing is
+ * ready or the character is not mapped.
  *
- * Self-clearing: internally resets acquisition state
- * before returning, so barcode_available() goes back
- * to false once this has been called. Callers should
- * not also call barcode_reset() after this.
+ * Self-clearing: resets acquisition, so barcode_available() is false
+ * afterwards. Do not also call barcode_reset().
  */
 nav_command_t barcode_get_command(void);
 

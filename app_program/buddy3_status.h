@@ -10,12 +10,13 @@
 
 
 /*
- * Buddy 3 packed status word (Tribunal 1 minimum-bit format).
+ * Buddy 3 packed status word (minimum-bit format).
  *
  *   bits  0-2   line state      3 bits  0 LEFT .. 4 JUNCTION, 5-7 reserved
  *   bits  3-10  line error      8 bits  signed, -127 left .. +127 right
  *   bits 11-12  line sensors    2 bits  LINE_SENSOR_* bits, 1 = black
- *   bits 13-15  barcode         3 bits  0 NONE .. 4 INVALID, 5-7 reserved
+ *   bits 13-15  barcode         3 bits  0 NONE, 1 VALID (mapped),
+ *                                       2 INVALID, 3-7 reserved
  *   bits 16-18  nav command     3 bits  0 NONE .. 4 UTURN, 5-7 reserved
  *   bits 19-21  calibration     3 bits  0 IDLE .. 5 FAIL_GAP, 6-7 reserved
  *   bit  22     barcode capture 1 bit   1 = edges stored, not finished
@@ -62,7 +63,7 @@ typedef struct
 } buddy3_status_t;
 
 
-/* Pack a status into the 29-bit status word. */
+/* Pack a status into the status word (bits 0-28 used). */
 buddy3_packed_t buddy3_status_pack(buddy3_status_t const *p_status);
 
 /*

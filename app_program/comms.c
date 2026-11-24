@@ -35,6 +35,7 @@
 #include "comms.h"
 #include "comms_link.h"
 #include "comms_codec.h"
+#include "nav_map.h"
 
 /* ------------------------------------------------------------------ *
  *  Tunables
@@ -99,7 +100,7 @@
 #define BITS_RUN                 1U
 #define BITS_RUN_MS              20U
 #define BITS_COUNT               8U
-#define BITS_CMD                 2U
+#define BITS_CMD                 3U
 #define BITS_OK                  1U
 #define BITS_CAL_RESULT          CODEC_BITS_CAL_RESULT
 #define BITS_CAL_OVERLAP         CODEC_BITS_CAL_OVERLAP
@@ -121,7 +122,8 @@
 #define CMD_CODE_START           1U
 #define CMD_CODE_STOP            2U
 #define CMD_CODE_STATUS          3U
-#define CMD_CODE_COUNT           4U
+#define CMD_CODE_MAP             4U     /* text only: barcode mapping   */
+#define CMD_CODE_COUNT           5U
 
 /* ------------------------------------------------------------------ *
  *  Types
@@ -209,7 +211,7 @@ static char const * const g_sonar_names[COMMS_SONAR_COUNT] =
 
 static char const * const g_cmd_names[CMD_CODE_COUNT] =
 {
-    "unknown", "start", "stop", "status"
+    "unknown", "start", "stop", "status", "map"
 };
 
 static char const * const g_run_names[RUN_CODE_COUNT] =
@@ -689,6 +691,8 @@ static uint32_t g_published_fault = 0xFFFFFFFFU;
 static uint32_t g_heartbeat_ms;
 static uint16_t g_heartbeat_seq;        /* wraps at the 16-bit wire width */
 static bool     g_b_info_pending;
+static bool     g_b_map_pending;        /* robot/nav_map to (re)publish    */
+static char     g_map_text[NAV_MAP_TEXT_MAX];
 
 /* Acknowledgements of commands received, oldest first. */
 static ack_t    g_acks[COMMS_ACK_QUEUE_LEN];
@@ -735,6 +739,7 @@ static void
 resend_all (void)
 {
     g_b_info_pending     = true;
+    g_b_map_pending      = true;
     g_published_state    = 0xFFFFFFFFU;
     g_motion_tx.b_force  = true;
     g_line_tx.b_force    = true;
@@ -1285,6 +1290,15 @@ comms_link_next (comms_link_msg_t * p_msg)
             g_b_info_pending = false;
             codec_text(p_msg, "robot/info", QOS_1, true, g_build_id);
         }
+        else if (g_b_map_pending)
+        {
+            /* Barcode mapping in force, retained, plain text: "A=LEFT
+               F=RIGHT Z=FORWARD X=UTURN", or "none" before one arrives. */
+            g_b_map_pending = false;
+            (void) nav_map_format(nav_map_get(), g_map_text,
+                                  (uint32_t) sizeof(g_map_text));
+            codec_text(p_msg, "robot/nav_map", QOS_1, true, g_map_text);
+        }
         else if ((state != g_published_state)
                  || (fault != g_published_fault))
         {
@@ -1397,6 +1411,10 @@ command_code (uint8_t const * p_data, uint32_t len)
     {
         code = CMD_CODE_STATUS;
     }
+    else if (nav_map_is_command(p_data, n))
+    {
+        code = CMD_CODE_MAP;
+    }
     else
     {
         /* Unknown: acknowledged as not ok. */
@@ -1411,6 +1429,7 @@ comms_link_on_command (uint8_t const * p_data, uint32_t len)
 {
     uint32_t const code = command_code(p_data, len);
     uint32_t       cmd  = (uint32_t) COMMS_CMD_NONE;
+    uint32_t       map_word;
     bool           b_ok = false;
 
     g_commands_received++;
@@ -1428,6 +1447,18 @@ comms_link_on_command (uint8_t const * p_data, uint32_t len)
         case CMD_CODE_STATUS:
             resend_all();               /* Handled here, at once. */
             b_ok = true;
+            break;
+
+        case CMD_CODE_MAP:
+            /* Handled here, at once.  A bad mapping changes nothing. */
+            b_ok = nav_map_parse(p_data, len, &map_word);
+
+            if (b_ok)
+            {
+                nav_map_set(map_word);
+            }
+
+            g_b_map_pending = true;     /* Echo what is in force now. */
             break;
 
         default:

@@ -62,6 +62,11 @@
   .cmd{font-size:15px;font-weight:700;padding:11px 22px;border-radius:9px;border:none;cursor:pointer;color:#fff}
   .cmd.start{background:var(--ok)} .cmd.stop{background:var(--bad)} .cmd.restart{background:var(--accent)}
   .cmd:disabled{opacity:.4;cursor:not-allowed}
+  .mapgrp{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding-left:12px;border-left:1px solid var(--border)}
+  .mapgrp label{display:flex;gap:4px;align-items:center;font-size:12px;color:var(--muted)}
+  .mapin{width:34px;text-align:center;font:700 15px var(--mono);padding:8px 2px;border-radius:7px;border:1px solid var(--border);background:var(--surface-2);color:var(--fg);text-transform:uppercase}
+  .mapin:disabled{opacity:.45}
+  .cmd.map{background:var(--warn)}
 
   .meta{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:16px}
   .meta b{color:var(--fg);font-weight:600;font-family:var(--mono)}
@@ -170,6 +175,13 @@
     <button class="cmd start" id="cmdStart" disabled>▶ Start</button>
     <button class="cmd stop" id="cmdStop" disabled>■ Stop</button>
     <button class="cmd restart" id="cmdRestart" disabled>⟳ Stop → Start</button>
+    <div class="mapgrp" title="Barcode character for each movement at the next cross-junction. Sent retained, so a rebooted car gets it again.">
+      <label>Left <input class="mapin" id="mapLEFT" maxlength="1" disabled></label>
+      <label>Right <input class="mapin" id="mapRIGHT" maxlength="1" disabled></label>
+      <label>Forward <input class="mapin" id="mapFORWARD" maxlength="1" disabled></label>
+      <label>U-turn <input class="mapin" id="mapUTURN" maxlength="1" disabled></label>
+      <button class="cmd map" id="cmdMap" disabled>Send map</button>
+    </div>
   </div>
 
   <div class="meta" id="meta"></div>
@@ -235,7 +247,7 @@ const NAV=['NONE','LEFT','RIGHT','STRAIGHT','UTURN'];
 const LINE=['LEFT','CENTRE','RIGHT','LOST','JUNCTION'];
 const MOTION=['QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','LIFTED','TURNING'];
 const AVOID=['STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY'];
-const CMD=['unknown','start','stop','status'];
+const CMD=['unknown','start','stop','status','map'];
 const RUN=['END','BEGIN'];
 const CALRES=['OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP'];
 const RANGE=['OK','NO_ECHO','TOO_CLOSE','TOO_FAR','TIMEOUT','NOT_READY'];
@@ -259,7 +271,7 @@ const FMT={
   'robot/event/motion':[F('motion','n',3,MOTION)],
   'robot/event/run':[F('run','n',1,RUN)],
   'robot/summary':[F('run_ms','u',20),F('dist_mm','s',16),F('max_hump_dmm','u',10),F('humps','u',8),F('barcodes','u',8),F('obstacles','u',8)],
-  'robot/event/command':[F('cmd','n',2,CMD),F('ok','u',1)],
+  'robot/event/command':[F('cmd','n',3,CMD),F('ok','u',1)],
 };
 function readBits(bytes,pos,n){let v=0,mult=1;for(let i=0;i<n;i++){const p=pos.v;if((p>>3)>=bytes.length)throw new Error('short');const bit=(bytes[p>>3]>>(p&7))&1;if(bit)v+=mult;mult*=2;pos.v=p+1;}return v;}
 function decode(topic,bytes){
@@ -333,6 +345,7 @@ function handle(M,ts,topic,j){
   const tt=j&&j.t!=null?+j.t:null;
   if(tt!=null&&(M.t0==null||tt<M.t0))M.t0=tt;
   if(topic==='robot/info'){M.build=j._text||'';return;}
+  if(topic==='robot/nav_map'){const m=String(j._text||'');if(m!==M.navMap){M.navMap=m;M.events.push({ts,t:tt,tag:'bcode',txt:'Barcode map on car: '+m});trim(M);fillMapInputs(m);}return;}
   if(topic==='robot/status'){const off=/offline/.test(j._text||'');if(off)M.drops++;M.events.push({ts,t:tt,tag:'conn',txt:'WiFi '+(off?'offline':'online')});trim(M);return;}
   if(topic==='robot/telemetry/motion'){const o={ts,t:tt,l:+j.spd_l_mm_s||0,r:+j.spd_r_mm_s||0,dist:+j.dist_mm||0,tl:+j.tgt_l_mm_s||0,tr:+j.tgt_r_mm_s||0};M.motion.push(o);M.lastMotion=o;M.peakSpeed=Math.max(M.peakSpeed,Math.abs(o.l),Math.abs(o.r));M.distance=Math.max(M.distance,o.dist);
     if(j.enc_l!=null&&j.enc_r!=null)trackPose(M,ts,+j.enc_l,+j.enc_r,tt);trim(M);}
@@ -381,6 +394,7 @@ function render(M,live){
   let durMs=0;try{const a=Date.parse((M.first||'').slice(0,23)),b=Date.parse((M.last||'').slice(0,23));if(a&&b)durMs=b-a;}catch(e){}
   document.getElementById('meta').innerHTML=
     `<div>Mode <b>${live?'LIVE':'log file'}</b></div>`+(M.build?`<div>Build <b>${esc(M.build)}</b></div>`:'')+
+    (M.navMap?`<div>Barcode map <b style="color:${M.navMap==='none'?'var(--bad)':'var(--fg)'}">${esc(M.navMap)}</b></div>`:'')+
     `<div>Span <b>${span}</b></div><div>Runs <b>${M.runs}</b></div>`;
 
   const fs=M.finalState||{state:'—',fault:0};
@@ -744,7 +758,17 @@ function setModel(M,live){model=M;mode=live?'live':'file';scanSel=null;mapSel='l
 
 /* ---------- MQTT live ---------- */
 function setStatus(cls,txt){const s=document.getElementById('status');s.className='status '+cls;document.getElementById('statusText').textContent=txt;}
-function setCmdEnabled(on){['cmdStart','cmdStop','cmdRestart'].forEach(id=>document.getElementById(id).disabled=!on);}
+const MAP_MOVES=['LEFT','RIGHT','FORWARD','UTURN'];
+function setCmdEnabled(on){['cmdStart','cmdStop','cmdRestart','cmdMap'].concat(MAP_MOVES.map(m=>'map'+m)).forEach(id=>document.getElementById(id).disabled=!on);}
+/* Show the car's mapping ("A=LEFT F=RIGHT Z=FORWARD X=UTURN") in the inputs while they are empty. */
+function fillMapInputs(text){const ins=MAP_MOVES.map(m=>document.getElementById('map'+m));if(ins.some(i=>i.value))return;
+  for(const pair of text.split(/\s+/)){const k=pair.split('=');const n=MAP_MOVES.indexOf(k[1]);if(k[0].length===1&&n>=0)ins[n].value=k[0];}}
+/* Code 39 data characters the car accepts (nav_map.h). */
+const C39_MAP_CHARS='0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.$/+%';
+function sendMap(){const cs=MAP_MOVES.map(m=>document.getElementById('map'+m).value.trim().toUpperCase());
+  if(cs.some(c=>c.length!==1||!C39_MAP_CHARS.includes(c))){alert('Enter one Code 39 character (0-9, A-Z, - . $ / + %) for each movement.');return;}
+  if(new Set(cs).size!==4){alert('The four characters must all be different.');return;}
+  pub('map '+MAP_MOVES.map((m,i)=>cs[i]+'='+m).join(' '),true);}
 function connect(){
   if(client){try{client.end(true);}catch(e){}client=null;}
   const host=document.getElementById('host').value.trim()||'localhost';
@@ -765,13 +789,14 @@ function connect(){
   });
 }
 function disconnect(){if(client){try{client.end(true);}catch(e){}client=null;}setStatus('','offline');setCmdEnabled(false);document.getElementById('connectBtn').textContent='Connect';}
-function pub(cmd){if(client&&client.connected){client.publish('robot/command',cmd);
+function pub(cmd,retain){if(client&&client.connected){client.publish('robot/command',cmd,retain?{qos:1,retain:true}:{});
   model.events.push({ts:localIso(new Date()),t:null,tag:'cmd',txt:'Sent → '+cmd});dirty=true;}}
 
 document.getElementById('connectBtn').onclick=()=>{if(client){disconnect();}else{connect();}};
 document.getElementById('cmdStart').onclick=()=>pub('start');
 document.getElementById('cmdStop').onclick=()=>pub('stop');
 document.getElementById('cmdRestart').onclick=()=>{pub('stop');setTimeout(()=>pub('start'),600);};
+document.getElementById('cmdMap').onclick=sendMap;
 
 /* scan browser, path map controls */
 document.getElementById('scanPrev').onclick=()=>{const n=model.scans.length;if(!n)return;scanSel=Math.max(0,(scanSel==null?n-1:scanSel)-1);renderScanViz(model);};

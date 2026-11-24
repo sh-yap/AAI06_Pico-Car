@@ -22,7 +22,7 @@ $script:Nav     = @('NONE','LEFT','RIGHT','STRAIGHT','UTURN')
 $script:Line    = @('LEFT','CENTRE','RIGHT','LOST','JUNCTION')
 $script:Motion  = @('QUIET','ACCELERATING','CLIMBING_HUMP','DESCENDING_HUMP','LIFTED','TURNING')
 $script:Avoid   = @('STOP','CONTINUE','TURN_LEFT','TURN_RIGHT','REVERSE_RETRY')
-$script:Cmd     = @('unknown','start','stop','status')
+$script:Cmd     = @('unknown','start','stop','status','map')
 $script:Run     = @('END','BEGIN')
 $script:CalResult = @('OK','CONTRAST','LINE_NOT_FOUND','BUDDY4','SENSOR_GAP')
 $script:Range   = @('OK','NO_ECHO','TOO_CLOSE','TOO_FAR','TIMEOUT','NOT_READY')
@@ -80,7 +80,7 @@ $script:RobotFormat = @{
     'robot/event/run'         = @((F run n 1 $script:Run))
     'robot/summary'           = @((F run_ms u 20), (F dist_mm s 16), (F max_hump_dmm u 10),
                                   (F humps u 8), (F barcodes u 8), (F obstacles u 8))
-    'robot/event/command'     = @((F cmd n 2 $script:Cmd), (F ok u 1))
+    'robot/event/command'     = @((F cmd n 3 $script:Cmd), (F ok u 1))
 }
 
 function ConvertFrom-RobotHex([string]$Hex) {
@@ -107,7 +107,8 @@ function Read-RobotBits([byte[]]$Bytes, [ref]$Pos, [int]$Bits) {
 }
 
 # Payload bytes -> ordered fields.  Text payloads (JSON firmware, robot/info,
-# robot/status, robot/command, unknown topics) come back as a string.
+# robot/status, robot/nav_map, robot/command, unknown topics) come back as a
+# string.
 # A binary message never starts with '{' (0x7B): its low 2 bits are 2.
 function Read-RobotPayload([string]$Topic, [byte[]]$Bytes) {
     $isBinary = ($Bytes.Length -gt 0) -and ($Bytes[0] -ne 0x7B) -and

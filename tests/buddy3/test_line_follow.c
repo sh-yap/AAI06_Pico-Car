@@ -1076,12 +1076,12 @@ test_ref_reset_on_recalibration(void)
 
 
 /*
- * CR1 Phase 4: the packed 3-byte sweep-history samples must read back
+ * The packed 3-byte sweep-history samples must read back
  * exactly what was written for every 12-bit value, and mask (never wrap)
  * outside it.
  */
 
-/* LINE_CAL_HISTORY is 256 in line_follow.c (depth is not a CR1 item). */
+/* Matches LINE_CAL_HISTORY in line_follow.c. */
 #define TEST_HISTORY_SAMPLES    256U
 
 static void

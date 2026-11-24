@@ -87,6 +87,16 @@ Check (($bc.code -eq 'INVALID') -and ($bc.command -eq 'NONE')) "barcode code 44 
 $bc = Read-RobotPayload 'robot/event/barcode' (ConvertFrom-RobotHex '02000000b400')
 Check ($bc.code -eq 'UNKNOWN') "barcode code 45 -> UNKNOWN (reserved)"
 
+Write-Host "command acks: 3-bit cmd (map = 4) + ok"
+# Header 34 bits, cmd bits 34-36, ok bit 37: byte 4 = (cmd << 2) | (ok << 5).
+$ack = Read-RobotPayload 'robot/event/command' (ConvertFrom-RobotHex '0200000030')
+Check (($ack.cmd -eq 'map') -and ($ack.ok -eq 1)) "map ack ok"
+$ack = Read-RobotPayload 'robot/event/command' (ConvertFrom-RobotHex '0200000010')
+Check (($ack.cmd -eq 'map') -and ($ack.ok -eq 0)) "map ack rejected"
+$ack = Read-RobotPayload 'robot/event/command' (ConvertFrom-RobotHex '0200000024')
+Check (($ack.cmd -eq 'start') -and ($ack.ok -eq 1)) "start ack ok"
+Check ((ConvertTo-RobotJson -Topic 'robot/nav_map' -Hex '6e6f6e65') -eq 'none') "robot/nav_map text"
+
 Write-Host "text payloads pass through"
 $j = '{"v":1,"t":5,"seq":3}'
 $hex = -join ([System.Text.Encoding]::UTF8.GetBytes($j) | ForEach-Object { $_.ToString('x2') })

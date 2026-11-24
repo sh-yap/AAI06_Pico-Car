@@ -888,7 +888,7 @@ message buffers (already packed).
 | Bench/tooling structs: `obstacle_probe_t`, `obstacle_pin_test_t`, `obstacle_servo_cal_t` | Used only by `ultrasonic_test` / `servo_test` |
 | SDK / lwIP / cyw43 / pico-sdk buffers and structures (`comms_link_msg_t` 260 B payload buffers, `pbuf` pools, `cyw43_utk`) | Third-party code, no application field ranges |
 | Hardware registers, SIO, ADC FIFO, PWM slices | Memory-mapped hardware, fixed layout |
-| `static const` tables: `c39_table`, `course_codes`, `sin_milli`, `g_*_names` (JSON builds), `line_state_name` | ROM (or dropped from binary builds), not RAM data fields |
+| `static const` tables: `c39_table`, `g_accepted_names` (nav_map), `sin_milli`, `g_*_names` (JSON builds), `line_state_name` | ROM (or dropped from binary builds), not RAM data fields |
 | Configuration records: `motion_config_t` 64 B, `b4_cfg_config_t` 96 B, `motion_pid_t`, float gains/slopes | Written once during init, read-only afterwards; a field range here is a tuning constant, not measured data |
 | `motion_learn_t` 124 B (fits, sums, PWM history), `b4_proc` filter arrays other than the incline window | Full-width calculation history (rule 2); packing would cost precision and gain little |
 
