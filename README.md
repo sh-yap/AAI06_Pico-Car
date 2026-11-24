@@ -33,7 +33,7 @@ The car calibrates its sensors on-board at every `START`, follows lines through 
 | **Buddy 2** | 2500770 | Motion Control                  | Dual DC motors, quadrature wheel encoders, closed-loop PID speed control, straight-line correction, encoder-based turning (`motion_*.c`)                                          |
 | **Buddy 3** | 2501386 | Line & Barcode Sensing          | Dual IR line-following sensors, startup & in-run threshold adaptation, junction detection, Code 39 barcode capture & decoding (`line_follow.c`, `barcode.c`, `buddy3_task.c`)     |
 | **Buddy 4** | 2500847 | IMU & Terrain                   | LSM303DLHC accelerometer over I2C1, stationary calibration, hump/ramp peak height estimation, motion classification, encoder-derived turn rate, lift/pick-up detection (`b4_*.c`) |
-| **Buddy 5** | 2500831 | Ultrasonic & Obstacle Avoidance | HC-SR04 ultrasonic sensor + SG90 servo scan (coarse-to-fine), obstacle profiling (distance, angle, width, clearances), bypass planning & line recovery (`obstacle_*.c`)           |
+| **Buddy 5** | 2500831 | Ultrasonic & Obstacle Avoidance | HC-SR04 ultrasonic sensor + SG90 servo scan (60°–120°), obstacle profiling (distance, angle, width, clearances), bypass planning & line recovery (`obstacle_*.c`)                  |
 
 ---
 
@@ -65,7 +65,7 @@ The car calibrates its sensors on-board at every `START`, follows lines through 
 | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **NFR1** | The control loop shall run on a fixed 20 ms period, in lock-step with the motion loop.                                                                                                    |
 | **NFR2** | The car shall cruise at 100 mm/s on straights, reduced automatically to ~50 mm/s at full steer.                                                                                           |
-| **NFR3** | Use a compact binary MQTT codec: high-rate telemetry at QoS 0, state / events at QoS 1 (retained), each payload version-tagged.                                                           |
+| **NFR3** | Use a compact binary MQTT codec: high-rate telemetry at QoS 0, events at QoS 1 (`state` and `summary` retained), each payload version-tagged.                                             |
 | **NFR4** | On Wi-Fi loss, the car shall auto-reconnect (`re-associate → DHCP → MQTT → re-subscribe`) without stopping, retrying after 1 s and then every 5 s; drops and rejoins shall be observable. |
 | **NFR5** | Each task's output shall have a single writer, shared as a packed word via a message buffer or a sequence-counted / mutex-guarded snapshot; no task writes another task's data.           |
 | **NFR6** | The software shall run on µT-Kernel 3.0 SMP on the RP2040 (Pico W) with a USB-CDC console.                                                                                                |
@@ -83,8 +83,8 @@ A core design principle across the project was to **learn from onboard sensors r
 | **Startup (`CALIBRATE`)** | Fixed IR thresholds & manual tuning               | Pivots across the line on every `START` to learn black/white thresholds, contrast margins, and IMU noise floor; aborts to `READY` if checks fail.               |
 | **Line Following**        | Static light/dark cutoffs                         | Centre IR adapts its reference threshold in-run for fading tape/dark patches; right IR floors at its calibrated `START` level to prevent false junctions.       |
 | **Barcode Decoding**      | Time-based bar widths                             | Measures bar/space widths in **wheel-encoder counts along the sensor's arc**, keeping Code 39 ratios accurate regardless of speed.                              |
-| **Terrain & Lift (IMU)**  | Hardcoded 10 mm ramp height & static tilt cutoffs | Learns level baseline and driving noise floor on-car; computes hump height from pitch incline and the 80 mm lever arm, and separates lifts from normal driving. |
-| **Obstacle Bypass**       | Assumed obstacle width & clearances               | Runs a coarse-to-fine servo scan for distance and clearances, then watches the obstacle face during bypass until passing its edge to estimate width.            |
+| **Terrain & Lift (IMU)**  | Hardcoded 10 mm ramp height & static tilt cutoffs | Learns level baseline and driving noise floor on-car; computes hump height from lateral tilt and the 115 mm tyre-track lever, and separates lifts from normal driving. |
+| **Obstacle Bypass**       | Assumed obstacle width & clearances               | Runs a 60°–120° servo sweep (15° steps) for distance and clearances, then watches the obstacle face during bypass until passing its edge to estimate width.            |
 | **Verification**          | Blind trial-and-error flashes                     | Uses host unit tests (`tests/`), an onboard RAM run recorder (`VC_RECORDER=1` via OpenOCD), and offline replays to validate fixes.                              |
 
 ---
@@ -97,8 +97,8 @@ The firmware follows a strict **sensors report → Vehicle Controller arbitrates
 
 ```text
   [Buddy 3: Line & Barcode] ──(packed mbf)──┐
-  [Buddy 4: IMU & Terrain ] ──(packed mbf)──┼──► [Buddy 1: Vehicle Controller (20 ms)] ──(packed mbf)──► [Buddy 2: Motion PID]
-  [Buddy 5: Ultrasonic    ] ──(seqlock)─────┘                    │
+  [Buddy 4: IMU & Terrain ] ──(packed mbf)──┼──► [Buddy 1: Vehicle Controller (20 ms)] ──(motion API)──► [Buddy 2: Motion PID]
+  [Buddy 5: Ultrasonic    ] ──(API / flags)─┘                    │
                                                                  ▼ (seqlock / packed event queue)
                                                       [Buddy 1: Wi-Fi / MQTT Comms] ◄──► Laptop Dashboard
 ```
@@ -125,29 +125,29 @@ The firmware follows a strict **sensors report → Vehicle Controller arbitrates
 ## 5. Standout Features by Buddy
 
 ### Buddy 1 — Vehicle Controller, Comms & Dashboard
-- **Deterministic state machine (`vc.c`):** Pure-logic arbitration covering `INIT`, `READY`, `CALIBRATE`, `FOLLOW_LINE`, `JUNCTION_TURN`, `OBSTACLE_STOP`, `OBSTACLE_SCAN`, `BYPASS`, `LINE_RECOVERY`, `FINISHED`, and latched `EMERGENCY_STOP`.
+- **Deterministic state machine (`vc.c`):** Pure-logic arbitration covering `INITIALISE`, `READY`, `CALIBRATE`, `FOLLOW_LINE`, `HANDLE_JUNCTION`, `TURNING`, `OBSTACLE_SCAN`, `BYPASS`, `REACQUIRE_LINE`, `FINISHED`, and latched `EMERGENCY_STOP`.
 - **Dual-format MQTT codec (`comms_codec.c`):** Binary by default (up to ~78% smaller than JSON) with a compile-time JSON fallback (`COMMS_FORMAT=json`) and matching PowerShell/browser decoders.
 - **Resilient wireless link:** Automatic Wi-Fi → DHCP → MQTT → re-subscribe recovery that never blocks driving, with retained state/status messages so reconnecting dashboards immediately sync.
 - **Live web dashboard (`tools/dashboard.html`):** Real-time charts for wheel speeds, distance, line/barcode sensors, IMU terrain/hump KPIs, ultrasonic scan table, path map, state machine, and event timeline.
 
 ### Buddy 2 — Motion Control
 - **Closed-loop dual-wheel PID:** Independent left/right velocity tracking at 20 ms with slew-rate limiting and straight-line correction.
-- **High-resolution quadrature odometry:** ~14.0 counts/mm (~0.07 mm/count) supporting accurate distance tracking (verified 301 mm measured on a 300 mm run) and repeatable encoder-based pivots/turns.
+- **High-resolution quadrature odometry:** ~14.0 counts/mm (~0.07 mm/count) supporting accurate distance tracking and repeatable encoder-based pivots/turns.
 - **Built-in safety checks:** Per-wheel stall detection, encoder plausibility/invalid-transition checks, finite manoeuvre timeouts, and clean zero-drift active braking.
 
 ### Buddy 3 — Line Following & Barcode Sensing
 - **Adaptive two-sensor line tracking:** Self-calibrating black/white thresholds at `START`, dark-patch reference recovery (`ref_threshold`), and last-seen-side line-loss pivot recovery.
 - **Reliable junction & turn handling:** Angle-tolerant junction detection with early 90° turn catch on line reacquisition and queued barcode execution (or straight-through when no command is queued).
-- **Arc-compensated Code 39 barcode decoder:** Captures bar/space edges in encoder counts projected onto the left-arm sensor's arc, decoding full Code 39 characters (reporting any decoded character to the dashboard and mapping navigation commands `A`/`Y`, `F`, `Z`, `X`).
+- **Arc-compensated Code 39 barcode decoder:** Captures bar/space edges in encoder counts projected onto the left-arm sensor's arc, decoding full Code 39 characters (reporting any decoded character to the dashboard and applying the navigation mapping configured over MQTT `MAP`, e.g. `A`/`F`/`Z`/`X`).
 
 ### Buddy 4 — IMU & Terrain
-- **Physics-based hump height estimation:** Measures pitch incline on the LSM303DLHC accelerometer and converts peak incline through the rear-axle-to-caster lever arm (80 mm) into peak hump height in tenths of a millimetre, tracking the run maximum.
+- **Physics-based hump height estimation:** Measures lateral tilt on the LSM303DLHC accelerometer and converts peak incline through the 115 mm tyre-track lever into peak hump height in tenths of a millimetre, tracking the run maximum.
 - **Learned noise floor & jolt rejection:** Stationary calibration + 10-sample confirmation rejects motor startup/steering jolts (< 6 samples) so flat runs do not produce false humps.
 - **Encoder-derived turn rate:** Computes yaw rate from differential wheel speeds and the 115 mm tyre track for clean, low-noise dashboard telemetry without magnetometer drift.
 - **Pick-up / lift detection:** Detects when the car is lifted off the ground (including an uncued moving safety ceiling) and signals the Vehicle Controller to brake both motors and transition cleanly to `FINISHED`.
 
 ### Buddy 5 — Ultrasonic & Obstacle Avoidance
-- **Two-stage adaptive servo scan:** Performs a coarse sweep to locate an obstacle followed by a fine scan to resolve edges accurately.
+- **Bounded servo scan & path check:** Sweeps 60°–120° in 15° steps (3 pings per angle) to locate obstacles, followed by a post-pivot path check before bypassing.
 - **Obstacle profiling & bypass edge-width estimation:** Profiles obstacle distance, angular position, and left/right navigable clearances during the scan, then watches the obstacle's face with the ultrasonic sensor while bypassing until passing its edge to estimate and report obstacle width to the dashboard.
 - **Autonomous bypass & line recovery:** Selects the clear side (or halts safely if blocked), generates multi-leg encoder-guided bypass manoeuvres, and hands back to line search to rejoin the track.
 
@@ -174,7 +174,7 @@ CR2 (Tribunal 2) injected the requirement: *"If any part of the system fails or 
 Much of our architecture already enforced fail-safe handling in firmware; Tribunal 2 audited all 17 failure modes across every subsystem.
 
 ### Already Implemented in Firmware
-- **Unified latched `EMERGENCY_STOP` (`vc.c`, `vc_task.c`):** Any serious fault (`STALL`, `ENCODER`, `MOTION_CMD`, `ULTRASONIC`) triggers Rule 1 in `step_checked()`, braking both motors within one 20 ms cycle and latching until the fault clears, the car is stationary, and the operator explicitly sends `STOP`.
+- **Unified latched `EMERGENCY_STOP` (`vc.c`, `vc_task.c`):** Any serious fault (`STALL`, `ENCODER`, `MOTION_CMD`, `ULTRASONIC`) triggers Rule 1 in `step_checked()`, requesting `motion_stop()` in the same 20 ms control cycle and latching until the fault clears, the car is stationary, and the operator explicitly sends `STOP`.
 - **Stale / missing sensor protection:** Every sensor message buffer carries timestamps/validity; stale or missing data is rejected rather than treated as valid.
 - **Graceful degradation on non-critical failures:**
   - **Wi-Fi / MQTT loss:** Driving continues autonomously while the comms task reconnects in the background (`re-associate → DHCP → MQTT → re-subscribe`).
@@ -208,6 +208,8 @@ Tribunal 2 also documented 7 targeted hardening proposals for future firmware it
 The single continuous run above demonstrates the integrated system across all five buddies (`B1-T1`–`B5-T5`): startup calibration, line following, barcode decoding and junction turning, ramp/hump traversal, obstacle detection and bypass, live MQTT telemetry, and pick-up stop.
 
 ### Test Cases
+
+> **Full Test Cases Document:** [`docs/AAI06_Test_Cases.docx`](docs/AAI06_Test_Cases.docx) — complete Master Traceability & Sign-Off Matrix, detailed test procedures, expected results, and dashboard verification steps for all 25 test cases (`B1-T1`–`B5-T5`).
 
 #### Buddy 1 — Wi-Fi, MQTT & Vehicle Controller
 | ID | Type | Test Title | Verified Capability |
@@ -262,7 +264,7 @@ The single continuous run above demonstrates the integrated system across all fi
 - `arm-none-eabi-gcc` (ARM GNU Toolchain) and host `g++` (for `tools/elf2uf2`)
 - GNU Make (`mingw32-make` on Windows / `make` on Linux)
 - Raspberry Pi Pico SDK (for TinyUSB USB-CDC console and CYW43 driver headers)
-- Local (git-ignored) Wi-Fi & MQTT headers in `config/`: `wifi_credentials.h`, `mqtt_config.h`, `telemetry_config.h`
+- Local (git-ignored) Wi-Fi & MQTT headers in `config/`: `wifi_credentials.h` and `mqtt_config.h` (created from their `.example.h` templates)
 
 ### Build the Autonomous Car Image
 
@@ -292,7 +294,7 @@ mingw32-make -j8 \
 
 ### Host Unit Tests
 
-Host-side regression tests live under `tests/` (`buddy3`, `buddy4`, `buddy4_proc`, `comms`, `motion`, `obstacle`, `recorder`, `vc`), e.g.:
+Host-side regression tests live under `tests/` (`buddy3`, `buddy4_proc`, `comms`, `motion`, `obstacle`, `recorder`, `vc`), e.g.:
 
 ```sh
 make -C tests/vc test
@@ -309,7 +311,7 @@ make -C tests/comms test
 | `kernel/`, `device/`, `include/`, `lib/` | µT-Kernel 3.0 dual-core SMP kernel and RP2040 BSP |
 | `tests/` | Host unit & regression test suites for each subsystem |
 | `tools/` | Live web dashboard (`dashboard.html`), binary MQTT decoders, log scripts, recorder reader |
-| `docs/` | Project & platform docs: [`docs/project/README.md`](docs/project/README.md) (subsystem & requirement guides), [`docs/TEST_INTEGRATE.md`](docs/TEST_INTEGRATE.md), [`docs/COMMS_GUIDE.md`](docs/COMMS_GUIDE.md), [`docs/BINARY_FORMAT.md`](docs/BINARY_FORMAT.md), [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md), [`docs/PORT_RP2040.md`](docs/PORT_RP2040.md), and hardware datasheets (`docs/project_datasheets/`) |
+| `docs/` | Project & platform docs: [`docs/project/README.md`](docs/project/README.md) (subsystem & requirement guides), [`docs/AAI06_Test_Cases.docx`](docs/AAI06_Test_Cases.docx) (25 acceptance test procedures), [`docs/TEST_INTEGRATE.md`](docs/TEST_INTEGRATE.md), [`docs/COMMS_GUIDE.md`](docs/COMMS_GUIDE.md), [`docs/BINARY_FORMAT.md`](docs/BINARY_FORMAT.md), [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md), [`docs/PORT_RP2040.md`](docs/PORT_RP2040.md), and hardware datasheets (`docs/project_datasheets/`) |
 | `evidence/` | Verification records and historical bench/motion reports ([`evidence/motion/README.md`](evidence/motion/README.md)) |
 
 ---
