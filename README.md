@@ -76,10 +76,7 @@ The car calibrates its sensors on-board at every `START`, follows lines through 
 | **FR14** | Once started, the car shall complete the course without laptop input; loss of Wi-Fi shall not interrupt driving. |
 | **FR15** | While bypassing an obstacle, the car shall estimate the obstacle's width by watching its face with the ultrasonic sensor until it passes the edge, and report the estimate to the dashboard. |
 
-<details>
-<summary><strong>Non-Functional Requirements (NFR1–NFR8)</strong> — click to expand</summary>
-
-<br>
+### Non-Functional Requirements (NFR1–NFR8)
 
 | ID | Non-Functional Requirement |
 | --- | --- |
@@ -91,8 +88,6 @@ The car calibrates its sensors on-board at every `START`, follows lines through 
 | **NFR6** | The software shall run on µT-Kernel 3.0 SMP on the RP2040 (Pico W) with a USB-CDC console. |
 | **NFR7** | Each peripheral shall have a single owner (radio, I2C1 / IMU, ADC / IR, ultrasonic, servo, motors / encoders). |
 | **NFR8** | The car shall brake both motors within one control cycle (≤ 20 ms) on a serious fault and latch until acknowledged. |
-
-</details>
 
 ---
 
@@ -166,7 +161,7 @@ stateDiagram-v2
 
 | Subsystem | Peripheral | GPIO Pins | Notes |
 | --- | --- | --- | --- |
-| **Motors (Left / Right)** | PWM (20 kHz, MX1508) | GP8/GP9 (L), GP10/GP11 (R) | Active-low inverted inputs; 1 A cont. / 1.5 A peak |
+| **Motors (Left / Right)** | PWM (10 kHz, MX1508) | GP8/GP9 (L), GP10/GP11 (R) | Active-high PWM with both-high active brake; 1 A cont. / 1.5 A peak |
 | **Encoders (Left / Right)** | GPIO Quadrature | GP16/GP17 (L), GP4/GP5 (R) | ~14.0 counts/mm (~2536 / 2529 counts/rev) |
 | **Line IR Sensors** | ADC0 / ADC1 | GP26 (Right), GP27 (Centre) | Side-by-side ahead of front caster |
 | **Barcode IR Sensor** | ADC2 | GP28 | Mounted on left arm beside the line |
@@ -379,7 +374,14 @@ make -C tests/comms test
 
 | Path | Contents |
 | --- | --- |
-| `app_program/` | All robot application firmware (Buddies 1–5, Vehicle Controller, comms codec, run recorder) |
+| `app_program/` | All robot application firmware, organized into one folder per buddy (see below) |
+| `app_program/buddy1_vehicle_comms/` | Buddy 1: Vehicle Controller (`vc*`), Wi-Fi/MQTT comms & codec (`comms*`), run recorder, `vc_car_main.c` |
+| `app_program/buddy2_motion/` | Buddy 2: motors, encoders, PID speed control, motion task (`motion_*`) and on-target test images |
+| `app_program/buddy3_line_barcode/` | Buddy 3: IR sensors, line following, barcode decoding, navigation map |
+| `app_program/buddy4_imu_terrain/` | Buddy 4: IMU and terrain processing (`b4_*`) |
+| `app_program/buddy5_obstacle/` | Buddy 5: ultrasonic, servo, obstacle scan/bypass (`obstacle_*`) and on-target test images |
+| `app_program/common/` | Shared build stamp, kernel demo (`app_main.c`), console helpers, timing probe |
+| `app_program/modules.mk` | Module folder list shared by the firmware build and host test suites |
 | `build_make/` | GNU Make build system and RP2040/ROBO-PICO profile rules |
 | `config/` | RTOS configuration (`config.h`) and local Wi-Fi/MQTT headers |
 | `kernel/`, `device/`, `include/`, `lib/` | µT-Kernel 3.0 dual-core SMP kernel and RP2040 BSP |
