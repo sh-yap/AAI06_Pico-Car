@@ -93,6 +93,8 @@ step_lift (vc_t * p_vc, vc_inputs_t const * p_in)
     uint8_t const both = (uint8_t)(VC_LINE_SENSOR_CENTRE
                                    | VC_LINE_SENSOR_RIGHT);
     bool const b_both_black = (both == (p_in->line_sensors & both));
+    bool const b_stopped_scan = (VC_STATE_OBSTACLE_SCAN == p_vc->state)
+                                && (true == p_in->b_stationary);
     bool b_confirmed = false;
     uint8_t limit;
 
@@ -104,22 +106,29 @@ step_lift (vc_t * p_vc, vc_inputs_t const * p_in)
     }
     else if (true == b_both_black)
     {
-        if (UINT8_MAX > p_vc->lift_spell_cycles)
-        {
-            p_vc->lift_spell_cycles++;
-        }
-
         if (true == p_in->b_imu_cue)
         {
             p_vc->b_lift_spell_cued = true;
+        }
+
+        /* Do not count while intentionally stopped for an obstacle scan
+         * unless cued, so pausing on a junction cannot pre-charge the
+         * uncued ceiling. */
+        if (((false == b_stopped_scan)
+             || (true == p_vc->b_lift_spell_cued))
+            && (UINT8_MAX > p_vc->lift_spell_cycles))
+        {
+            p_vc->lift_spell_cycles++;
         }
 
         limit = (0U == p_vc->lift_spell_max_cycles)
                 ? (uint8_t)VC_LIFT_SPELL_FALLBACK_CYCLES
                 : p_vc->lift_spell_max_cycles;
 
-        if ((p_vc->lift_spell_cycles > limit)
-            && (true == p_vc->b_lift_spell_cued))
+        if (((p_vc->lift_spell_cycles > limit)
+             && (true == p_vc->b_lift_spell_cued))
+            || ((p_vc->lift_spell_cycles > (uint8_t)VC_LIFT_UNCUED_CYCLES)
+                && (false == p_in->b_stationary)))
         {
             b_confirmed = true;
 

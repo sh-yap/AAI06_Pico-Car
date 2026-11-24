@@ -123,6 +123,11 @@
  *  - VC_LIFT_SPELL_FALLBACK_CYCLES is used before any normal spell has
  *    ended.  15 cycles (300 ms) is 1.4 times the observed normal worst
  *    case, and the fresh START calibration does not train it.
+ *  - VC_LIFT_UNCUED_CYCLES is a moving-car safety ceiling when Buddy 4's
+ *    IMU cue did not fire (e.g. during the 3 s sharp-change warm-up, a
+ *    gentle vertical lift, or a jolt window).  50 cycles (1.0 s) while
+ *    not stationary is 2 times the cap and 4.5 times the observed normal
+ *    worst case, yet stops the car before an in-air barcode turn.
  *
  * The learned length survives a run until the next power-on, like Buddy 4's
  * learned statistics; vc_init() clears it.  A confirmed lift spell is not
@@ -130,6 +135,7 @@
  */
 #define VC_LIFT_SPELL_FALLBACK_CYCLES (15U)
 #define VC_LIFT_SPELL_CAP_CYCLES      (25U)
+#define VC_LIFT_UNCUED_CYCLES         (50U)
 
 /* Line lost while following: stop, then pivot in place to find it again,
  * towards the side it was last seen on first, then the other side.  The

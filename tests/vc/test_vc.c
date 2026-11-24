@@ -2140,17 +2140,17 @@ test_lift_confirmed (void)
     CHECK(VC_CAL_REQ_BEGIN == g_out.cal_req);
 }
 
-/* A long both-black spell with no IMU cue is a junction, not a lift, and it
- * teaches only up to the safety cap. */
+/* A moderate both-black spell with no IMU cue is a junction, not a lift,
+ * and it teaches only up to the safety cap. */
 static void
 test_lift_without_cue (void)
 {
-    printf("lift: long both-black spell without cue -> no lift\n");
+    printf("lift: moderate both-black spell without cue -> no lift\n");
 
     go_to_follow_line(0U);
     set_both_black();
     g_in.b_imu_cue = false;
-    hold_both_black(60U);
+    hold_both_black(VC_LIFT_SPELL_CAP_CYCLES + 5U);
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(!g_out.b_lift_confirmed);
 
@@ -2158,6 +2158,60 @@ test_lift_without_cue (void)
     g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
     step();
     CHECK(VC_LIFT_SPELL_CAP_CYCLES == g_vc.lift_spell_max_cycles);
+}
+
+/* A sustained both-black spell while moving confirms a lift at the uncued
+ * safety ceiling even if Buddy 4's IMU cue never fired (e.g. during the
+ * 3 s sharp-change warm-up or a gentle vertical lift). */
+static void
+test_lift_uncued_moving (void)
+{
+    printf("lift: sustained both-black while moving without cue -> FINISHED\n");
+
+    go_to_follow_line(0U);
+    set_both_black();
+    g_in.b_imu_cue    = false;
+    g_in.b_stationary = false;
+    hold_both_black(VC_LIFT_UNCUED_CYCLES);
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
+
+    step();                                   /* Cycle 51 > 50: confirm.  */
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(g_out.b_lift_confirmed);
+    CHECK((VC_LIFT_UNCUED_CYCLES + 1U) == g_vc.lift_spell_cycles);
+}
+
+/* Stopping on a junction (e.g. OBSTACLE_SCAN) with no IMU cue must not
+ * trigger the uncued lift ceiling, nor pre-charge the counter so it fires
+ * the instant the car resumes moving off the junction. */
+static void
+test_lift_uncued_stationary (void)
+{
+    printf("lift: stationary on junction without cue -> no lift\n");
+
+    go_to_follow_line(0U);
+    g_in.b_obstacle_ahead = true;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+
+    g_in.b_obstacle_ahead = false;
+    g_in.b_stationary     = true;
+    g_in.b_imu_cue        = false;
+    set_both_black();
+    hold_both_black(VC_LIFT_UNCUED_CYCLES + 10U);
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(!g_out.b_lift_confirmed);
+
+    /* Scan clears and the car resumes moving while still over the junction:
+     * must not immediately confirm a lift on the first moving cycle. */
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_CONTINUE;
+    g_in.b_stationary   = false;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
 }
 
 /* A short both-black spell with the cue is not a lift, even after a longer
@@ -2303,6 +2357,8 @@ main (void)
     test_finished();
     test_lift_confirmed();
     test_lift_without_cue();
+    test_lift_uncued_moving();
+    test_lift_uncued_stationary();
     test_lift_short_with_cue();
     test_lift_fallback();
     test_lift_not_in_calibration();

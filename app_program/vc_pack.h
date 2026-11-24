@@ -65,7 +65,7 @@
  *   W5      bits  0..16  search_limit_mdeg 17 U, 45 000 or 90 000
  *           bits 17..18  steer_side        2 s, -1..+1
  *           bits 19..25  steer_mag         7 U, 0..VC_SEARCH_STEER (127)
- *           bits 26..30  lift_spell_cycles 5 U, 0..VC_LIFT_SPELL_CAP_CYCLES
+ *           bits 26..30  reserved, 0
  *           bit   31     b_lift_spell_cued
  *   W6      bits  0..17  cal_out_mdeg      18 U, 0..262 143
  *           bits 18..19  cal_first_dir     2 s, -1..+1
@@ -78,7 +78,8 @@
  *                        other side and the return margin, so 18 U holds
  *                        every value the code can produce.
  *           bits 18..22  lift_spell_max_cycles 5 U, 0..CAP (25)
- *           bits 23..31  reserved, 0
+ *           bits 23..29  lift_spell_cycles 7 U, 0..VC_LIFT_UNCUED_CYCLES + 1
+ *           bits 30..31  reserved, 0
  *   W8      bits  0..23  junction_origin_mm 24 s, travel_mm absolute
  *           bits 24..31  reserved, 0
  *   W9      bits  0..23  junction_seen_mm  24 s, travel_mm absolute

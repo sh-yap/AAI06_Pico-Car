@@ -227,7 +227,7 @@ test_max (void)
     vc.steer_side               = -1;
     vc.b_right_exit             = true;
     vc.steer_mag                = (int16_t) VC_SEARCH_STEER;
-    vc.lift_spell_cycles        = (uint8_t) VC_LIFT_SPELL_CAP_CYCLES;
+    vc.lift_spell_cycles        = (uint8_t) (VC_LIFT_UNCUED_CYCLES + 1U);
     vc.lift_spell_max_cycles    = (uint8_t) VC_LIFT_SPELL_CAP_CYCLES;
     vc.b_lift_spell_cued        = true;
 
@@ -271,8 +271,8 @@ test_saturation (void)
     printf("out-of-range fields\n");
 
     memset(&vc, 0, sizeof(vc));
-    vc.lift_spell_cycles     = 200U;      /* 5 U field.                   */
-    vc.lift_spell_max_cycles = 200U;
+    vc.lift_spell_cycles     = 200U;      /* 7 U field.                   */
+    vc.lift_spell_max_cycles = 200U;      /* 5 U field.                   */
     vc.steer_mag             = 1000;      /* 7 U field.                   */
     vc.search_limit_mdeg     = 200000;    /* 17 U field.                  */
     vc.cal_out_mdeg          = 300000;    /* 18 U field.                  */
@@ -283,7 +283,7 @@ test_saturation (void)
 
     vc_pack_state(&vc, &packed);
     CHECK(vc_unpack_state(&packed, &back));
-    CHECK(31U == back.lift_spell_cycles);
+    CHECK(127U == back.lift_spell_cycles);
     CHECK(31U == back.lift_spell_max_cycles);
     CHECK(127 == back.steer_mag);
     CHECK(131071 == back.search_limit_mdeg);
@@ -371,11 +371,15 @@ test_bad_records (void)
     CHECK(!vc_unpack_state(&bad, &back));
 
     bad = packed;
+    bad.word[5] |= 0x7C000000U;
+    CHECK(!vc_unpack_state(&bad, &back));
+
+    bad = packed;
     bad.word[6] |= 0xFFC00000U;
     CHECK(!vc_unpack_state(&bad, &back));
 
     bad = packed;
-    bad.word[7] |= 0xFF800000U;
+    bad.word[7] |= 0xC0000000U;
     CHECK(!vc_unpack_state(&bad, &back));
 
     bad = packed;
