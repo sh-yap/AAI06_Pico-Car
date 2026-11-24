@@ -47,6 +47,10 @@ changes in your files (each is commented "Buddy N to review").
   proper power.
 
 ### Buddy 3 (Line + barcode)
+- **Superseded:** the character → movement mapping is no longer in the
+  code.  The PC sends it over MQTT (`map A=LEFT F=RIGHT Z=FORWARD X=UTURN`
+  on `robot/command`, see `app_program/nav_map.h`); the note below is the
+  earlier, hard-coded version.
 - `barcode.c/.h`: added **F** and **Z**. Barcode codes now match the MQTT
   barcode field (`NONE, A, B, C, D, F, Z, INVALID` = 0..7). Testing
   mapping: **A = LEFT, F = RIGHT, Z = U-TURN** (B/C/D kept for bench

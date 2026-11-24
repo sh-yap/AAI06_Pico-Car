@@ -63,7 +63,7 @@ typedef struct
 
 
 /*
- * CR1 Phase 4 storage helper: one sweep history sample (centre and right
+ * Packed storage helper: one sweep history sample (centre and right
  * 12-bit ADC counts) packed as 24 bits in three bytes, 768 B for the
  * 256-sample ring instead of 1024 B.
  *

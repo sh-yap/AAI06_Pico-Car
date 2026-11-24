@@ -49,6 +49,10 @@
 #error "OBSTACLE_PLAN_BACK_MAX_DEG must be 5..90 (sin_tenk[] range)"
 #endif
 
+#if ((OBSTACLE_EDGE_BEAM_DEG < 1U) || (OBSTACLE_EDGE_BEAM_DEG > 45U))
+#error "OBSTACLE_EDGE_BEAM_DEG must be 1..45 (sin_tenk[] range, tan)"
+#endif
+
 #if (OBSTACLE_PLAN_MAX_DEG > 45U)
 #error "OBSTACLE_PLAN_MAX_DEG above 45 breaks the front-corner argument"
 #endif
@@ -212,6 +216,58 @@ obstacle_plan_line_watch (obstacle_line_watch_t * p_watch, bool b_black,
     }
 
     return (seen);
+}
+
+/*!
+ * @brief Where the obstacle's edge on the bypass side is, from an edge
+ *        watch on leg 1.
+ *
+ * In the plan's frame (origin at the rear axle where the car stopped, the
+ * line straight ahead), after pivoting turn_deg and driving heard_mm the
+ * sensor is (heard_mm + OBSTACLE_AXLE_TO_SENSOR_MM) x sin(turn_deg) to the
+ * side, looking square at the face.  The face kept echoing until the edge
+ * was face_mm x tan(OBSTACLE_EDGE_BEAM_DEG) short of the sensor's axis.
+ *
+ * @param[in]  p_watch   A finished watch (FOUND or AT_LEAST).
+ * @param[in]  turn_deg  The plan's first pivot.
+ * @param[out] p_edge_mm Edge from the car's centre line where it stopped,
+ *                       towards the bypass side (at least 0); for AT_LEAST
+ *                       the edge is at least this far out.
+ *
+ * @return false for NO_FACE or WATCHING (no estimate) or a NULL pointer.
+ */
+bool
+obstacle_plan_edge_mm (obstacle_edge_watch_t const * p_watch,
+                       uint32_t                      turn_deg,
+                       uint32_t *                    p_edge_mm)
+{
+    bool     b_ok = false;
+    uint32_t turn = turn_deg;
+    uint32_t along_mm;
+    uint32_t sensor_mm;
+    uint32_t lead_mm;
+
+    if ((NULL != p_watch) && (NULL != p_edge_mm)
+        && ((OBSTACLE_EDGE_FOUND == p_watch->result)
+            || (OBSTACLE_EDGE_AT_LEAST == p_watch->result)))
+    {
+        if (turn > 90U)
+        {
+            turn = 90U;
+        }
+
+        /* Cast to uint32_t: heard_mm was just checked non-negative. */
+        along_mm = (p_watch->heard_mm > 0) ? (uint32_t)p_watch->heard_mm : 0U;
+        sensor_mm = ((along_mm + OBSTACLE_AXLE_TO_SENSOR_MM) * sin_tenk[turn])
+                    / PLAN_UNIT;
+        lead_mm = (p_watch->face_mm * sin_tenk[OBSTACLE_EDGE_BEAM_DEG])
+                  / sin_tenk[90U - OBSTACLE_EDGE_BEAM_DEG];
+
+        *p_edge_mm = (sensor_mm > lead_mm) ? (sensor_mm - lead_mm) : 0U;
+        b_ok = true;
+    }
+
+    return (b_ok);
 }
 
 /*** end of file ***/

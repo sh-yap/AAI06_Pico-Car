@@ -19,8 +19,49 @@
 #include <string.h>
 
 #include "barcode.h"
+#include "nav_map.h"
 
-#define NARROW_UM          3000     /* 3 mm, course spec photo */
+/*
+ * Test view of a finished capture: the decoded character when it is
+ * BARCODE_VALID (in the mapping), else R_INVALID or R_NONE.  Most tests
+ * run with DEFAULT_MAP; the car gets its mapping over MQTT.
+ */
+typedef int result_t;
+#define R_NONE             0
+#define R_INVALID          (-1)
+#define DEFAULT_MAP        "map A=LEFT F=RIGHT Z=FORWARD X=UTURN"
+
+static result_t
+result_now(void)
+{
+    barcode_t const code = barcode_get_code();
+
+    if (code == BARCODE_VALID)
+    {
+        return (result_t)barcode_get_char();
+    }
+
+    return (code == BARCODE_INVALID) ? R_INVALID : R_NONE;
+}
+
+
+/* Apply a map command as the comms task would; false if rejected. */
+static bool
+set_map(char const * p_text)
+{
+    uint32_t word;
+
+    if (!nav_map_parse((uint8_t const *)p_text, (uint32_t)strlen(p_text),
+                       &word))
+    {
+        return false;
+    }
+
+    nav_map_set(word);
+    return true;
+}
+
+#define NARROW_UM         3000     /* 3 mm, course spec photo */
 #define WIDE_UM            9000     /* 9 mm  */
 #define QUIET_UM           30000    /* white before the barcode */
 #define TAIL_UM            100000   /* white driven after it: over the
@@ -134,14 +175,14 @@ is_black_at(int32_t pos_um)
  * Drive over the barcode at speed_mm_s, starting phase_um earlier
  * than the first sample. Returns the code reported on completion.
  */
-static barcode_t
+static result_t
 drive(int32_t speed_mm_s, int32_t phase_um, int32_t direction)
 {
     uint32_t t_ms = 0U;
     int32_t pos_um;
     int32_t end_um = barcode_len_um + TAIL_UM;
     int64_t counts;
-    barcode_t code = BARCODE_NONE;
+    result_t code = R_NONE;
 
     barcode_init();
 
@@ -171,11 +212,11 @@ drive(int32_t speed_mm_s, int32_t phase_um, int32_t direction)
 
         if (barcode_available())
         {
-            code = barcode_get_code();
+            code = result_now();
             last_char = barcode_get_char();
             (void)barcode_get_command();
 
-            if (code != BARCODE_NONE)
+            if (code != R_NONE)
             {
                 return code;
             }
@@ -188,15 +229,55 @@ drive(int32_t speed_mm_s, int32_t phase_um, int32_t direction)
 }
 
 
+/*
+ * Drive over the barcode built last (50 mm/s, forwards) and return the
+ * nav command it gives.  A non-NULL p_remap is applied after the
+ * capture finished but before the command is taken.
+ */
+static nav_command_t
+nav_of_barcode(char const * p_remap)
+{
+    nav_command_t nav = NAV_NONE;
+    uint32_t t;
+
+    barcode_init();
+
+    for (t = 0U; t < 10000U; t += SAMPLE_MS)
+    {
+        int32_t pos = -QUIET_UM + (50 * (int32_t)t);
+        int32_t enc = (int32_t)(((int64_t)(pos + QUIET_UM) * COUNTS_PER_M) / 1000000);
+        barcode_update(is_black_at(pos), t, enc);
+        barcode_check_end(enc);
+
+        if (barcode_available())
+        {
+            if (p_remap != NULL)
+            {
+                (void)set_map(p_remap);
+            }
+
+            nav = barcode_get_command();
+            break;
+        }
+    }
+
+    return nav;
+}
+
+
 static void
 test_decodes_each_code(void)
 {
-    static struct { uint16_t pat; barcode_t code; nav_command_t nav; } const cases[] = {
-        { PAT_A, BARCODE_A, NAV_LEFT },
-        { PAT_F, BARCODE_F, NAV_RIGHT },
-        { PAT_Z, BARCODE_Z, NAV_STRAIGHT },
-        { PAT_Y, BARCODE_Y, NAV_LEFT },
-        { PAT_X, BARCODE_X, NAV_UTURN },
+    /* Each character with a mapping that includes it. */
+    static struct { uint16_t pat; result_t code; nav_command_t nav;
+                    char const * p_map; } const cases[] = {
+        { PAT_A, 'A', NAV_LEFT,     DEFAULT_MAP },
+        { PAT_F, 'F', NAV_RIGHT,    DEFAULT_MAP },
+        { PAT_Z, 'Z', NAV_STRAIGHT, DEFAULT_MAP },
+        { PAT_X, 'X', NAV_UTURN,    DEFAULT_MAP },
+        { PAT_Y, 'Y', NAV_LEFT,     "map Y=LEFT F=RIGHT Z=FORWARD X=UTURN" },
+        { PAT_E, 'E', NAV_UTURN,    "map A=LEFT B=RIGHT Z=FORWARD E=UTURN" },
+        { PAT_B, 'B', NAV_RIGHT,    "map A=LEFT B=RIGHT Z=FORWARD E=UTURN" },
     };
     uint32_t i;
     uint32_t p;
@@ -209,6 +290,7 @@ test_decodes_each_code(void)
         forward_ok = true;
         reversed_ok = true;
         backwards_ok = true;
+        check("test mapping accepted", set_map(cases[i].p_map));
 
         for (p = 0U; p < PHASES; p++)
         {
@@ -230,43 +312,69 @@ test_decodes_each_code(void)
     /* Nav mapping. */
     for (i = 0U; i < (sizeof cases / sizeof cases[0]); i++)
     {
-        nav_command_t nav = NAV_NONE;
-        uint32_t t;
-
+        (void)set_map(cases[i].p_map);
         build(cases[i].pat, false);
-        barcode_init();
-
-        for (t = 0U; t < 10000U; t += SAMPLE_MS)
-        {
-            int32_t pos = -QUIET_UM + (50 * (int32_t)t);
-            int32_t enc = (int32_t)(((int64_t)(pos + QUIET_UM) * COUNTS_PER_M) / 1000000);
-            barcode_update(is_black_at(pos), t, enc);
-            barcode_check_end(enc);
-
-            if (barcode_available())
-            {
-                nav = barcode_get_command();
-                break;
-            }
-        }
-
-        check("barcode maps to nav command", nav == cases[i].nav);
+        check("barcode maps to nav command",
+              nav_of_barcode(NULL) == cases[i].nav);
     }
+
+    (void)set_map(DEFAULT_MAP);
+}
+
+
+/* The mapping comes over MQTT: nothing is fixed at build time. */
+static void
+test_mapping_from_mqtt(void)
+{
+    /* No mapping yet: decoded and reported, but no movement. */
+    nav_map_set(NAV_MAP_NONE);
+    build(PAT_A, false);
+    check("no mapping: *A* is INVALID", drive(50, 0, 1) == R_INVALID);
+    check("no mapping: raw character still 'A'", last_char == 'A');
+    check("no mapping: *A* gives NAV_NONE", nav_of_barcode(NULL) == NAV_NONE);
+
+    /* The same barcode means whatever the latest mapping says. */
+    check("map 1 accepted", set_map("map A=LEFT F=RIGHT Z=FORWARD X=UTURN"));
+    check("map 1: *A* -> LEFT", nav_of_barcode(NULL) == NAV_LEFT);
+    check("map 2 accepted", set_map("map K=LEFT A=RIGHT Z=FORWARD X=UTURN"));
+    check("map 2: *A* -> RIGHT", nav_of_barcode(NULL) == NAV_RIGHT);
+    check("map 3 accepted", set_map("map K=LEFT Q=RIGHT A=FORWARD X=UTURN"));
+    check("map 3: *A* -> FORWARD", nav_of_barcode(NULL) == NAV_STRAIGHT);
+    check("map 4 accepted", set_map("map K=LEFT Q=RIGHT Z=FORWARD A=UTURN"));
+    check("map 4: *A* -> UTURN", nav_of_barcode(NULL) == NAV_UTURN);
+    build(PAT_A, true);
+    check("map 4: *A* read backwards -> UTURN",
+          nav_of_barcode(NULL) == NAV_UTURN);
+
+    /* Dropped from the mapping: INVALID again. */
+    check("map 5 accepted", set_map("map K=LEFT Q=RIGHT Z=FORWARD X=UTURN"));
+    build(PAT_A, false);
+    check("unmapped *A* is INVALID", drive(50, 0, 1) == R_INVALID);
+
+    /* A read keeps the movement it had when the capture finished. */
+    check("map 6 accepted", set_map("map A=LEFT F=RIGHT Z=FORWARD X=UTURN"));
+    check("remap after the read does not change it",
+          nav_of_barcode("map F=LEFT A=RIGHT Z=FORWARD X=UTURN") == NAV_LEFT);
+
+    /* A rejected command leaves the mapping as it was. */
+    (void)set_map(DEFAULT_MAP);
+    check("bad map rejected", !set_map("map A=LEFT F=RIGHT"));
+    check("bad map: *A* still LEFT", nav_of_barcode(NULL) == NAV_LEFT);
 }
 
 
 static void
 test_rejects(void)
 {
-    /* Valid Code 39 characters that are not course codes. */
+    /* Valid Code 39 characters that are not in the mapping. */
     build(PAT_E, false);
-    check("unused character E is INVALID", drive(50, 0, 1) == BARCODE_INVALID);
+    check("unused character E is INVALID", drive(50, 0, 1) == R_INVALID);
     build(PAT_B, false);
-    check("unused character B is INVALID", drive(50, 0, 1) == BARCODE_INVALID);
+    check("unused character B is INVALID", drive(50, 0, 1) == R_INVALID);
 
     /* Sample *Z* from Barcode Sample.pdf. */
     build(PAT_Z, false);
-    check("sample *Z* is BARCODE_Z", drive(50, 0, 1) == BARCODE_Z);
+    check("sample *Z* is 'Z'", drive(50, 0, 1) == 'Z');
     check("sample *Z* raw character is 'Z'", last_char == 'Z');
 
     build(PAT_A, false);
@@ -283,7 +391,7 @@ test_rejects(void)
             elements[20U + e] = elements[10U + e];
         }
         check("missing '*' start/stop is INVALID",
-              drive(50, 0, 1) == BARCODE_INVALID);
+              drive(50, 0, 1) == R_INVALID);
     }
 
     /* All elements the same width: wide cannot be told from narrow. */
@@ -295,7 +403,7 @@ test_rejects(void)
             elements[e] = NARROW_UM;
         }
         barcode_len_um = (int32_t)MAX_ELEMENTS * NARROW_UM;
-        check("equal widths are INVALID", drive(50, 0, 1) == BARCODE_INVALID);
+        check("equal widths are INVALID", drive(50, 0, 1) == R_INVALID);
     }
 
     /* A speck (too few edges) is dropped silently. */
@@ -321,7 +429,7 @@ test_rejects(void)
     check("no end while still within the gap", !barcode_available());
     barcode_check_end((37 * 8) + END_GAP);
     check("incomplete barcode is INVALID",
-          barcode_available() && (barcode_get_code() == BARCODE_INVALID));
+          barcode_available() && (result_now() == R_INVALID));
     check("INVALID gives NAV_NONE", barcode_get_command() == NAV_NONE);
     check("reset after command", !barcode_available());
 }
@@ -339,7 +447,7 @@ test_stop_mid_barcode(void)
     int32_t pos = -QUIET_UM;
     int32_t const stop_at_um = 70000;    /* inside the data character */
     uint32_t stopped_ms = 0U;
-    barcode_t code = BARCODE_NONE;
+    result_t code = R_NONE;
     bool black;
 
     build(PAT_Z, false);
@@ -361,7 +469,7 @@ test_stop_mid_barcode(void)
 
         if (barcode_available())
         {
-            code = barcode_get_code();
+            code = result_now();
             (void)barcode_get_command();
             break;
         }
@@ -376,7 +484,7 @@ test_stop_mid_barcode(void)
         }
     }
 
-    check("2 s stop with flicker mid-barcode still decodes *Z*", code == BARCODE_Z);
+    check("2 s stop with flicker mid-barcode still decodes *Z*", code == 'Z');
 }
 
 
@@ -389,7 +497,7 @@ test_specks_before_barcode(void)
 {
     uint32_t t;
     int32_t pos = -QUIET_UM;
-    barcode_t code = BARCODE_NONE;
+    result_t code = R_NONE;
     bool black;
 
     build(PAT_F, false);
@@ -416,7 +524,7 @@ test_specks_before_barcode(void)
 
         if (barcode_available())
         {
-            code = barcode_get_code();
+            code = result_now();
             (void)barcode_get_command();
             break;
         }
@@ -424,7 +532,7 @@ test_specks_before_barcode(void)
         pos += 50 * (int32_t)SAMPLE_MS;
     }
 
-    check("specks + flicker before barcode still decodes *F*", code == BARCODE_F);
+    check("specks + flicker before barcode still decodes *F*", code == 'F');
 }
 
 
@@ -441,7 +549,7 @@ count_valid_two_barcodes(int32_t gap_mm)
     int32_t enc;
     uint32_t t_ms;
     uint32_t valid = 0U;
-    barcode_t code;
+    result_t code;
 
     barcode_init();
 
@@ -462,10 +570,10 @@ count_valid_two_barcodes(int32_t gap_mm)
 
         if (barcode_available())
         {
-            code = barcode_get_code();
+            code = result_now();
             (void)barcode_get_command();
 
-            if ((code != BARCODE_NONE) && (code != BARCODE_INVALID))
+            if ((code != R_NONE) && (code != R_INVALID))
             {
                 valid++;
             }
@@ -509,7 +617,7 @@ is_black_in(int32_t const * p_el, int32_t len_um, int32_t pos_um)
  */
 static uint32_t
 read_two_barcodes(uint16_t first_pattern, uint16_t second_pattern,
-                  int32_t gap_mm, barcode_t p_codes[2])
+                  int32_t gap_mm, result_t p_codes[2])
 {
     int32_t first[MAX_ELEMENTS];
     int32_t first_len_um;
@@ -520,7 +628,7 @@ read_two_barcodes(uint16_t first_pattern, uint16_t second_pattern,
     uint32_t t_ms;
     uint32_t e;
     uint32_t valid = 0U;
-    barcode_t code;
+    result_t code;
 
     build(first_pattern, false);
     for (e = 0U; e < MAX_ELEMENTS; e++)
@@ -552,10 +660,10 @@ read_two_barcodes(uint16_t first_pattern, uint16_t second_pattern,
 
         if (barcode_available())
         {
-            code = barcode_get_code();
+            code = result_now();
             (void)barcode_get_command();
 
-            if ((code != BARCODE_NONE) && (code != BARCODE_INVALID))
+            if ((code != R_NONE) && (code != R_INVALID))
             {
                 if (valid < 2U)
                 {
@@ -580,7 +688,7 @@ test_close_barcodes_large_print(void)
 {
     int32_t const saved_narrow = narrow_um;
     int32_t const saved_wide = wide_um;
-    barcode_t codes[2] = { BARCODE_NONE, BARCODE_NONE };
+    result_t codes[2] = { R_NONE, R_NONE };
     uint32_t n;
 
     narrow_um = 5000;
@@ -588,7 +696,7 @@ test_close_barcodes_large_print(void)
 
     n = read_two_barcodes(PAT_A, PAT_Z, 330, codes);
     check("large print: *A* then *Z* 330 mm later both read",
-          (n == 2U) && (codes[0] == BARCODE_A) && (codes[1] == BARCODE_Z));
+          (n == 2U) && (codes[0] == 'A') && (codes[1] == 'Z'));
 
     n = read_two_barcodes(PAT_A, PAT_A, 330, codes);
     check("large print: same *A* again within the guard is dropped",
@@ -610,8 +718,8 @@ test_slow_and_guard(void)
 
     /* Distance-based end: slow cars are not cut off mid-barcode. */
     build(PAT_A, false);
-    check("decodes at 20 mm/s", drive(20, 0, 1) == BARCODE_A);
-    check("decodes at 10 mm/s", drive(10, 0, 1) == BARCODE_A);
+    check("decodes at 20 mm/s", drive(20, 0, 1) == 'A');
+    check("decodes at 10 mm/s", drive(10, 0, 1) == 'A');
 
     /* Duplicate guard: a barcode within 200 mm of the last one is ignored. */
     check("second barcode 30 mm later is ignored",
@@ -685,9 +793,9 @@ test_large_print(void)
         int32_t phase = (int32_t)((p * 150U * SAMPLE_MS) / PHASES);
 
         build(PAT_Z, false);
-        ok &= (drive(150, phase, 1) == BARCODE_Z);
+        ok &= (drive(150, phase, 1) == 'Z');
         build(PAT_Z, true);
-        ok &= (drive(150, phase, 1) == BARCODE_Z);
+        ok &= (drive(150, phase, 1) == 'Z');
     }
 
     check("2x print decodes at 150 mm/s", ok);
@@ -698,7 +806,7 @@ test_large_print(void)
 
 
 /* Drive over elements[] as it stands (after edits), return the code. */
-static barcode_t
+static result_t
 drive_edited(int32_t speed_mm_s)
 {
     barcode_len_um = 0;
@@ -741,21 +849,21 @@ test_track_faults(void)
     elements[13] = 2000;
     elements[14] = 2000;
     check("white glitch inside a wide bar still decodes *Z*",
-          drive_edited(150) == BARCODE_Z);
+          drive_edited(150) == 'Z');
 
     /* First narrow bar and space missing: white instead. */
     build(PAT_Z, true);
     elements[0] = 0;            /* bar not there at all */
     elements[1] += narrow_um;
     check("first bar + space missing still decodes",
-          drive_edited(150) == BARCODE_Z);
+          drive_edited(150) == 'Z');
 
     /* Last narrow bar and space missing. */
     build(PAT_Z, false);
     elements[MAX_ELEMENTS - 1U] = 0;
     elements[MAX_ELEMENTS - 2U] = 0;
     check("last bar + space missing still decodes",
-          drive_edited(150) == BARCODE_Z);
+          drive_edited(150) == 'Z');
 
     narrow_um = NARROW_UM;
     wide_um = WIDE_UM;
@@ -872,22 +980,22 @@ test_reported_within_quiet_zone(void)
 static void
 test_track_captures(void)
 {
-    static struct { char const * p_widths; barcode_t code; } const caps[] = {
-        { "B103 W73 B119 W118 B123 W95 B56 W37 B140 W37 B37 W34 B37 W52 B27 W108", BARCODE_INVALID },
-        { "B205 W88 B224 W78 B77 W248 B54 W92 B57 W93 B57 W92 B166 W38 B17 W93 B218 W224 B44 W83 B56 W107 B195 W109 B225 W71 B35", BARCODE_Z },
-        { "B91 W51 B112 W116 B137 W102 B218 W31 B44 W44 B32 W45 B31 W110", BARCODE_INVALID },
-        { "B195 W68 B201 W69 B76 W250 B63 W96 B65 W80 B64 W98 B180 W33 B15 W82 B183 W240 B66 W83 B68 W101 B202 W124 B175 W80 B43", BARCODE_Z },
-        { "W60 B121 W121 B127 W93 B39 W37 B156 W26 B39 W39 B40 W45 B32 W102", BARCODE_INVALID },
-        { "B183 W75 B237 W61 B77 W251 B80 W77 B55 W68 B66 W84 B217 W98 B221 W247 B53 W91 B45 W82 B203 W93 B242 W75 B39 W251 B64", BARCODE_Z },
-        { "B146 W48 B127 W110 B124 W114 B49 W30 B145 W27 B42 W46 B33 W38 B51 W93", BARCODE_INVALID },
-        { "B30 W71 B215 W77 B247 W67 B82 W246 B45 W70 B57 W89 B64 W99 B170 W15 B35 W102 B201 W236 B68 W85 B69 W86 B189 W101 B207 W71 B43", BARCODE_Z },
-        { "B103 W75 B121 W74 B17 W29 B127 W91 B67 W16 B170 W15 B46 W45 B34 W36 B36 W113", BARCODE_INVALID },
-        { "B49 W94 B226 W70 B248 W44 B72 W223 B76 W82 B66 W100 B66 W83 B165 W35 B18 W76 B183 W229 B85 W70 B68 W99 B220 W92 B215 W75 B52 W255 B70", BARCODE_Z },
-        { "B91 W62 B103 W111 B13 W40 B134 W80 B53 W35 B96 W57 B17 W67 B30 W56 B51 W91", BARCODE_INVALID },
+    static struct { char const * p_widths; result_t code; } const caps[] = {
+        { "B103 W73 B119 W118 B123 W95 B56 W37 B140 W37 B37 W34 B37 W52 B27 W108", R_INVALID },
+        { "B205 W88 B224 W78 B77 W248 B54 W92 B57 W93 B57 W92 B166 W38 B17 W93 B218 W224 B44 W83 B56 W107 B195 W109 B225 W71 B35", 'Z' },
+        { "B91 W51 B112 W116 B137 W102 B218 W31 B44 W44 B32 W45 B31 W110", R_INVALID },
+        { "B195 W68 B201 W69 B76 W250 B63 W96 B65 W80 B64 W98 B180 W33 B15 W82 B183 W240 B66 W83 B68 W101 B202 W124 B175 W80 B43", 'Z' },
+        { "W60 B121 W121 B127 W93 B39 W37 B156 W26 B39 W39 B40 W45 B32 W102", R_INVALID },
+        { "B183 W75 B237 W61 B77 W251 B80 W77 B55 W68 B66 W84 B217 W98 B221 W247 B53 W91 B45 W82 B203 W93 B242 W75 B39 W251 B64", 'Z' },
+        { "B146 W48 B127 W110 B124 W114 B49 W30 B145 W27 B42 W46 B33 W38 B51 W93", R_INVALID },
+        { "B30 W71 B215 W77 B247 W67 B82 W246 B45 W70 B57 W89 B64 W99 B170 W15 B35 W102 B201 W236 B68 W85 B69 W86 B189 W101 B207 W71 B43", 'Z' },
+        { "B103 W75 B121 W74 B17 W29 B127 W91 B67 W16 B170 W15 B46 W45 B34 W36 B36 W113", R_INVALID },
+        { "B49 W94 B226 W70 B248 W44 B72 W223 B76 W82 B66 W100 B66 W83 B165 W35 B18 W76 B183 W229 B85 W70 B68 W99 B220 W92 B215 W75 B52 W255 B70", 'Z' },
+        { "B91 W62 B103 W111 B13 W40 B134 W80 B53 W35 B96 W57 B17 W67 B30 W56 B51 W91", R_INVALID },
         /* Small *A* read backwards: bars thin, gaps fat (wide 73 vs narrow 61). */
-        { "B24 W49 B73 W61 B84 W49 B12 W118 B24 W48 B92 W48 B25 W107 B24 W59 B13 W47 B96 W47 B12 W61 B82 W60 B84 W48 B23 W108 B24 W152 B36", BARCODE_A },
+        { "B24 W49 B73 W61 B84 W49 B12 W118 B24 W48 B92 W48 B25 W107 B24 W59 B13 W47 B96 W47 B12 W61 B82 W60 B84 W48 B23 W108 B24 W152 B36", 'A' },
         /* Large *A* from the same run. */
-        { "B34 W208 B47 W103 B184 W101 B146 W101 B47 W93 B190 W83 B31 W87 B46 W236 B45 W93 B183 W106 B46 W205 B36 W106 B187 W109 B165 W76 B34", BARCODE_A },
+        { "B34 W208 B47 W103 B184 W101 B146 W101 B47 W93 B190 W83 B31 W87 B46 W236 B45 W93 B183 W106 B46 W205 B36 W106 B187 W109 B165 W76 B34", 'A' },
     };
     uint32_t i;
     bool all_ok = true;
@@ -900,7 +1008,7 @@ test_track_captures(void)
         int32_t step;
         bool black = false;
         uint32_t t_ms = 0U;
-        barcode_t code = BARCODE_NONE;
+        result_t code = R_NONE;
 
         barcode_init();
         barcode_update(p_text[0] != 'B', t_ms, enc);
@@ -943,7 +1051,7 @@ test_track_captures(void)
 
         if (barcode_available())
         {
-            code = barcode_get_code();
+            code = result_now();
             (void)barcode_get_command();
         }
 
@@ -960,7 +1068,7 @@ test_track_captures(void)
 
 
 /*
- * CR1 Phase 4: the packed storage must read back exactly what was written
+ * The packed storage must read back exactly what was written
  * for every in-range value, and saturate (never wrap) outside it.
  */
 static void
@@ -1107,7 +1215,7 @@ test_storage_round_trip(void)
 #define RAW_QUIET_COUNTS    240
 #define RAW_TAIL_COUNTS     480
 
-static barcode_t
+static result_t
 raw_capture(int32_t jump_counts)
 {
     int32_t const end = ((barcode_len_um * COUNTS_PER_M) / 1000000)
@@ -1133,7 +1241,7 @@ raw_capture(int32_t jump_counts)
     barcode_update_raw(last_adc, t_ms, last_position + jump_counts);
     barcode_finish_capture();
 
-    return barcode_get_code();
+    return result_now();
 }
 
 
@@ -1143,11 +1251,11 @@ test_raw_storage(void)
     build(PAT_A, false);
 
     check("raw store: within int16 decodes *A*",
-          raw_capture(0) == BARCODE_A);
+          raw_capture(0) == 'A');
     check("raw store: +30000 counts still decodes *A*",
-          raw_capture(30000) == BARCODE_A);
+          raw_capture(30000) == 'A');
     check("raw store: a capture leaving int16 is INVALID",
-          raw_capture(40000) == BARCODE_INVALID);
+          raw_capture(40000) == R_INVALID);
 }
 
 
@@ -1176,7 +1284,7 @@ report_speed_sweep(int32_t narrow, char const * p_label)
             int32_t phase = (int32_t)(((int64_t)p * speeds[s] * (int32_t)SAMPLE_MS)
                                       / (int32_t)PHASES);
 
-            if (drive(speeds[s], phase, 1) == BARCODE_A)
+            if (drive(speeds[s], phase, 1) == 'A')
             {
                 ok++;
             }
@@ -1237,7 +1345,9 @@ test_char_index(void)
 int
 main(void)
 {
+    (void)set_map(DEFAULT_MAP);
     test_decodes_each_code();
+    test_mapping_from_mqtt();
     test_rejects();
     test_stop_mid_barcode();
     test_slow_and_guard();

@@ -130,6 +130,12 @@ void codec_text(comms_link_msg_t * p_msg, char const * p_topic, uint8_t qos,
 #define CODEC_BITS_WIDTH              (10U)   /* mm                    */
 #define CODEC_BITS_CLEARANCE          (12U)   /* mm                    */
 #define CODEC_BITS_ACTION             (3U)
+#define CODEC_BITS_EDGE_RESULT        (2U)    /* comms_edge_result_t   */
+#define CODEC_BITS_SIDE               (1U)    /* comms_side_t          */
+#define CODEC_BITS_EDGE               (10U)   /* mm                    */
+#define CODEC_BITS_EST_WIDTH          (11U)   /* mm                    */
+#define CODEC_BITS_LEG                (11U)   /* mm                    */
+#define CODEC_BITS_TURN_DEG           (6U)    /* whole degrees         */
 #define CODEC_BITS_RANGE              (3U)    /* comms_range_t         */
 #define CODEC_BITS_SONAR_STATE        (3U)    /* comms_sonar_state_t   */
 #define CODEC_BITS_SILENT             (8U)    /* wrapping count        */
@@ -162,15 +168,23 @@ typedef enum
     CODEC_EVENT_COUNT
 } codec_event_type_t;
 
+/* CODEC_EVENT_OBSTACLE carries one of two records, chosen by the event's
+ * kind field: the scan profile (robot/event/obstacle) or the width
+ * estimate from the edge watch (robot/event/obstacle_width). */
+#define CODEC_OBSTACLE_PROFILE        (0U)
+#define CODEC_OBSTACLE_WIDTH          (1U)
+
 /* One queued event, unpacked (the queue element itself is 7 words). */
 typedef struct
 {
     uint32_t            time_ms;
     uint8_t             type;      /* codec_event_type_t               */
     uint8_t             code;      /* barcode character                */
-    uint8_t             kind;      /* nav command / motion class       */
+    uint8_t             kind;      /* nav command / motion class /
+                                      CODEC_OBSTACLE_*                 */
     int32_t             value;     /* hump peak height, 0.1 mm         */
     comms_obstacle_t    obstacle;
+    comms_obstacle_width_t obstacle_width;
     comms_calibration_t calibration;
 } codec_event_t;
 

@@ -57,6 +57,11 @@
 /* Request from obstacle_task_forget(), consumed by the task. */
 #define TASK_REQ_FORGET     (0x00000800U)
 
+/* Requests from obstacle_task_request_edge_watch() and
+ * obstacle_task_end_edge_watch(), consumed by the task. */
+#define TASK_REQ_EDGE       (0x00001000U)
+#define TASK_REQ_EDGE_END   (0x00002000U)
+
 /* During a scan the status is republished at least this often, well
  * inside OBSTACLE_STALE_MS. */
 #define TASK_SCAN_PUBLISH_MS (100U)
@@ -100,6 +105,14 @@ static uint32_t volatile      path_counter = 0U;   /* Odd while writing. */
  * "no need, nothing known, look straight ahead", and every request
  * writes the word before it sets TASK_REQ_PATH. */
 static uint32_t volatile path_request = 0U;
+
+/* Edge watch (obstacle_pack.h): the controller's request (side, turn_deg,
+ * known_mm) and the task's result (result, face_mm, heard_mm), one word
+ * each, one writer each.  leg_mm is the controller's leg distance, written
+ * every step while a watch runs; one aligned store, so no lock. */
+static uint32_t volatile edge_request = 0U;
+static uint32_t volatile edge_result = 0U;
+static int32_t volatile  edge_leg_mm = 0;
 
 
 /*!
@@ -161,6 +174,25 @@ task_update_flags(void)
 }
 
 /*!
+ * @brief Publish a status in a busy state (SCANNING or SIDE_WATCH) with
+ *        the next sequence number.
+ *
+ * @param[in,out] p_report Status to publish (state and seq are updated).
+ * @param[in]     state    State to report.
+ * @param[in,out] p_seq    Status-word sequence number.
+ */
+static void
+task_publish_busy(obstacle_status_t * p_report,
+                  obstacle_state_t    state,
+                  uint32_t *          p_seq)
+{
+    p_report->state = state;
+    p_report->seq = *p_seq;
+    (*p_seq)++;
+    task_publish(p_report);
+}
+
+/*!
  * @brief Publish a SCANNING status with the next sequence number.
  *
  * @param[in,out] p_report Status to publish (seq is updated).
@@ -169,23 +201,22 @@ task_update_flags(void)
 static void
 task_publish_scanning(obstacle_status_t * p_report, uint32_t * p_seq)
 {
-    p_report->state = OBSTACLE_STATE_SCANNING;
-    p_report->seq = *p_seq;
-    (*p_seq)++;
-    task_publish(p_report);
+    task_publish_busy(p_report, OBSTACLE_STATE_SCANNING, p_seq);
 }
 
 /*!
  * @brief Sleep while the servo settles, keeping the status fresh.
  *
  * @param[in]     wait_ms  Total time to sleep.
+ * @param[in]     state    State to report meanwhile.
  * @param[in,out] p_report Status to republish.
  * @param[in,out] p_seq    Status-word sequence number.
  */
 static void
-task_settle(uint32_t            wait_ms,
-            obstacle_status_t * p_report,
-            uint32_t *          p_seq)
+task_settle_in(uint32_t            wait_ms,
+               obstacle_state_t    state,
+               obstacle_status_t * p_report,
+               uint32_t *          p_seq)
 {
     uint32_t left_ms = wait_ms;
     uint32_t step_ms;
@@ -198,8 +229,23 @@ task_settle(uint32_t            wait_ms,
         /* Cast to TMO: at most TASK_SCAN_PUBLISH_MS. */
         (void)tk_dly_tsk((TMO)step_ms);
         left_ms -= step_ms;
-        task_publish_scanning(p_report, p_seq);
+        task_publish_busy(p_report, state, p_seq);
     }
+}
+
+/*!
+ * @brief Sleep while the servo settles, reporting SCANNING.
+ *
+ * @param[in]     wait_ms  Total time to sleep.
+ * @param[in,out] p_report Status to republish.
+ * @param[in,out] p_seq    Status-word sequence number.
+ */
+static void
+task_settle(uint32_t            wait_ms,
+            obstacle_status_t * p_report,
+            uint32_t *          p_seq)
+{
+    task_settle_in(wait_ms, OBSTACLE_STATE_SCANNING, p_report, p_seq);
 }
 
 /*!
@@ -311,6 +357,79 @@ task_path_check(uint32_t * p_seq)
 }
 
 /*!
+ * @brief SIDE_WATCH: look square at the obstacle's face on bypass leg 1
+ *        until its echo stops (the edge), the controller ends the watch
+ *        (end of the leg) or OBSTACLE_EDGE_WATCH_MAX_MS passes.
+ *
+ * MONITOR is off meanwhile: the path check has just cleared the leg.
+ * The task then faces forward again and MONITOR restarts.
+ *
+ * @param[in,out] p_seq Status-word sequence number.
+ */
+static void
+task_edge_watch(uint32_t * p_seq)
+{
+    obstacle_range_t      range;
+    obstacle_edge_watch_t watch;
+    obstacle_status_t     report = last_report;
+    obstacle_action_t     side = OBSTACLE_ACTION_CONTINUE;
+    uint32_t              turn_deg = 0U;
+    uint32_t              known_mm = 0U;
+    uint32_t              settle_ms = 0U;
+    uint32_t              start_ms;
+    UINT                  pattern = 0U;
+
+    /* An end request already pending is for this watch (the leg ended or
+     * the bypass stopped before the watch began): the loop sees it at
+     * once.  Stale ones were cleared by obstacle_task_request_edge_watch(). */
+    (void)tk_clr_flg(flag_id, ~OBSTACLE_EVT_EDGE_DONE);
+
+    /* One read: side, turn and distance always belong together. */
+    obstacle_unpack_edge_request(edge_request, &side, &turn_deg, &known_mm);
+    obstacle_scan_edge_start(&watch, known_mm);
+    edge_result = obstacle_pack_edge(&watch);
+
+    (void)obstacle_servo_set_angle(obstacle_scan_edge_angle(side, turn_deg),
+                                   &settle_ms);
+    task_settle_in(settle_ms, OBSTACLE_STATE_SIDE_WATCH, &report, p_seq);
+    start_ms = task_now_ms();
+
+    while (OBSTACLE_EDGE_WATCHING == watch.result)
+    {
+        if ((E_OK == tk_wai_flg(flag_id, TASK_REQ_EDGE_END,
+                                TWF_ORW | TWF_BITCLR, &pattern, TMO_POL))
+            || ((task_now_ms() - start_ms) > OBSTACLE_EDGE_WATCH_MAX_MS))
+        {
+            obstacle_scan_edge_end(&watch);
+        }
+        else
+        {
+            /* Sleeps about 60 ms per reading. */
+            obstacle_ultrasonic_measure(&range);
+            obstacle_scan_edge_add(&watch, &range, edge_leg_mm);
+
+            if ((OBSTACLE_RANGE_NO_ECHO == range.status)
+                || (OBSTACLE_RANGE_NOT_READY == range.status))
+            {
+                silent_count++;
+            }
+
+            report.distance_mm  = range.distance_mm;
+            report.range_status = range.status;
+            task_publish_busy(&report, OBSTACLE_STATE_SIDE_WATCH, p_seq);
+        }
+    }
+
+    edge_result = obstacle_pack_edge(&watch);
+    (void)tk_set_flg(flag_id, OBSTACLE_EVT_EDGE_DONE);
+
+    /* Face forward for the rest of the leg; MONITOR starts afresh. */
+    (void)obstacle_servo_set_angle(OBSTACLE_FORWARD_DEG, &settle_ms);
+    task_settle_in(settle_ms, OBSTACLE_STATE_SIDE_WATCH, &report, p_seq);
+    obstacle_monitor_reset(&monitor);
+}
+
+/*!
  * @brief Task body: range forward, scan on request.
  *
  * @param[in] stacd   Start code (unused).
@@ -342,6 +461,12 @@ task_entry(INT stacd, void * p_exinf)
                                TWF_ORW | TWF_BITCLR, &pattern, TMO_POL))
         {
             task_path_check(&seq);
+        }
+
+        if (E_OK == tk_wai_flg(flag_id, TASK_REQ_EDGE,
+                               TWF_ORW | TWF_BITCLR, &pattern, TMO_POL))
+        {
+            task_edge_watch(&seq);
         }
 
         /* The car has moved on (a bypass ended): what MONITOR remembers
@@ -654,6 +779,68 @@ obstacle_task_get_path(obstacle_path_t * p_path)
     }
 
     return (b_whole);
+}
+
+/*!
+ * @brief Start an edge watch on bypass leg 1.
+ *
+ * @param[in] side     The plan's side (TURN_LEFT or TURN_RIGHT).
+ * @param[in] turn_deg The plan's first pivot.
+ * @param[in] known_mm The scan's closest distance.
+ */
+void
+obstacle_task_request_edge_watch(obstacle_action_t side,
+                                 uint32_t          turn_deg,
+                                 uint32_t          known_mm)
+{
+    if (b_initialised)
+    {
+        /* An end request sent before this one belongs to an earlier
+         * watch (it raced that watch's finish): drop it.  The controller
+         * is the only caller of both, so the order is certain. */
+        (void)tk_clr_flg(flag_id, ~TASK_REQ_EDGE_END);
+        edge_leg_mm  = 0;
+        edge_request = obstacle_pack_edge_request(side, turn_deg, known_mm);
+        (void)tk_set_flg(flag_id, TASK_REQ_EDGE);
+    }
+}
+
+/*!
+ * @brief The leg distance driven so far, for the edge watch.
+ *
+ * @param[in] leg_mm Rear-axle travel since the leg started.
+ */
+void
+obstacle_task_set_leg_mm(int32_t leg_mm)
+{
+    edge_leg_mm = leg_mm;
+}
+
+/*!
+ * @brief End a running edge watch (the leg has ended or been abandoned).
+ */
+void
+obstacle_task_end_edge_watch(void)
+{
+    if (b_initialised)
+    {
+        (void)tk_set_flg(flag_id, TASK_REQ_EDGE_END);
+    }
+}
+
+/*!
+ * @brief Result of the latest edge watch.
+ *
+ * @param[out] p_watch result, face_mm and heard_mm.
+ *
+ * @return false if p_watch is NULL or a watch is still running.
+ */
+bool
+obstacle_task_get_edge(obstacle_edge_watch_t * p_watch)
+{
+    /* One aligned word, one writer: a single read is consistent. */
+    return (obstacle_unpack_edge(edge_result, p_watch)
+            && (OBSTACLE_EDGE_WATCHING != p_watch->result));
 }
 
 /*!

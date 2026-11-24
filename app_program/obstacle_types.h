@@ -137,6 +137,30 @@ typedef struct
     uint32_t                count;        /* Outermost angle first.      */
 } obstacle_path_t;
 
+/* Edge watch on bypass leg 1 (obstacle_scan.h): the servo looks square at
+ * the obstacle's face while the car drives the diagonal leg; the face
+ * echo stops when the sensor passes the face's edge on the bypass side. */
+typedef enum
+{
+    OBSTACLE_EDGE_WATCHING = 0,  /* Still looking.                        */
+    OBSTACLE_EDGE_FOUND,         /* Face heard, then lost: edge passed.   */
+    OBSTACLE_EDGE_AT_LEAST,      /* Face still heard when the watch ended:
+                                  * the edge is at least that far out.   */
+    OBSTACLE_EDGE_NO_FACE,       /* Face never heard: no estimate.        */
+    OBSTACLE_EDGE_COUNT
+} obstacle_edge_result_t;
+
+typedef struct
+{
+    obstacle_edge_result_t result;
+    uint32_t known_mm;    /* The scan's closest distance: the face.       */
+    uint32_t face_mm;     /* Latest face reading; 0 = none yet.           */
+    int32_t  heard_mm;    /* Leg distance at the latest face reading.     */
+    uint32_t face_count;  /* Face readings so far.                        */
+    uint32_t lost_count;  /* Non-face readings in a row after the lock.   */
+    uint32_t readings;    /* Readings with an echo or a timeout so far.   */
+} obstacle_edge_watch_t;
+
 /* The out-along-back bypass: pivot turn_deg towards side, drive out_mm
  * (the rear axle is then side_mm from the line), pivot back turn_deg to
  * run parallel to the line, drive along_mm past the obstacle, then turn

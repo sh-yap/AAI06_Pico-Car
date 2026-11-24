@@ -1,17 +1,14 @@
 /*
  * barcode.c
  *
- * Buddy 3 - Barcode acquisition and decoding framework
+ * Buddy 3 - Barcode acquisition and decoding
  *
- * Records black/white transitions together with:
- * - transition timestamp
- * - encoder position
- *
- * Decodes Code 39 barcodes of the form *X* (start, one data
- * character, stop). Nothing depends on the print size or on
- * which character is printed: the course sample *A* was
- * narrow ~3 mm / wide ~9 mm (141 mm), the track barcode of
- * 4 Nov about twice that, and both decode the same way.
+ * Records black/white transitions (timestamp and encoder position)
+ * and decodes Code 39 barcodes of the form *X* (start, one data
+ * character, stop). Any Code 39 data character can be read; which
+ * movement it means comes from the MQTT mapping (nav_map.h). Print
+ * size does not matter either: a 3/9 mm print and one about twice
+ * that decode the same way.
  *
  * Widths come from encoder positions, so decoding does not
  * depend on speed. Exactly 9 of the 29 elements of *X* are
@@ -20,7 +17,7 @@
  * Code 39 character, read forwards and backwards, and the
  * read is accepted only if exactly one character fits.
  *
- * Seen on the track 4 Nov (robot/debug captures):
+ * Seen on the track (robot/debug captures):
  * - a 1-2 mm white glitch inside a wide bar splits it into
  *   three elements, so short glitches are merged back;
  * - the first or last narrow bar and space can be missed,
@@ -29,6 +26,7 @@
  */
 
 #include "barcode.h"
+#include "nav_map.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -146,15 +144,14 @@
 /*
  * Duplicate guard: after a valid barcode, a capture that begins within
  * the guard and reads the same character (or is unreadable) is
- * dropped, so one barcode
- * gives at most one command (Tribunal 1). The guard covers the
- * barcode's length plus BARCODE_GUARD_GAP_FACTOR end gaps, so a U-turn
- * (back over the end gap, then the whole barcode) is covered for any
- * print size, and is never less than BARCODE_GUARD_MIN_COUNTS
+ * dropped, so one barcode gives at most one command. The guard covers
+ * the barcode's length plus BARCODE_GUARD_GAP_FACTOR end gaps, so a
+ * U-turn (back over the end gap, then the whole barcode) is covered for
+ * any print size, and is never less than BARCODE_GUARD_MIN_COUNTS
  * (~200 mm). The sensor is still read during the guard: with a large
- * print the guard reaches past a different barcode close behind (4 Nov
- * track: *Z* ~330 mm after *A* lost its first five bars), and that one
- * must still be read.
+ * print the guard reaches past a different barcode close behind (on
+ * the track a second barcode ~330 mm behind the first lost its first
+ * five bars), and that one must still be read.
  */
 #define BARCODE_GUARD_MIN_COUNTS     2460
 #define BARCODE_GUARD_GAP_FACTOR     3
@@ -227,7 +224,7 @@ typedef struct
     uint16_t pattern;
 } c39_symbol_t;
 
-/* Full Code 39 set, so any final course character can be read. */
+/* Full Code 39 set: the MQTT mapping may use any data character. */
 static c39_symbol_t const c39_table[] =
 {
     { '0', 0x034U }, { '1', 0x121U }, { '2', 0x061U }, { '3', 0x160U },
@@ -247,7 +244,7 @@ static c39_symbol_t const c39_table[] =
 /*
  * 6-bit index of a decoded character (BARCODE_CHAR_* in barcode.h).
  * Used for the Buddy 3 status word and the barcode event, so the
- * laptop can show any Code 39 character, not just the course set.
+ * laptop can show any Code 39 character, mapped or not.
  */
 uint8_t barcode_char_index(char character)
 {
@@ -288,28 +285,6 @@ char barcode_index_char(uint8_t index)
     return '?';
 }
 
-
-/*
- * Course characters and the barcode they report.
- * Course barcodes are *A*, *F*, *Z*, *Y* and *X*.
- * HARDCODED for now: update this table and barcode_get_command()
- * if the codes change on exam day.
- * Characters not listed are reported as INVALID.
- */
-typedef struct
-{
-    char character;
-    barcode_t code;
-} course_code_t;
-
-static course_code_t const course_codes[] =
-{
-    { 'A', BARCODE_A },
-    { 'F', BARCODE_F },
-    { 'Z', BARCODE_Z },
-    { 'Y', BARCODE_Y },
-    { 'X', BARCODE_X },
-};
 
 /*
  * Stored black/white transition data, packed in two words per edge: word 0
@@ -354,9 +329,11 @@ static int32_t last_activity_position = 0;
 static int32_t widest_counts = 0;
 
 
-/* Result decoded when the capture was finished. */
+/* Result decoded when the capture was finished, and its movement under
+ * the mapping in force then (a later remap does not change it). */
 static barcode_t decoded_code = BARCODE_NONE;
 static char decoded_char = C39_CHAR_NONE;
+static nav_command_t decoded_nav = NAV_NONE;
 
 
 /*
@@ -742,8 +719,8 @@ static uint32_t barcode_median_colour(uint8_t count, uint8_t first)
 /*
  * Bars read narrower and spaces wider than printed: the sensor spot
  * and the fixed threshold move every edge by about the same distance.
- * On a small print that shift is a large part of each width (4 Nov
- * small *A*: narrow bars 12-25 counts, narrow spaces 47-61, wide bars
+ * On a small print that shift is a large part of each width (a
+ * 3/9 mm print: narrow bars 12-25 counts, narrow spaces 47-61, wide bars
  * from 73), so a narrow space came within 20% of a wide bar and the
  * read failed C39_MIN_WIDE_PERCENT. Most bars and most spaces of *X*
  * are narrow, so the median bar and the median space are both narrow
@@ -1887,23 +1864,6 @@ static void barcode_raw_clear(void)
 }
 
 
-/* Course barcode for a decoded character; INVALID if not a course code. */
-static barcode_t course_code_of(char character)
-{
-    uint8_t i;
-
-    for (i = 0U; i < (sizeof course_codes / sizeof course_codes[0]); i++)
-    {
-        if (course_codes[i].character == character)
-        {
-            return course_codes[i].code;
-        }
-    }
-
-    return BARCODE_INVALID;
-}
-
-
 void barcode_init(void)
 {
     guard_active = false;
@@ -1924,6 +1884,7 @@ void barcode_reset(void)
     capture_in_guard = false;
     decoded_code = BARCODE_NONE;
     decoded_char = C39_CHAR_NONE;
+    decoded_nav = NAV_NONE;
 
     barcode_raw_clear();
 }
@@ -1935,15 +1896,11 @@ void barcode_update(
     int32_t encoder_position
 )
 {
-    /*
-     * Do not overwrite a completed capture that is
-     * waiting to be processed.
-     */
+    /* Do not overwrite a completed capture waiting to be processed. */
     if (barcode_ready)
     {
         return;
     }
-
 
     /*
      * Duplicate guard ends once the car has moved guard_counts past
@@ -1957,13 +1914,7 @@ void barcode_update(
         guard_active = false;
     }
 
-
-    /*
-     * First sample:
-     * establish the initial black/white state.
-     * No edge is recorded because no transition
-     * has happened yet. Acquisition distance starts here.
-     */
+    /* First sample sets the starting state; no transition yet. */
     if (!state_valid)
     {
         previous_state = is_black;
@@ -1972,22 +1923,13 @@ void barcode_update(
         return;
     }
 
-
-    /*
-     * No state change means there is no new edge.
-     */
     if (is_black == previous_state)
     {
         return;
     }
 
-
-    /*
-     * A black/white transition has occurred.
-     */
     previous_state = is_black;
     last_activity_position = encoder_position;
-
 
     /* Flicker: this edge undoes the last one almost in place. */
     if ((edge_count > 0U) &&
@@ -2000,10 +1942,6 @@ void barcode_update(
         return;
     }
 
-
-    /*
-     * Store the edge if buffer space is available.
-     */
     if (edge_count < BARCODE_MAX_EDGES)
     {
         /* A capture that starts within the guard may be a repeat. */
@@ -2032,12 +1970,7 @@ void barcode_update(
     }
     else
     {
-        /*
-         * Too many transitions for the storage buffer.
-         *
-         * Keep the overflow flag so the completed
-         * capture can later be reported as invalid.
-         */
+        /* Buffer full: the finished capture is reported as invalid. */
         barcode_overflow = true;
     }
 }
@@ -2104,14 +2037,7 @@ void barcode_update_raw(
 
 void barcode_finish_capture(void)
 {
-    /*
-     * At least two edges are required to calculate
-     * one edge-to-edge width.
-     *
-     * Even an overflowed capture is marked ready
-     * so that barcode_get_code() can return
-     * BARCODE_INVALID.
-     */
+    /* An overflowed capture is still marked ready, so it reads INVALID. */
     if (edge_count >= BARCODE_MIN_EDGES)
     {
         if (raw_mode)
@@ -2123,11 +2049,14 @@ void barcode_finish_capture(void)
             decoded_char = barcode_decode_char();
         }
 
-        decoded_code = course_code_of(decoded_char);
+        /* Mapped now, once: a remap later cannot change this read. */
+        decoded_nav = nav_map_lookup(decoded_char);
+        decoded_code = (decoded_nav != NAV_NONE) ? BARCODE_VALID
+                                                 : BARCODE_INVALID;
 
         /*
          * Begun within the duplicate guard: the same barcode again,
-         * or a partial read of it, is dropped. A different course
+         * or a partial read of it, is dropped. A different mapped
          * barcode is reported.
          */
         if (capture_in_guard &&
@@ -2141,7 +2070,7 @@ void barcode_finish_capture(void)
         barcode_ready = true;
 
         /*
-         * Valid course barcode: start the duplicate guard at its last
+         * Mapped barcode: start the duplicate guard at its last
          * edge, long enough to cover this barcode and its end gaps.
          */
         if (decoded_code != BARCODE_INVALID)
@@ -2162,11 +2091,8 @@ void barcode_finish_capture(void)
     }
     else
     {
-        /*
-         * Too few edges to be a barcode (a stray edge or a
-         * speck). Discard it so it is not merged into the next
-         * capture.
-         */
+        /* A stray edge or speck: drop it so it does not join the next
+         * capture. */
         barcode_reset();
     }
 }
@@ -2174,11 +2100,7 @@ void barcode_finish_capture(void)
 
 void barcode_check_end(int32_t encoder_position)
 {
-    /*
-     * Nothing to end if no acquisition is in
-     * progress, or a completed capture is already
-     * waiting to be processed.
-     */
+    /* Nothing in progress, or a finished capture is still waiting. */
     if (!state_valid || barcode_ready)
     {
         return;
@@ -2201,17 +2123,8 @@ bool barcode_available(void)
 
 barcode_t barcode_get_code(void)
 {
-    /*
-     * No complete barcode is ready yet.
-     */
-    if (!barcode_ready)
-    {
-        return BARCODE_NONE;
-    }
-
-
     /* Decoded once in barcode_finish_capture(). */
-    return decoded_code;
+    return barcode_ready ? decoded_code : BARCODE_NONE;
 }
 
 
@@ -2253,63 +2166,19 @@ bool barcode_get_edge(uint8_t index, barcode_edge_t *p_edge)
 
 nav_command_t barcode_get_command(void)
 {
-    barcode_t code;
     nav_command_t command;
 
-
-    /*
-     * Do not reset an acquisition that is still
-     * in progress.
-     */
+    /* Do not reset an acquisition that is still in progress. */
     if (!barcode_ready)
     {
         return NAV_NONE;
     }
 
+    /* Looked up under the mapping in force when the capture finished. */
+    command = (BARCODE_VALID == decoded_code) ? decoded_nav : NAV_NONE;
 
-    code = barcode_get_code();
-
-
-    /*
-     * Convert the decoded barcode into the
-     * corresponding navigation command.
-     */
-    switch (code)
-    {
-        case BARCODE_A:
-        case BARCODE_Y:
-            command = NAV_LEFT;
-            break;
-
-        case BARCODE_F:
-            command = NAV_RIGHT;
-            break;
-
-        case BARCODE_Z:
-            command = NAV_STRAIGHT;
-            break;
-
-        case BARCODE_X:
-            command = NAV_UTURN;
-            break;
-
-        case BARCODE_NONE:
-        case BARCODE_INVALID:
-        default:
-            command = NAV_NONE;
-            break;
-    }
-
-
-    /*
-     * Self-clearing behaviour:
-     *
-     * Once a completed barcode has been processed,
-     * clear the acquisition state so that the next
-     * barcode can be recorded.
-     */
+    /* Self-clearing, so the next barcode can be recorded. */
     barcode_reset();
-
 
     return command;
 }

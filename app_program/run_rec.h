@@ -149,7 +149,7 @@ void bc_rec_add(bc_rec_record_t const * p_record);
  * whole capture still fits in the 5 s ring of a B4_RECORDER build. */
 #define BC_REC_FAIL_MARGIN_MS   (500U)
 
-/* A capture finished without a valid course character (INVALID or '?'), or
+/* A capture finished without a mapped character (INVALID or '?'), or
  * was discarded with too few edges.  ms is the cycle's monotonic time and
  * edges the count seen in the capture.  Logs EV_REC_BARCODE_FAIL always, but
  * stops the barcode ring BC_REC_FAIL_MARGIN_MS later only when b_arm is true;
@@ -264,7 +264,7 @@ typedef enum
                                    run; value = the confirmed both-black
                                    spell in VC cycles, 1 to 255.           */
     EV_REC_BARCODE_FAIL         /* A barcode capture ended without a valid
-                                   course character, or was discarded:
+                                   mapped character, or was discarded:
                                    value = edges seen in it (0 if none).    */
 } ev_rec_type_t;
 

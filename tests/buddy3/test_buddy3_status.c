@@ -198,14 +198,14 @@ test_reserved_rejected(void)
 static void
 test_reject_keeps_output(void)
 {
-    buddy3_status_t out = { LINE_RIGHT, 42, 2U, BARCODE_F, 27U, NAV_RIGHT,
+    buddy3_status_t out = { LINE_RIGHT, 42, 2U, BARCODE_VALID, 27U, NAV_RIGHT,
                             LINE_CAL_OK, true };
 
     (void)buddy3_status_unpack(7UL << B3_NAV_SHIFT, &out);
 
     check("rejected unpack leaves output unchanged",
           (out.line_state == LINE_RIGHT) && (out.line_error == 42) &&
-          (out.line_sensors == 2U) && (out.barcode == BARCODE_F) &&
+          (out.line_sensors == 2U) && (out.barcode == BARCODE_VALID) &&
           (out.barcode_char == 27U) &&
           (out.nav_command == NAV_RIGHT) && (out.cal_state == LINE_CAL_OK) &&
           out.b_barcode_capture);

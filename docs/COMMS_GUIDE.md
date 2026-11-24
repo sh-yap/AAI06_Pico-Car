@@ -187,6 +187,7 @@ comms_set_fault(0U);                        /* bit flags, 0 = no fault */
 |---|---|---|
 | `robot/status` | `online` / `offline` | connect / lost (retained) |
 | `robot/info` | firmware build time | each connect (retained) |
+| `robot/nav_map` | barcode mapping in force (`A=LEFT F=RIGHT Z=FORWARD X=UTURN` or `none`) | each connect, after `map` (retained) |
 | `robot/state` | state + fault | on change (retained) |
 | `robot/heartbeat` | seq, state, fault, ev_drop | every 1 s |
 | `robot/telemetry/motion` | speeds, encoders, distance | ≤ 5 Hz, on change |
@@ -195,7 +196,7 @@ comms_set_fault(0U);                        /* bit flags, 0 = no fault */
 | `robot/event/barcode` · `hump` · `obstacle` · `motion` · `run` | one message per event | as it happens (QoS 1) |
 | `robot/event/command` | acknowledgement `{"cmd":"start","ok":1}` | per command |
 | `robot/summary` | run time, distance, max hump, counts | end of run (retained) |
-| `robot/command` | **send** `start` / `stop` / `status` here | - |
+| `robot/command` | **send** `start` / `stop` / `status` / `map A=LEFT F=RIGHT Z=FORWARD X=UTURN` here | - |
 
 Every payload starts with `"v":1` (format version) and `"t"` (robot
 uptime in ms).  The full reference will be in `docs/MQTT.md`.

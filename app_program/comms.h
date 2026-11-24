@@ -194,6 +194,38 @@ typedef struct
     comms_avoid_t action;       /* recommended avoidance                */
 } comms_obstacle_t;
 
+/* Buddy 5 - obstacle width estimate from the edge watch on bypass leg 1
+ * (sent as an event).  edge_mm is the obstacle's edge on the bypass side,
+ * from the car's centre line where it stopped; width_mm = 2 x edge_mm
+ * assumes the obstacle is centred on that line. */
+typedef enum
+{
+    COMMS_EDGE_FOUND = 0,       /* face echo stopped: an estimate       */
+    COMMS_EDGE_AT_LEAST,        /* still echoing at the end of the leg:
+                                   a lower bound                        */
+    COMMS_EDGE_NO_FACE,         /* face never heard: no estimate        */
+    COMMS_EDGE_COUNT
+} comms_edge_result_t;
+
+typedef enum
+{
+    COMMS_SIDE_LEFT = 0,
+    COMMS_SIDE_RIGHT,
+    COMMS_SIDE_COUNT
+} comms_side_t;
+
+typedef struct
+{
+    comms_edge_result_t result;
+    comms_side_t        side;       /* bypass side                      */
+    int32_t             edge_mm;    /* 0 .. 1023                        */
+    int32_t             width_mm;   /* 0 .. 2047                        */
+    int32_t             face_mm;    /* last face reading, 0 .. 4095     */
+    int32_t             heard_mm;   /* leg 1 distance at that reading,
+                                       0 .. 2047                        */
+    int32_t             turn_deg;   /* the plan's first pivot, 0 .. 63  */
+} comms_obstacle_width_t;
+
 /* START calibration result (VC), sent once per START as an event.  ADC
  * values are the raw 12-bit readings of the sweep. */
 typedef enum
@@ -275,6 +307,7 @@ void comms_report_sonar(comms_sonar_t const * p_sonar);
 bool comms_event_barcode(char code, comms_nav_t command);
 bool comms_event_hump(int32_t peak_dmm);    /* 0.1 mm steps, 0 .. 800   */
 bool comms_event_obstacle(comms_obstacle_t const * p_obstacle);
+bool comms_event_obstacle_width(comms_obstacle_width_t const * p_width);
 bool comms_event_motion(comms_motion_class_t motion);
 bool comms_event_calibration(comms_calibration_t const * p_calibration);
 

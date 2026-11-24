@@ -29,6 +29,15 @@ obstacle_line_seen_t obstacle_plan_line_watch(obstacle_line_watch_t * p_watch,
                                               bool                    b_black,
                                               int32_t                 leg_mm);
 
+/* The obstacle's edge on the bypass side from a finished edge watch
+ * (obstacle_scan.h): mm from the car's centre line where it stopped.
+ * FOUND: an estimate; AT_LEAST: a lower bound.  false for NO_FACE.
+ * Width = 2 x edge if the obstacle is centred on that line (the planner's
+ * assumption too). */
+bool obstacle_plan_edge_mm(obstacle_edge_watch_t const * p_watch,
+                           uint32_t                      turn_deg,
+                           uint32_t *                    p_edge_mm);
+
 #endif /* OBSTACLE_PLAN_H */
 
 /*** end of file ***/

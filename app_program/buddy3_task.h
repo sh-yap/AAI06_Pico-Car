@@ -28,8 +28,8 @@ extern ID buddy3_output_mbfid;
 
 ID buddy3_output_mbf_create(void);
 
-/* Barcode black threshold in use: learned by the START sweep, else the
- * fallback constant. */
+/* Barcode black threshold learned from the current scan, 0 until its
+ * black and white levels are credible. */
 uint16_t buddy3_barcode_threshold(void);
 
 /* Latest raw 12-bit centre and right line sensor readings (telemetry). */

@@ -18,10 +18,9 @@
 
 #include <tm/tmonitor.h>
 
-/* TEMPORARY (barcode diagnosis, 2026-11-04): send each finished capture to
- * robot/debug, so track runs on the power bank log it.  Same content as the
- * BUDDY3_DEBUG serial line, plus the threshold, the barcode ADC range seen
- * during the capture and its length.  Set to 0 or delete to remove. */
+/* Barcode diagnosis: send each finished capture to robot/debug, so runs on
+ * the power bank log it (the BUDDY3_DEBUG serial line plus the threshold,
+ * the ADC range seen and the capture length).  0 turns it off. */
 #define BUDDY3_SCAN_TO_MQTT      1
 
 #ifndef VC_RECORDER
@@ -59,13 +58,6 @@ buddy3_tick_handler(void *p_exinf)
 
     (void)tk_wup_tsk(g_buddy3_tid);
 }
-
-/*
- * The barcode sensor (GP28 / ADC2) is classified from raw samples in
- * barcode.c. That module learns this scan's white and black levels and
- * reports 0 until it has credible levels, so there is no fixed ADC
- * fallback controlling acquisition.
- */
 
 /*
  * Output message buffer - default choice (message buffer, matching
@@ -484,14 +476,19 @@ void buddy3_task(INT stacd, void *exinf)
                  - (int64_t)enc_snapshot.right_counts)
                 * BUDDY3_BARCODE_OFFSET_MM) / BUDDY3_TRACK_MM));
 
+        /* The barcode sensor (GP28 / ADC2) is classified in barcode.c from
+         * levels learned on each scan; there is no fixed ADC threshold. */
         barcode_update_raw(readings.barcode, timestamp_ms, encoder_position);
         barcode_check_end(encoder_position);
 
-        /* Deferred until finish/decode may have rebuilt the final edges. */
+        /* Read after the end check, which may have rebuilt the edges. */
         barcode_is_black = barcode_get_black_state();
 
+        /*
+         * Everything from here to barcode_get_command() reads the finished
+         * capture, which that call then clears.
+         */
 #if BUDDY3_SCAN_TO_MQTT
-        /* Before barcode_get_command(), which clears the capture. */
         scan_track_adc(readings.barcode);
 
         if (barcode_available())
@@ -501,7 +498,6 @@ void buddy3_task(INT stacd, void *exinf)
 #endif
 
 #if BUDDY3_DEBUG
-        /* Sample before barcode_get_command(), which clears it. */
         barcode_was_ready = barcode_available();
 
         if (barcode_was_ready)
@@ -510,14 +506,10 @@ void buddy3_task(INT stacd, void *exinf)
         }
 #endif
 
-        /*
-         * Read the code before barcode_get_command(), which clears it.
-         * Both safely return NONE if nothing is ready.
-         */
+        /* NONE if nothing is ready, VALID if the character is mapped. */
         barcode_code = barcode_get_code();
 
-        /* 6-bit character index for the laptop, read before
-         * barcode_get_command() clears the capture: 0 when nothing is ready,
+        /* 6-bit character index for the laptop: 0 when nothing is ready,
          * 44 when the capture did not decode, else the Code 39 position. */
         if (BARCODE_NONE == barcode_code)
         {
@@ -538,8 +530,7 @@ void buddy3_task(INT stacd, void *exinf)
         }
 
 #if VC_RECORDER
-        /* Sample the capture state before barcode_get_command() clears it.
-         * Nothing here changes what Buddy 3 sends. */
+        /* Capture state for the recorder; changes nothing Buddy 3 sends. */
         bc_edges           = barcode_get_edge_count();
         bc_done            = barcode_available();
         bc_rec.enc         = encoder_position;

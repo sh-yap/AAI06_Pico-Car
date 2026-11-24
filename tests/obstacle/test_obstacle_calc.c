@@ -1502,6 +1502,312 @@ test_pack_path_request(void)
     obstacle_unpack_path_request(0U, NULL, NULL, NULL);
 }
 
+/*!
+ * @brief One reading for the edge-watch tests.
+ */
+static obstacle_range_t
+edge_reading(obstacle_range_status_t status, uint32_t distance_mm)
+{
+    obstacle_range_t range;
+
+    (void)memset(&range, 0, sizeof(range));
+    range.status = status;
+    range.distance_mm = (OBSTACLE_RANGE_OK == status) ? distance_mm : 0U;
+
+    return (range);
+}
+
+static void
+test_edge_watch(void)
+{
+    obstacle_edge_watch_t watch;
+    obstacle_range_t      r;
+    uint32_t              idx;
+
+    (void)printf("edge watch\n");
+
+    /* Servo square to the face: turned back by the pivot, within range. */
+    check_u32("edge angle left 23", obstacle_scan_edge_angle(
+              OBSTACLE_ACTION_TURN_LEFT, 23U), 67U);
+    check_u32("edge angle right 23", obstacle_scan_edge_angle(
+              OBSTACLE_ACTION_TURN_RIGHT, 23U), 113U);
+    check_u32("edge angle left 35 clamps", obstacle_scan_edge_angle(
+              OBSTACLE_ACTION_TURN_LEFT, 35U), OBSTACLE_SERVO_ANGLE_MIN_DEG);
+    check_u32("edge angle right 40 clamps", obstacle_scan_edge_angle(
+              OBSTACLE_ACTION_TURN_RIGHT, 40U), OBSTACLE_SERVO_ANGLE_MAX_DEG);
+    check_u32("edge angle not a turn", obstacle_scan_edge_angle(
+              OBSTACLE_ACTION_CONTINUE, 23U), 90U);
+
+    /* Face heard twice (lock), then background and TIMEOUTs: FOUND only
+     * at LOST_READINGS losses, and the last face reading and its leg
+     * distance are kept. */
+    obstacle_scan_edge_start(&watch, 441U);
+    r = edge_reading(OBSTACLE_RANGE_OK, 450U);
+    obstacle_scan_edge_add(&watch, &r, 10);
+    r = edge_reading(OBSTACLE_RANGE_OK, 440U);
+    obstacle_scan_edge_add(&watch, &r, 20);
+    r = edge_reading(OBSTACLE_RANGE_OK, 900U);          /* background */
+    obstacle_scan_edge_add(&watch, &r, 30);
+    r = edge_reading(OBSTACLE_RANGE_TIMEOUT, 0U);
+
+    for (idx = 1U; idx < (OBSTACLE_EDGE_LOST_READINGS - 1U); idx++)
+    {
+        obstacle_scan_edge_add(&watch, &r, (int32_t)(30U + (idx * 10U)));
+    }
+
+    check_u32("one loss short is not enough", watch.result,
+              OBSTACLE_EDGE_WATCHING);
+    obstacle_scan_edge_add(&watch, &r, 90);
+    check_u32("found at LOST_READINGS losses", watch.result,
+              OBSTACLE_EDGE_FOUND);
+    check_u32("face_mm kept", watch.face_mm, 440U);
+    check_u32("heard_mm kept", (uint32_t)watch.heard_mm, 20U);
+
+    /* Later readings change nothing. */
+    r = edge_reading(OBSTACLE_RANGE_OK, 300U);
+    obstacle_scan_edge_add(&watch, &r, 50);
+    check_u32("finished watch ignores readings", (uint32_t)watch.heard_mm,
+              20U);
+
+    /* A single stray loss between face readings resets the run. */
+    obstacle_scan_edge_start(&watch, 441U);
+    r = edge_reading(OBSTACLE_RANGE_OK, 441U);
+    obstacle_scan_edge_add(&watch, &r, 0);
+    obstacle_scan_edge_add(&watch, &r, 10);
+    r = edge_reading(OBSTACLE_RANGE_TIMEOUT, 0U);
+    obstacle_scan_edge_add(&watch, &r, 20);
+    r = edge_reading(OBSTACLE_RANGE_OK, 430U);
+    obstacle_scan_edge_add(&watch, &r, 30);
+    r = edge_reading(OBSTACLE_RANGE_TIMEOUT, 0U);
+    obstacle_scan_edge_add(&watch, &r, 40);
+    check_u32("stray loss: still watching", watch.result,
+              OBSTACLE_EDGE_WATCHING);
+
+    /* NO_ECHO says nothing: it neither locks, loses nor counts. */
+    r = edge_reading(OBSTACLE_RANGE_NO_ECHO, 0U);
+    obstacle_scan_edge_add(&watch, &r, 50);
+    check_u32("no echo skipped", watch.result, OBSTACLE_EDGE_WATCHING);
+    r = edge_reading(OBSTACLE_RANGE_TOO_FAR, 0U);
+
+    for (idx = 2U; idx <= OBSTACLE_EDGE_LOST_READINGS; idx++)
+    {
+        obstacle_scan_edge_add(&watch, &r, (int32_t)(50U + (idx * 10U)));
+    }
+
+    check_u32("too far counts as a loss", watch.result, OBSTACLE_EDGE_FOUND);
+    check_u32("heard at the last face reading", (uint32_t)watch.heard_mm,
+              30U);
+
+    /* Tracking: the face comes closer; a jump past face + TOL is lost. */
+    obstacle_scan_edge_start(&watch, 441U);
+    r = edge_reading(OBSTACLE_RANGE_OK, 400U);
+    obstacle_scan_edge_add(&watch, &r, 0);
+    r = edge_reading(OBSTACLE_RANGE_OK, 300U);
+    obstacle_scan_edge_add(&watch, &r, 100);
+    r = edge_reading(OBSTACLE_RANGE_OK, 300U + OBSTACLE_EDGE_FACE_TOL_MM);
+    obstacle_scan_edge_add(&watch, &r, 110);
+    check_u32("face + TOL is still the face", watch.face_mm,
+              300U + OBSTACLE_EDGE_FACE_TOL_MM);
+    r = edge_reading(OBSTACLE_RANGE_TOO_CLOSE, 0U);
+    obstacle_scan_edge_add(&watch, &r, 120);
+    check_u32("too close is the face", (uint32_t)watch.heard_mm, 120U);
+
+    /* Before the lock, the face may be at most known + KNOWN_ABOVE. */
+    obstacle_scan_edge_start(&watch, 441U);
+    r = edge_reading(OBSTACLE_RANGE_OK, 441U + OBSTACLE_PATH_KNOWN_ABOVE_MM
+                                         + 1U);
+    obstacle_scan_edge_add(&watch, &r, 0);
+    check_u32("beyond the scanned face: not the face", watch.face_count, 0U);
+
+    /* Never locked within LOCK_MAX readings: NO_FACE. */
+    obstacle_scan_edge_start(&watch, 441U);
+    r = edge_reading(OBSTACLE_RANGE_TIMEOUT, 0U);
+
+    for (idx = 0U; idx < (OBSTACLE_EDGE_LOCK_MAX_READINGS - 1U); idx++)
+    {
+        obstacle_scan_edge_add(&watch, &r, (int32_t)idx);
+    }
+
+    check_u32("not yet given up", watch.result, OBSTACLE_EDGE_WATCHING);
+    obstacle_scan_edge_add(&watch, &r, 99);
+    check_u32("no face", watch.result, OBSTACLE_EDGE_NO_FACE);
+
+    /* The leg ends: AT_LEAST if locked, NO_FACE if not. */
+    obstacle_scan_edge_start(&watch, 441U);
+    r = edge_reading(OBSTACLE_RANGE_OK, 441U);
+    obstacle_scan_edge_add(&watch, &r, 0);
+    obstacle_scan_edge_add(&watch, &r, 10);
+    obstacle_scan_edge_end(&watch);
+    check_u32("end while heard: at least", watch.result,
+              OBSTACLE_EDGE_AT_LEAST);
+
+    obstacle_scan_edge_start(&watch, 441U);
+    obstacle_scan_edge_add(&watch, &r, 0);
+    obstacle_scan_edge_end(&watch);
+    check_u32("end before the lock: no face", watch.result,
+              OBSTACLE_EDGE_NO_FACE);
+
+    obstacle_scan_edge_start(NULL, 441U);
+    obstacle_scan_edge_add(NULL, &r, 0);
+    obstacle_scan_edge_add(&watch, NULL, 0);
+    obstacle_scan_edge_end(NULL);
+}
+
+static void
+test_plan_edge(void)
+{
+    obstacle_edge_watch_t watch;
+    obstacle_range_t      r;
+    uint32_t              edge_mm = 0U;
+    uint32_t              true_mm;
+    double const          deg = 3.14159265358979 / 180.0;
+    double                turn;
+    double                face;
+    double                sensor;
+    int32_t               leg_mm;
+    uint32_t              face_y_mm;
+    uint32_t              err;
+
+    (void)printf("edge position\n");
+
+    /* By hand: turn 23, heard 300 mm, face 200 mm.
+     * sensor = 365 x 0.3907 = 142; lead = 200 x tan 9 = 31; edge = 111. */
+    (void)memset(&watch, 0, sizeof(watch));
+    watch.result   = OBSTACLE_EDGE_FOUND;
+    watch.heard_mm = 300;
+    watch.face_mm  = 200U;
+    check_u32("edge ok", obstacle_plan_edge_mm(&watch, 23U, &edge_mm) ? 1U
+                                                                       : 0U,
+              1U);
+    check_u32("edge by hand", edge_mm, 111U);
+
+    watch.result = OBSTACLE_EDGE_AT_LEAST;
+    check_u32("at least gives a bound", obstacle_plan_edge_mm(&watch, 23U,
+              &edge_mm) ? 1U : 0U, 1U);
+
+    /* Lead longer than the sensor's offset: 0, never negative. */
+    watch.heard_mm = 0;
+    watch.face_mm  = 4000U;
+    (void)obstacle_plan_edge_mm(&watch, 23U, &edge_mm);
+    check_u32("edge never negative", edge_mm, 0U);
+
+    watch.result = OBSTACLE_EDGE_NO_FACE;
+    check_u32("no face: no estimate", obstacle_plan_edge_mm(&watch, 23U,
+              &edge_mm) ? 1U : 0U, 0U);
+    watch.result = OBSTACLE_EDGE_WATCHING;
+    check_u32("watching: no estimate", obstacle_plan_edge_mm(&watch, 23U,
+              &edge_mm) ? 1U : 0U, 0U);
+    check_u32("NULL", obstacle_plan_edge_mm(NULL, 23U, &edge_mm) ? 1U : 0U,
+              0U);
+
+    /* Whole leg, simulated with the 25 Oct beam rule (face echoes while
+     * its edge is within face x tan 9 of the sensor's axis): the
+     * estimate must land within 10 mm of the true edge.  Readings every
+     * 10 mm of leg (66 ms at 150 mm/s); the planner's turn for each
+     * stopping distance. */
+    for (true_mm = 50U; true_mm <= 150U; true_mm += 25U)
+    {
+        obstacle_bypass_plan_t plan;
+
+        face_y_mm = 441U + OBSTACLE_AXLE_TO_SENSOR_MM;
+        (void)obstacle_plan_bypass(441U, OBSTACLE_ACTION_TURN_LEFT, &plan);
+        turn = (double)plan.turn_deg * deg;
+        obstacle_scan_edge_start(&watch, 441U);
+
+        for (leg_mm = 0; (leg_mm <= (int32_t)plan.out_mm)
+             && (OBSTACLE_EDGE_WATCHING == watch.result); leg_mm += 10)
+        {
+            sensor = ((double)leg_mm + OBSTACLE_AXLE_TO_SENSOR_MM) * sin(turn);
+            face = (double)face_y_mm
+                   - (((double)leg_mm + OBSTACLE_AXLE_TO_SENSOR_MM)
+                      * cos(turn));
+
+            if (sensor < ((double)true_mm + (face * tan(9.0 * deg))))
+            {
+                r = edge_reading(OBSTACLE_RANGE_OK, (uint32_t)face);
+            }
+            else
+            {
+                r = edge_reading(OBSTACLE_RANGE_OK, 2000U);  /* background */
+            }
+
+            obstacle_scan_edge_add(&watch, &r, leg_mm);
+        }
+
+        obstacle_scan_edge_end(&watch);
+
+        /* Even a 50 mm half-width is heard at first: from 500 mm the
+         * beam reaches 500 x tan 9 = 79 mm past the axis. */
+        check_u32("simulated leg: found", watch.result, OBSTACLE_EDGE_FOUND);
+        (void)obstacle_plan_edge_mm(&watch, plan.turn_deg, &edge_mm);
+        err = (edge_mm > true_mm) ? (edge_mm - true_mm) : (true_mm - edge_mm);
+        (void)printf("  edge %u mm: estimated %u mm (turn %u deg, heard at "
+                     "%d mm of leg)\n", (unsigned int)true_mm,
+                     (unsigned int)edge_mm, (unsigned int)plan.turn_deg,
+                     (int)watch.heard_mm);
+        check_u32("simulated leg: within 10 mm", (err <= 10U) ? 1U : 0U, 1U);
+    }
+}
+
+static void
+test_pack_edge(void)
+{
+    obstacle_edge_watch_t in;
+    obstacle_edge_watch_t out;
+    obstacle_action_t     side = OBSTACLE_ACTION_STOP;
+    uint32_t              turn_deg = 0U;
+    uint32_t              known_mm = 0U;
+
+    (void)printf("edge watch words\n");
+
+    obstacle_unpack_edge_request(obstacle_pack_edge_request(
+        OBSTACLE_ACTION_TURN_LEFT, 23U, 441U), &side, &turn_deg, &known_mm);
+    check_u32("request side", side, OBSTACLE_ACTION_TURN_LEFT);
+    check_u32("request turn", turn_deg, 23U);
+    check_u32("request known", known_mm, 441U);
+
+    obstacle_unpack_edge_request(obstacle_pack_edge_request(
+        OBSTACLE_ACTION_TURN_RIGHT, 500U, 9999U), &side, &turn_deg, &known_mm);
+    check_u32("request side right", side, OBSTACLE_ACTION_TURN_RIGHT);
+    check_u32("request turn saturates", turn_deg, 127U);
+    check_u32("request known saturates", known_mm, 4095U);
+
+    obstacle_unpack_edge_request(7U << 19U, &side, NULL, NULL);
+    check_u32("unknown side: straight ahead", side,
+              OBSTACLE_ACTION_CONTINUE);
+
+    (void)memset(&in, 0, sizeof(in));
+    in.result   = OBSTACLE_EDGE_FOUND;
+    in.face_mm  = 188U;
+    in.heard_mm = 284;
+    in.face_count = 9U;
+    check_u32("result word", obstacle_unpack_edge(obstacle_pack_edge(&in),
+              &out) ? 1U : 0U, 1U);
+    check_u32("result", out.result, OBSTACLE_EDGE_FOUND);
+    check_u32("face", out.face_mm, 188U);
+    check_u32("heard", (uint32_t)out.heard_mm, 284U);
+    check_u32("counters not stored", out.face_count, 0U);
+
+    in.result   = OBSTACLE_EDGE_NO_FACE;
+    in.face_mm  = 5000U;
+    in.heard_mm = 3000;
+    (void)obstacle_unpack_edge(obstacle_pack_edge(&in), &out);
+    check_u32("result no face", out.result, OBSTACLE_EDGE_NO_FACE);
+    check_u32("face saturates", out.face_mm, 4095U);
+    check_u32("heard saturates", (uint32_t)out.heard_mm, 2047U);
+
+    in.heard_mm = -20;
+    (void)obstacle_unpack_edge(obstacle_pack_edge(&in), &out);
+    check_u32("negative heard stores 0", (uint32_t)out.heard_mm, 0U);
+
+    in.result = (obstacle_edge_result_t)9;
+    (void)obstacle_unpack_edge(obstacle_pack_edge(&in), &out);
+    check_u32("bad result packs as watching", out.result,
+              OBSTACLE_EDGE_WATCHING);
+    check_u32("NULL watch packs 0", obstacle_pack_edge(NULL), 0U);
+    check_u32("NULL out", obstacle_unpack_edge(0U, NULL) ? 1U : 0U, 0U);
+}
+
 int
 main(void)
 {
@@ -1526,6 +1832,9 @@ main(void)
     test_pack_scan();
     test_pack_path();
     test_pack_path_request();
+    test_edge_watch();
+    test_plan_edge();
+    test_pack_edge();
 
     (void)printf("%u checks, %u failures\n",
                  (unsigned int)checks, (unsigned int)failures);

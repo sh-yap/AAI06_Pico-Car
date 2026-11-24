@@ -35,6 +35,7 @@
 #include "comms.h"
 #include "comms_link.h"
 #include "comms_codec.h"
+#include "nav_map.h"
 
 /* ------------------------------------------------------------------ *
  *  Tunables
@@ -87,13 +88,19 @@
 #define BITS_WIDTH               CODEC_BITS_WIDTH
 #define BITS_CLEARANCE           CODEC_BITS_CLEARANCE
 #define BITS_ACTION              CODEC_BITS_ACTION
+#define BITS_EDGE_RESULT         CODEC_BITS_EDGE_RESULT
+#define BITS_SIDE                CODEC_BITS_SIDE
+#define BITS_EDGE                CODEC_BITS_EDGE
+#define BITS_EST_WIDTH           CODEC_BITS_EST_WIDTH
+#define BITS_LEG                 CODEC_BITS_LEG
+#define BITS_TURN_DEG            CODEC_BITS_TURN_DEG
 #define BITS_RANGE               CODEC_BITS_RANGE
 #define BITS_SONAR_STATE         CODEC_BITS_SONAR_STATE
 #define BITS_SILENT              CODEC_BITS_SILENT
 #define BITS_RUN                 1U
 #define BITS_RUN_MS              20U
 #define BITS_COUNT               8U
-#define BITS_CMD                 2U
+#define BITS_CMD                 3U
 #define BITS_OK                  1U
 #define BITS_CAL_RESULT          CODEC_BITS_CAL_RESULT
 #define BITS_CAL_OVERLAP         CODEC_BITS_CAL_OVERLAP
@@ -115,7 +122,8 @@
 #define CMD_CODE_START           1U
 #define CMD_CODE_STOP            2U
 #define CMD_CODE_STATUS          3U
-#define CMD_CODE_COUNT           4U
+#define CMD_CODE_MAP             4U     /* text only: barcode mapping   */
+#define CMD_CODE_COUNT           5U
 
 /* ------------------------------------------------------------------ *
  *  Types
@@ -180,6 +188,16 @@ static char const * const g_avoid_names[COMMS_AVOID_COUNT] =
     "STOP", "CONTINUE", "TURN_LEFT", "TURN_RIGHT", "REVERSE_RETRY"
 };
 
+static char const * const g_edge_names[COMMS_EDGE_COUNT] =
+{
+    "FOUND", "AT_LEAST", "NO_FACE"
+};
+
+static char const * const g_side_names[COMMS_SIDE_COUNT] =
+{
+    "LEFT", "RIGHT"
+};
+
 static char const * const g_range_names[COMMS_RANGE_COUNT] =
 {
     "OK", "NO_ECHO", "TOO_CLOSE", "TOO_FAR", "TIMEOUT", "NOT_READY"
@@ -193,7 +211,7 @@ static char const * const g_sonar_names[COMMS_SONAR_COUNT] =
 
 static char const * const g_cmd_names[CMD_CODE_COUNT] =
 {
-    "unknown", "start", "stop", "status"
+    "unknown", "start", "stop", "status", "map"
 };
 
 static char const * const g_run_names[RUN_CODE_COUNT] =
@@ -602,6 +620,24 @@ comms_event_obstacle (comms_obstacle_t const * p_obstacle)
 
 
 bool
+comms_event_obstacle_width (comms_obstacle_width_t const * p_width)
+{
+    codec_event_t event = {0};
+    bool          b_queued = false;
+
+    if (NULL != p_width)
+    {
+        event.type           = (uint8_t) CODEC_EVENT_OBSTACLE;
+        event.kind           = (uint8_t) CODEC_OBSTACLE_WIDTH;
+        event.obstacle_width = *p_width;
+        b_queued             = queue_event(&event);
+    }
+
+    return b_queued;
+}
+
+
+bool
 comms_event_motion (comms_motion_class_t motion)
 {
     codec_event_t event = {0};
@@ -655,6 +691,8 @@ static uint32_t g_published_fault = 0xFFFFFFFFU;
 static uint32_t g_heartbeat_ms;
 static uint16_t g_heartbeat_seq;        /* wraps at the 16-bit wire width */
 static bool     g_b_info_pending;
+static bool     g_b_map_pending;        /* robot/nav_map to (re)publish    */
+static char     g_map_text[NAV_MAP_TEXT_MAX];
 
 /* Acknowledgements of commands received, oldest first. */
 static ack_t    g_acks[COMMS_ACK_QUEUE_LEN];
@@ -701,6 +739,7 @@ static void
 resend_all (void)
 {
     g_b_info_pending     = true;
+    g_b_map_pending      = true;
     g_published_state    = 0xFFFFFFFFU;
     g_motion_tx.b_force  = true;
     g_line_tx.b_force    = true;
@@ -864,6 +903,34 @@ build_calibration (codec_writer_t * p_w, comms_link_msg_t * p_msg,
 }
 
 
+/* robot/event/obstacle_width: the edge watch's estimate (not counted
+ * as another obstacle in the run summary). */
+static void
+build_obstacle_width (codec_writer_t * p_w, comms_link_msg_t * p_msg,
+                      codec_event_t const * p_event)
+{
+    comms_obstacle_width_t const * const p_wd = &p_event->obstacle_width;
+
+    codec_begin(p_w, p_msg, "robot/event/obstacle_width", QOS_1, false,
+                p_event->time_ms);
+    codec_put_name(p_w, CODEC_KEY("result"), CODEC_NAMES(g_edge_names),
+                   COMMS_EDGE_COUNT, (uint32_t) p_wd->result,
+                   BITS_EDGE_RESULT);
+    codec_put_name(p_w, CODEC_KEY("side"), CODEC_NAMES(g_side_names),
+                   COMMS_SIDE_COUNT, (uint32_t) p_wd->side, BITS_SIDE);
+    codec_put_uint(p_w, CODEC_KEY("edge_mm"), non_negative(p_wd->edge_mm),
+                   BITS_EDGE);
+    codec_put_uint(p_w, CODEC_KEY("width_mm"), non_negative(p_wd->width_mm),
+                   BITS_EST_WIDTH);
+    codec_put_uint(p_w, CODEC_KEY("face_mm"), non_negative(p_wd->face_mm),
+                   BITS_OBST_DIST);
+    codec_put_uint(p_w, CODEC_KEY("heard_mm"), non_negative(p_wd->heard_mm),
+                   BITS_LEG);
+    codec_put_uint(p_w, CODEC_KEY("turn_deg"), non_negative(p_wd->turn_deg),
+                   BITS_TURN_DEG);
+}
+
+
 static void
 build_event (comms_link_msg_t * p_msg, codec_event_t const * p_event)
 {
@@ -903,6 +970,12 @@ build_event (comms_link_msg_t * p_msg, codec_event_t const * p_event)
             break;
 
         case CODEC_EVENT_OBSTACLE:
+            if (CODEC_OBSTACLE_WIDTH == p_event->kind)
+            {
+                build_obstacle_width(&w, p_msg, p_event);
+                break;
+            }
+
             g_obstacle_count++;
             codec_begin(&w, p_msg, "robot/event/obstacle", QOS_1, false,
                         p_event->time_ms);
@@ -1217,6 +1290,15 @@ comms_link_next (comms_link_msg_t * p_msg)
             g_b_info_pending = false;
             codec_text(p_msg, "robot/info", QOS_1, true, g_build_id);
         }
+        else if (g_b_map_pending)
+        {
+            /* Barcode mapping in force, retained, plain text: "A=LEFT
+               F=RIGHT Z=FORWARD X=UTURN", or "none" before one arrives. */
+            g_b_map_pending = false;
+            (void) nav_map_format(nav_map_get(), g_map_text,
+                                  (uint32_t) sizeof(g_map_text));
+            codec_text(p_msg, "robot/nav_map", QOS_1, true, g_map_text);
+        }
         else if ((state != g_published_state)
                  || (fault != g_published_fault))
         {
@@ -1329,6 +1411,10 @@ command_code (uint8_t const * p_data, uint32_t len)
     {
         code = CMD_CODE_STATUS;
     }
+    else if (nav_map_is_command(p_data, n))
+    {
+        code = CMD_CODE_MAP;
+    }
     else
     {
         /* Unknown: acknowledged as not ok. */
@@ -1343,6 +1429,7 @@ comms_link_on_command (uint8_t const * p_data, uint32_t len)
 {
     uint32_t const code = command_code(p_data, len);
     uint32_t       cmd  = (uint32_t) COMMS_CMD_NONE;
+    uint32_t       map_word;
     bool           b_ok = false;
 
     g_commands_received++;
@@ -1360,6 +1447,18 @@ comms_link_on_command (uint8_t const * p_data, uint32_t len)
         case CMD_CODE_STATUS:
             resend_all();               /* Handled here, at once. */
             b_ok = true;
+            break;
+
+        case CMD_CODE_MAP:
+            /* Handled here, at once.  A bad mapping changes nothing. */
+            b_ok = nav_map_parse(p_data, len, &map_word);
+
+            if (b_ok)
+            {
+                nav_map_set(map_word);
+            }
+
+            g_b_map_pending = true;     /* Echo what is in force now. */
             break;
 
         default:

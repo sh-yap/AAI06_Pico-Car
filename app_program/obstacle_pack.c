@@ -99,6 +99,20 @@
 #define REQUEST_SIDE_SHIFT    (24U)
 #define REQUEST_SIDE_BITS     (3U)
 
+#define EDGE_REQ_KNOWN_SHIFT  (0U)
+#define EDGE_REQ_KNOWN_BITS   (12U)
+#define EDGE_REQ_TURN_SHIFT   (12U)
+#define EDGE_REQ_TURN_BITS    (7U)
+#define EDGE_REQ_SIDE_SHIFT   (19U)
+#define EDGE_REQ_SIDE_BITS    (3U)
+
+#define EDGE_RESULT_SHIFT     (0U)
+#define EDGE_RESULT_BITS      (2U)
+#define EDGE_FACE_SHIFT       (2U)
+#define EDGE_FACE_BITS        (12U)
+#define EDGE_HEARD_SHIFT      (14U)
+#define EDGE_HEARD_BITS       (11U)
+
 #define PACK_WORD_MASK        (0xFFFFFFFFULL)
 
 
@@ -499,6 +513,124 @@ obstacle_unpack_path_request(uint32_t            word,
     {
         *p_known_mm = pack_get(word, REQUEST_KNOWN_SHIFT, REQUEST_KNOWN_BITS);
     }
+}
+
+/*!
+ * @brief Pack the controller's edge-watch request into one word.
+ *
+ * @param[in] side     The plan's side (TURN_LEFT or TURN_RIGHT).
+ * @param[in] turn_deg The plan's first pivot.
+ * @param[in] known_mm The scan's closest distance.
+ *
+ * @return The request word; the task decodes it with one read.
+ */
+uint32_t
+obstacle_pack_edge_request(obstacle_action_t side,
+                           uint32_t          turn_deg,
+                           uint32_t          known_mm)
+{
+    return ((pack_field(known_mm, EDGE_REQ_KNOWN_BITS) << EDGE_REQ_KNOWN_SHIFT)
+            | (pack_field(turn_deg, EDGE_REQ_TURN_BITS) << EDGE_REQ_TURN_SHIFT)
+            | (pack_enum((uint32_t)side, (uint32_t)OBSTACLE_ACTION_COUNT)
+               << EDGE_REQ_SIDE_SHIFT));
+}
+
+/*!
+ * @brief Decode an edge-watch request word.
+ *
+ * @param[in]  word       Request word.
+ * @param[out] p_side     The side (or NULL); an unknown code decodes to
+ *                        CONTINUE, which looks straight ahead.
+ * @param[out] p_turn_deg The plan's first pivot (or NULL).
+ * @param[out] p_known_mm The scan's closest distance (or NULL).
+ */
+void
+obstacle_unpack_edge_request(uint32_t            word,
+                             obstacle_action_t * p_side,
+                             uint32_t *          p_turn_deg,
+                             uint32_t *          p_known_mm)
+{
+    uint32_t side = pack_get(word, EDGE_REQ_SIDE_SHIFT, EDGE_REQ_SIDE_BITS);
+
+    if (side >= (uint32_t)OBSTACLE_ACTION_COUNT)
+    {
+        side = (uint32_t)OBSTACLE_ACTION_CONTINUE;
+    }
+
+    if (NULL != p_side)
+    {
+        *p_side = (obstacle_action_t)side;
+    }
+
+    if (NULL != p_turn_deg)
+    {
+        *p_turn_deg = pack_get(word, EDGE_REQ_TURN_SHIFT, EDGE_REQ_TURN_BITS);
+    }
+
+    if (NULL != p_known_mm)
+    {
+        *p_known_mm = pack_get(word, EDGE_REQ_KNOWN_SHIFT,
+                               EDGE_REQ_KNOWN_BITS);
+    }
+}
+
+/*!
+ * @brief Pack the parts of an edge watch the controller reads.
+ *
+ * @param[in] p_watch Watch state (NULL packs as WATCHING, nothing heard).
+ *
+ * @return The result word: result, face_mm and heard_mm (negative leg
+ *         distances store as 0; values beyond a field saturate).
+ */
+uint32_t
+obstacle_pack_edge(obstacle_edge_watch_t const * p_watch)
+{
+    uint32_t word = 0U;
+    uint32_t heard_mm;
+
+    if (NULL != p_watch)
+    {
+        /* Cast to uint32_t: heard_mm was just checked non-negative. */
+        heard_mm = (p_watch->heard_mm > 0) ? (uint32_t)p_watch->heard_mm : 0U;
+        word = (pack_enum((uint32_t)p_watch->result,
+                          (uint32_t)OBSTACLE_EDGE_COUNT) << EDGE_RESULT_SHIFT)
+               | (pack_field(p_watch->face_mm, EDGE_FACE_BITS)
+                  << EDGE_FACE_SHIFT)
+               | (pack_field(heard_mm, EDGE_HEARD_BITS) << EDGE_HEARD_SHIFT);
+    }
+
+    return (word);
+}
+
+/*!
+ * @brief Decode an edge-watch result word.
+ *
+ * @param[in]  word    Result word.
+ * @param[out] p_watch result, face_mm and heard_mm; the counters are 0.
+ *
+ * @return false if p_watch is NULL.  (Every 2-bit code is a result.)
+ */
+bool
+obstacle_unpack_edge(uint32_t word, obstacle_edge_watch_t * p_watch)
+{
+    bool b_ok = false;
+
+    if (NULL != p_watch)
+    {
+        p_watch->result = (obstacle_edge_result_t)
+                          pack_get(word, EDGE_RESULT_SHIFT, EDGE_RESULT_BITS);
+        p_watch->known_mm   = 0U;
+        p_watch->face_mm    = pack_get(word, EDGE_FACE_SHIFT, EDGE_FACE_BITS);
+        /* Cast to int32_t: at most 11 bits. */
+        p_watch->heard_mm   = (int32_t)pack_get(word, EDGE_HEARD_SHIFT,
+                                                EDGE_HEARD_BITS);
+        p_watch->face_count = 0U;
+        p_watch->lost_count = 0U;
+        p_watch->readings   = 0U;
+        b_ok = true;
+    }
+
+    return (b_ok);
 }
 
 /*** end of file ***/

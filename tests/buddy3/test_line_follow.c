@@ -169,6 +169,51 @@ test_junction(void)
 
 
 /*
+ * H3: a single 10 ms dropout during a junction crossing (B, B, W, B, B)
+ * must still report JUNCTION, while alternating noise or two brief grazes
+ * separated by 20 ms white must not.
+ */
+static void
+test_junction_single_dropout(void)
+{
+    line_state_t state = LINE_CENTRE;
+
+    line_follow_init();
+    (void)step(CENTRE_ON, WHITE, &state);
+
+    /* B, B, W, B, B: single 10 ms dropout inside a junction crossing. */
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, WHITE, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    check("junction dropout: B B W B B -> JUNCTION",
+          state == LINE_JUNCTION);
+
+    /* Alternating noise: B W B W B must never report JUNCTION. */
+    line_follow_init();
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, WHITE, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, WHITE, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    check("junction dropout: B W B W B -> not JUNCTION",
+          state != LINE_JUNCTION);
+
+    /* Two separate 20 ms grazes with 20 ms white between them. */
+    line_follow_init();
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, WHITE, &state);
+    (void)step(CENTRE_ON, WHITE, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    (void)step(CENTRE_ON, RIGHT_ON, &state);
+    check("junction dropout: B B W W B B -> not JUNCTION",
+          state != LINE_JUNCTION);
+}
+
+
+/*
  * START calibration gap check. A synthetic sweep: both sensors read WHITE,
  * except BLACK_LEVEL inside their own stretch of samples. The sweep starts
  * moving at sample 0 (line_cal_sweep() is called after line_cal_begin()).
@@ -1076,12 +1121,123 @@ test_ref_reset_on_recalibration(void)
 
 
 /*
- * CR1 Phase 4: the packed 3-byte sweep-history samples must read back
+ * Centred, the right sensor only touches the line edge once per window, each
+ * touch a little weaker than the last. Those edge readings must not lower the
+ * right threshold below the START midpoint (2000 for 200 to 3800). Before
+ * the fix each touch halved the span (2000, 1110, 700, 500, 400), and a
+ * half-covered right sensor with the centre on the line read JUNCTION.
+ */
+static void
+test_ref_right_edge_touch(void)
+{
+    static uint16_t const touch[] = { 2020U, 1200U, 800U, 600U, 450U };
+    uint32_t k;
+    uint32_t w;
+    uint32_t bits_dropped = 0U;
+    line_state_t state = LINE_LOST;
+    line_cal_result_t result;
+    ir_readings_t r;
+
+    ref_calibrate();
+    line_cal_get_result(&result);
+    check("ref right: START right threshold is 2000",
+          result.right.threshold == 2000U);
+
+    for (w = 0U; w < 8U; w++)
+    {
+        for (k = 0U; k < REF_WINDOW_CYCLES; k++)
+        {
+            r.centre = BLACK_LEVEL;
+            r.right = (k == 100U) ? touch[(w < 5U) ? w : 4U] : WHITE;
+            r.barcode = WHITE;
+            line_ref_update(r, REF_STEP);
+        }
+    }
+
+    /* Just below the START threshold stays white. */
+    r = (ir_readings_t){ BLACK_LEVEL, 1999U, WHITE };
+    if ((line_get_sensor_bits(r) & LINE_SENSOR_RIGHT) == 0U)
+    {
+        bits_dropped++;
+    }
+    check("ref right: edge touches keep the START threshold",
+          bits_dropped == 1U);
+
+    /* Centre on the line, right half covered: not a junction. */
+    r = (ir_readings_t){ BLACK_LEVEL, 1100U, WHITE };
+    for (k = 0U; k < 5U; k++)
+    {
+        state = line_get_position(r);
+    }
+    check("ref right: half-covered right with centre on is CENTRE",
+          state == LINE_CENTRE);
+
+    /* A darker right line still raises the threshold. */
+    for (w = 0U; w < 8U; w++)
+    {
+        for (k = 0U; k < REF_WINDOW_CYCLES; k++)
+        {
+            r.centre = BLACK_LEVEL;
+            r.right = ((k % 20U) < 10U) ? 4000U : WHITE;
+            r.barcode = WHITE;
+            line_ref_update(r, REF_STEP);
+        }
+    }
+    r = (ir_readings_t){ BLACK_LEVEL, 2050U, WHITE };
+    check("ref right: a darker line still raises the threshold",
+          (line_get_sensor_bits(r) & LINE_SENSOR_RIGHT) == 0U);
+}
+
+
+/*
+ * Run 1 (24 Nov): driving over a darker tape patch (centre 3200) raised
+ * centre_threshold to ~1700. When returning to normal lighter tape (1300),
+ * the old (black > current) check locked centre_threshold at 1700 forever
+ * and made the centre sensor blind to the line and the next junction.
+ */
+static void
+test_ref_dark_patch_recovery(void)
+{
+    uint32_t k;
+    uint32_t w;
+    ir_readings_t r;
+    line_state_t state = LINE_LOST;
+
+    /* Calibrate on dark tape (200..3800 -> centre_thr 2000, right_thr 2000),
+     * matching a dark patch pushing centre_threshold high. */
+    ref_calibrate();
+    check("ref dark recovery: START calibration OK",
+          line_cal_state() == LINE_CAL_OK);
+
+    /* Drive onto lighter normal tape (1300, below current thr 2000) for two
+     * windows: centre_threshold must recover down (~750) instead of staying
+     * latched at 2000. */
+    for (w = 0U; w < 2U; w++)
+    {
+        ref_drive_window(1300U, REF_STEP);
+    }
+
+    r = (ir_readings_t){ 1300U, WHITE, WHITE };
+    check("ref dark recovery: normal tape 1300 reads black again",
+          (line_get_sensor_bits(r) & LINE_SENSOR_CENTRE) != 0U);
+
+    r = (ir_readings_t){ 1300U, 3200U, WHITE };
+    for (k = 0U; k < 4U; k++)
+    {
+        state = line_get_position(r);
+    }
+    check("ref dark recovery: junction at 1300/3200 reads JUNCTION",
+          state == LINE_JUNCTION);
+}
+
+
+/*
+ * The packed 3-byte sweep-history samples must read back
  * exactly what was written for every 12-bit value, and mask (never wrap)
  * outside it.
  */
 
-/* LINE_CAL_HISTORY is 256 in line_follow.c (depth is not a CR1 item). */
+/* Matches LINE_CAL_HISTORY in line_follow.c. */
 #define TEST_HISTORY_SAMPLES    256U
 
 static void
@@ -1143,6 +1299,7 @@ main(void)
     test_right_drift();
     test_lost();
     test_junction();
+    test_junction_single_dropout();
     test_calibration_gap();
     test_calibration_not_measured();
     test_calibration_raw_peak();
@@ -1156,6 +1313,8 @@ main(void)
     test_ref_centred_no_white();
     test_ref_no_tape_or_stationary();
     test_ref_reset_on_recalibration();
+    test_ref_right_edge_touch();
+    test_ref_dark_patch_recovery();
     test_history_storage_round_trip();
 
     (void)printf("%u checks, %u failures\n",

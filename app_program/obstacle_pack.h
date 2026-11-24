@@ -61,6 +61,20 @@
  *   bits 24..26  side      3 U, obstacle_action_t (TURN_LEFT/TURN_RIGHT)
  *   bits 27..31  reserved, 0
  *
+ * Edge-watch request word: 1 word (4 B).
+ *
+ *   bits  0..11  known_mm  12 U, saturates at 4095
+ *   bits 12..18  turn_deg   7 U, saturates at 127
+ *   bits 19..21  side       3 U, obstacle_action_t
+ *   bits 22..31  reserved, 0
+ *
+ * Edge-watch result word: 1 word (4 B).
+ *
+ *   bits  0..1   result     2 U, obstacle_edge_result_t (all 4 codes used)
+ *   bits  2..13  face_mm   12 U, saturates at 4095
+ *   bits 14..24  heard_mm  11 U, saturates at 2047 (negative stores as 0)
+ *   bits 25..31  reserved, 0
+ *
  * BARR-C 4.2: no #include here.  Include <stdint.h>, <stdbool.h> and
  * "obstacle_types.h" before this header.
  */
@@ -125,6 +139,23 @@ void obstacle_unpack_path_request(uint32_t            word,
                                   obstacle_action_t * p_side,
                                   uint32_t *          p_need_mm,
                                   uint32_t *          p_known_mm);
+
+/* Edge-watch request (side, turn_deg, known_mm) in one word, published
+ * with one 32-bit store. */
+uint32_t obstacle_pack_edge_request(obstacle_action_t side,
+                                    uint32_t          turn_deg,
+                                    uint32_t          known_mm);
+
+void obstacle_unpack_edge_request(uint32_t            word,
+                                  obstacle_action_t * p_side,
+                                  uint32_t *          p_turn_deg,
+                                  uint32_t *          p_known_mm);
+
+/* Edge-watch result (result, face_mm, heard_mm) in one word: the task
+ * publishes it with one store, so the reader needs no lock. */
+uint32_t obstacle_pack_edge(obstacle_edge_watch_t const * p_watch);
+
+bool obstacle_unpack_edge(uint32_t word, obstacle_edge_watch_t * p_watch);
 
 #endif /* OBSTACLE_PACK_H */
 
