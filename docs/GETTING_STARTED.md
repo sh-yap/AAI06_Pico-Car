@@ -1,3 +1,9 @@
+> This guide describes the supplied kernel demo and toolchain. For the AAI06
+> robot use [Integrated car build and operation](TEST_INTEGRATE.md), which selects
+> `APP=vc_car BOARD=robo_pico_robot SMP=1 CONSOLE=usb_cdc`.
+> The robot uses GP0/GP1 for ultrasonic, GP16/GP17 for the left encoder and
+> GP19 for an external status LED. Demo UART wiring does not apply to the robot.
+
 # Getting Started - µT-Kernel 3.0 dual-core SMP on RP2040
 
 From a clean machine to a Pico W running both cores. Roughly 15 minutes.
@@ -691,7 +697,7 @@ switches profiles on its own, so a stale object tree is not the usual cause.
 
 ---
 
-## 9. Next steps
+## 9. References
 
 - [docs/PORT_RP2040.md](PORT_RP2040.md) - what is validated on hardware, what is ported but not yet validated, and what is not ported. It also carries the **RP2040 safety rules** (part of the qualification boundary, not optional advice), the **driver-ownership matrix** to consult before adding a driver, and the idle/exception model
 - The µT-Kernel 3.0 specification: https://tron-forum.github.io/mtkernel_3/

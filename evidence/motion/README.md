@@ -1,11 +1,10 @@
-# Buddy 2 evidence
+# Motion evidence
 
-Store dated CSV exports here. Use this header so motor, encoder, PID, distance,
-turn and fault runs can be compared after final-car assembly:
+[Recorded Motion verification](FINAL_MOTION_VERIFICATION.md) consolidates the
+completed October bench and floor observations.
+[Encoder timing incident](ENCODER_FAULT_INCIDENT.md) records the timer fix.
 
-```text
-timestamp_us,test_id,sequence_id,target_left_mm_s,target_right_mm_s,measured_left_mm_s,measured_right_mm_s,left_counts,right_counts,left_pwm_permille,right_pwm_permille,motion_state,fault,battery_voltage_v
-```
-
-No file in this directory should be interpreted as final-car verification until
-the test setup, calibration constants and vehicle configuration are recorded.
+The reports distinguish historical physical observations from the current
+source configuration. Current host checks are documented in
+[tests/motion](../../tests/motion/README.md). Raw non-Markdown files are
+retained where present. No historical test is a claim of final-course success.

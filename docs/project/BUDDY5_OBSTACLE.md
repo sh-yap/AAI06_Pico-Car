@@ -1,172 +1,56 @@
-# Buddy 5 — ultrasonic and servo
+# Buddy 5 obstacle sensing
 
-Buddy 5 owns the HC-SR04 ultrasonic sensor and the SG90 scan servo. It
-reports distances and, later, obstacle profiles and bypass recommendations to
-the Vehicle Controller. It never drives the motors; Buddy 2 does.
+Buddy 5 owns the HC-SR04 and servo. It publishes range health, scan results,
+profiles, path checks and bypass recommendations. The Vehicle Controller
+chooses movement and Buddy 2 executes it.
 
-Current stage: **Stage 3 / 7A–7B bring-up**. Both drivers have been tested
-on the car (2026-10-21) and the servo is calibrated. The calibrated values
-are in `obstacle_config.h`, with the measurements in its comments.
+## Wiring and limits
 
-## Files
+The current `obstacle_config.h` assigns trigger GP0, echo GP1 and servo GP12.
+The robot profile disables the UART0 mirror on GP0/GP1. Echo uses PWM
+level-gated timing; its PWM slice must not conflict with motor outputs.
+The servo uses a 20000 us period, centre 1540 us, safe pulse bounds
+1100-1900 us and angle bounds 60-120 degrees.
 
-| File | Purpose |
+The ping interval is 60 ms; the trigger pulse is 12 us and echo wait is 40 ms.
+Conversion uses 343 m/s. Echo bounds are 117-23324 us. Status distinguishes
+OK, NO_ECHO, TOO_CLOSE, TOO_FAR, TIMEOUT and NOT_READY.
+
+## Processing and controller interface
+
+| Source | Responsibility |
 | --- | --- |
-| `app_program/obstacle_config.h` | All pins and calibration constants (edit here) |
-| `app_program/obstacle_types.h` | Shared types: range reading, servo calibration |
-| `app_program/obstacle_calc.c/.h` | Pure maths, unit-tested on the PC |
-| `app_program/obstacle_ultrasonic.c/.h` | HC-SR04 driver |
-| `app_program/obstacle_servo.c/.h` | SG90 driver |
-| `app_program/obstacle_monitor.c/.h` | MONITOR decisions (stop, blind latch, lost obstacle, fault), unit-tested on the PC |
-| `app_program/obstacle_task.c/.h` | The obstacle task and its interface for the Vehicle Controller |
-| `app_program/obstacle_task_test_main.c` | Task test with a stand-in controller, `APP=obstacle_task_test` |
-| `app_program/obstacle_console.c/.h` | Console helpers for the test programs |
-| `app_program/ultrasonic_test_main.c` | Bench test, `APP=ultrasonic_test` |
-| `app_program/servo_test_main.c` | Bench test, `APP=servo_test` |
-| `tests/obstacle/` | Host unit tests for `obstacle_calc.c` |
+| `obstacle_ultrasonic.c` / `obstacle_servo.c` | Peripheral drivers |
+| `obstacle_monitor.c` | Ahead/blind/lost-obstacle and sensor-health decisions |
+| `obstacle_scan.c` / `obstacle_calc.c` | Scan samples, geometry and profile |
+| `obstacle_plan.c` | Bypass geometry and edge-width calculation |
+| `obstacle_task.c/.h` | Task, freshness, event flags and request/result interfaces |
 
-## Wiring (Robo-Pico)
+MONITOR ranges forward. The configured stop threshold is 200 mm with two
+readings, blind latch 100 mm, fault threshold five readings and recovery
+three readings. Status older than 200 ms is unavailable, not a clear path.
 
-| Signal | Connection |
-| --- | --- |
-| Servo | Servo port **S1 = GP12** (brown GND, red V+, orange signal) |
-| HC-SR04 Trig | **Grove 1, GP0** |
-| HC-SR04 Echo | **Grove 1, GP1** |
-| HC-SR04 VCC / GND | Grove 1 3.3 V and GND |
+Scanning uses 15-degree increments over the configured servo range, three
+pings per angle and at least two valid samples. The profile carries distance,
+width, clearance and a recommendation: STOP, CONTINUE, TURN_LEFT, TURN_RIGHT
+or REVERSE_RETRY. Invalid readings retain their status.
 
-- The `robo_pico_robot` profile is USB-CDC-console-only. It disables the UART0
-  mirror so that startup does not drive GP0 or claim GP1.
-- The sensor runs at 3.3 V, so Echo is already 3.3 V and needs no divider.
-  The datasheet asks for 5 V; at 3.3 V it gave 10/10 valid readings at about
-  500 mm, which is well beyond the 250 mm stop distance. Longer range is not
-  tested yet.
-- Servo ports S3/S4 (GP14/GP15) were tried first, but Echo never registered
-  there; they may be output-only on the Robo-Pico.
-- To move a pin, change it in `obstacle_config.h` only. The build rejects
-  invalid choices: Echo must be an odd GPIO, and neither pin may share a PWM
-  slice with the other or with the drive motors (GP8–GP11).
+The controller requests a scan while stopped. After a bypass pivot it requests
+a path check. During bypass leg 1 an edge watch looks at the obstacle face;
+those side-looking readings are not forward collision guards. Width uses the
+planned geometry and a centred-obstacle assumption; the result distinguishes
+FOUND, AT_LEAST and NO_FACE.
 
-## How it works
+Read `obstacle_task.h` for request/result contracts and event bits
+AHEAD, FAULT, SCAN_DONE, PATH_DONE and EDGE_DONE. The task alone owns the
+event bits. It uses priority 3 and a 1024-byte stack.
 
-- **Echo timing, no interrupt:** GP1 is PWM slice 0 channel B. The slice
-  runs in level-gated mode at 1 µs per count, so it counts only while Echo is
-  high. After each ping the counter holds the echo width in µs. This avoids
-  Buddy 2's GPIO interrupt, and task switches or USB printing can't skew it.
-- **Measurement:** wait for 60 ms since the last ping, send a 12 µs trigger,
-  sleep 40 ms, read the counter. Readings are classified `OK`, `NO_ECHO`,
-  `TOO_CLOSE` (<20 mm), `TOO_FAR` (>4 m), `TIMEOUT` (nothing reflected) or
-  `NOT_READY`. A non-`OK` reading is never reported as a distance.
-- **Servo:** 50 Hz PWM on slice 6, 1 µs resolution. Angles map linearly
-  through the calibrated 0/90/180° pulse widths and are clamped to the safe
-  range (60–120° for now); raw pulse commands are clamped to 1100–1900 µs.
+## Build and tests
 
-## Build, test, flash
+The integrated application is `vc_car`. Dedicated applications are
+`ultrasonic_test`, `servo_test` and `obstacle_task_test`, selected in the
+build Makefile with `BOARD=robo_pico_robot CONSOLE=usb_cdc`.
 
-Host unit tests (no board needed):
-
-```sh
-make -C tests/obstacle test
-```
-
-Firmware, from `build_make` in PowerShell (adapt the paths):
-
-```powershell
-$env:PATH = 'C:/Users/<you>/.pico-sdk/toolchain/15_2_Rel1/bin;C:/msys64/ucrt64/bin;C:/msys64/usr/bin;' + $env:PATH
-make APP=ultrasonic_test BOARD=robo_pico_robot SMP=1 CONSOLE=usb_cdc PICO_SDK_PATH=C:/Users/<you>/.pico-sdk/sdk/2.3.1 SHELL=C:/msys64/usr/bin/sh.exe -j8
-make APP=servo_test      BOARD=robo_pico_robot SMP=1 CONSOLE=usb_cdc PICO_SDK_PATH=C:/Users/<you>/.pico-sdk/sdk/2.3.1 SHELL=C:/msys64/usr/bin/sh.exe -j8
-```
-
-`BOARD=robo_pico_robot` is required: it releases the PWM block from reset.
-With `BOARD=pico` both drivers report `init FAILED`.
-
-Flash: hold BOOTSEL, plug in USB, copy
-`mtk3pico_smp1_usb_cdc_<app>_robo_pico_robot.uf2` to `RPI-RP2`, then open the
-board's COM port in a serial monitor.
-
-## Test procedure and evidence
-
-Save results in `evidence/ultrasonic/`. Record the tester, date, commit,
-supply (USB or battery) and setup with each file.
-
-### 1. `ultrasonic_test` (Stage 7A)
-
-Keys: `b` batch of 10, `p` pause or resume, `h` help. Output is CSV:
-`seq,time_ms,echo_us,distance_mm,status`.
-
-1. **Smoke test:** move your hand in front; the distance should follow it.
-2. **Fault handling:** point it at open space (expect `TIMEOUT`/`TOO_FAR`),
-   hold something within 2 cm (`TOO_CLOSE`), unplug Echo (`NO_ECHO`).
-3. **Calibration:** use a flat board square to the sensor at 100, 200, 300,
-   500, 800, 1000 and 1500 mm, measured from the front of the transducers.
-   Press `b` at each distance. Record in `ultrasonic_calibration.csv`:
-   `true_mm,median_mm,min_mm,max_mm,valid,error_mm,error_pct`.
-4. If the error grows with distance, the speed of sound is off. Set
-   `OBSTACLE_SOUND_SPEED_M_S = 343 * true_mm / median_mm` (use a long
-   distance), rebuild, and repeat step 3.
-
-### 2. `servo_test` (Stage 7B)
-
-Keys: `a`/`d` ±5°, `A`/`D` ±1°, `c` centre, `1`–`5` = 60/75/90/105/120°,
-`[`/`]` ±10 µs raw, `{`/`}` ±50 µs raw, `s` coarse scan, `t` settle test.
-
-> **Known limitation (2026-10-21):** the sensor bracket hits the Pico board
-> beyond about ±30° from straight ahead. The servo stalls at 950 µs and
-> 1950 µs, so the pulse limits are 1100–1900 µs and the scan is 60–120°
-> instead of the brief's 30–150°. Centre is 1540 µs. This waits on a mount
-> change agreed with the professor.
-
-1. **Centre:** at start-up the servo goes to 90°. If the sensor isn't facing
-   straight ahead, refit the horn one spline tooth at a time, then fine-tune
-   with `[`/`]` until it's exactly forward. That pulse is `PULSE_90_US`.
-2. **Range:** with a protractor, step the raw pulse to find 0° and 180°.
-   **Stop as soon as the servo buzzes or strains:** that's the end stop.
-   Record `PULSE_0_US` and `PULSE_180_US`. If 0° or 180° can't be reached
-   safely, set `ANGLE_MIN_DEG`/`ANGLE_MAX_DEG` to the angles you did reach.
-3. **Settling:** point the sensor so 150° faces a wall and press `t`. The
-   `settle,t_ms,...` rows change while the horn moves and wobbles. The time
-   when they stop changing is the real settle time; compare it with the
-   printed prediction and tune `MS_PER_DEG` / `SETTLE_MARGIN_MS`.
-4. **Scan preview:** put a box in front, press `s`, and check which angles
-   see it.
-5. Put the calibrated values into `obstacle_config.h`, rebuild, re-run
-   steps 1–4, and save the logs as `servo_calibration.md`.
-
-## BARR-C:2018 notes
-
-The Buddy 5 code follows BARR-C:2018:
-
-- braces on their own lines, even for single statements; 4-space indents,
-  no tabs; lines of at most 80 characters;
-- fixed-width `stdint.h` types, `bool` for booleans;
-- `static` for everything private; public names prefixed with the module
-  name (`obstacle_servo_...`);
-- `p_` prefix for pointers, `b_` for booleans;
-- constants on the left of `==`; one exit per function; every
-  `if`/`else if` chain ends in `else`; every `switch` has a `default`;
-- a comment on every cast; file and function header comments; the
-  `/*** end of file ***/` marker.
-
-Deliberate deviations, each commented in the code:
-
-1. `usermain()` returns `INT`: the signature is fixed by micro T-Kernel.
-2. `obstacle_console.c` declares `tm_usb_console_getchar()` itself: the
-   lecturer's USB console module has no header for it.
-3. The two `*_test_main.c` files have no header: they export nothing but
-   `usermain()`, which the kernel declares.
-4. Headers contain no `#include`, so each `.c` file includes
-   `<stdint.h>`, `<stdbool.h>` and `obstacle_types.h` first (see each
-   header's note). Files that include kernel headers must not include
-   `<stddef.h>`: the kernel's `syslib.h` redefines `size_t`.
-
-Buddy 2's motion files were written before the team adopted BARR-C and don't
-follow it yet.
-
-## Next steps
-
-1. Repeat the distance calibration on a fixed rig (200–1500 mm), measure the
-   real servo angles, and settle the mount question (60–120° limit).
-2. Stage 7C–7E: coarse and fine scan, obstacle profile (position, width,
-   closest point, left/right clearance). A `TIMEOUT` counts as unknown,
-   never as clear: an angled flat surface gives no echo.
-3. Stage 7F–7G: bypass recommendation and line-recovery plan, handed to the
-   Vehicle Controller (not to Buddy 2 directly).
+Run `make -C tests/obstacle test` for host calculation, monitor, scan,
+planning and packed-data tests. The 60-120 degree clamp is an implemented
+range limit, not proof of coverage outside that range.

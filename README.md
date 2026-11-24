@@ -1,3 +1,28 @@
+# AAI06 autonomous robotic car
+
+The submitted application runs on Pico W/RP2040 with Robo-Pico and the supplied
+micro T-Kernel SMP port. The Vehicle Controller coordinates line/barcode,
+Motion, terrain, obstacle sensing and WiFi/MQTT telemetry on one controller.
+
+Start with the [project documentation](docs/project/README.md) and
+[full-car build and operation](docs/TEST_INTEGRATE.md). The integrated target is:
+
+~~~sh
+make APP=vc_car BOARD=robo_pico_robot SMP=1 CONSOLE=usb_cdc WIFI=cyw43 WIFI_JOIN=1 WIFI_NETIF=1 WIFI_DHCP=1 WIFI_DNS=1 WIFI_MQTT=1 PICO_SDK_PATH=<sdk-path> -j8
+~~~
+
+Run this from `build_make` after configuring the toolchain and local network
+headers. [Implemented behaviour](docs/project/REQUIREMENTS.md) states current
+source behaviour and limits. [Motion evidence](evidence/motion/README.md)
+distinguishes older measurements from current software.
+
+The application uses GP19 for an external status LED; GP16/GP17 are left
+encoder inputs. The inherited demo and qualification results below describe
+the supplied kernel port, not verification of the complete robotic car.
+Original attribution and licence information are retained.
+
+---
+
 # µT-Kernel 3.0 - RP2040 dual-core SMP Port
 
 µT-Kernel 3.0 (IEEE 2050-2018) on the Raspberry Pi Pico W (RP2040, two Cortex-M0+ cores), derived from the official µT-Kernel 3.0 BSP Pico port. It builds from one source tree in two qualified configurations: **single core** (the default) and **dual-core SMP**, where both cores run the same kernel against a global ready queue serialized by a recursive big kernel lock built on RP2040 hardware spinlocks.
@@ -33,7 +58,7 @@ See [docs/PORT_RP2040.md](docs/PORT_RP2040.md) for exactly what is validated on 
 - Raspberry Pi **Pico W** (RP2040, dual Cortex-M0+, 2 MB flash)
 - USB cable (data, not charge-only)
 - A USB-serial adapter for the UART console - GP0 TX, GP1 RX, 115200 8N1
-- An **external LED on GP16** for the liveness indicator. The Pico W's on-board LED is wired to the CYW43439 radio rather than to an RP2040 pin, so it is unavailable in the radio-down qualified profiles. GP23, GP24, GP25 and GP29 are reserved by the radio.
+- An **external LED on GP19** for the liveness indicator. The Pico W's on-board LED is wired to the CYW43439 radio rather than to an RP2040 pin, so it is unavailable in the radio-down qualified profiles. GP23, GP24, GP25 and GP29 are reserved by the radio.
 
 ---
 
@@ -177,7 +202,7 @@ producer -> [mbf] -> consumer, 2 credits, 500 ms period
 ```
 
 Built with `SMP=0` the same source runs unchanged on one core and both read
-`prc1`. The blink task on GP16 is deliberately independent of the console: if
+`prc1`. The blink task on GP19 is deliberately independent of the console: if
 output stops but the LED still blinks, the console is at fault; if the LED
 freezes, the kernel is.
 
@@ -197,9 +222,8 @@ scaling benchmark - are recorded in
 run.
 
 **The phase harnesses that produced them, and the per-phase hardware captures,
-are not part of this release.** They are held back with the numbers being
-prepared for publication, and will be published alongside them so the results
-are reproducible from this repository.
+are not part of this release.** Only the published summary is available in this checkout; these figures
+cannot be independently reproduced from the included application tests.
 
 The figures are observed measurements and broad bounded-response gates, **not
 hard-real-time guarantees**. The recursive big kernel lock masks local

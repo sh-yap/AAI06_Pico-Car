@@ -1,3 +1,7 @@
+> This document preserves the supplied kernel port's qualification scope.
+> These measurements are not results of the AAI06 autonomous robot.
+> See [project documentation](project/README.md) for application behaviour.
+
 # µT-Kernel 3.0 on RP2040 - feature status
 
 Dual-core **SMP** port of µT-Kernel 3.0 to the Raspberry Pi Pico W (RP2040, two
