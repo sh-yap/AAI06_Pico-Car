@@ -238,20 +238,9 @@ Much of our architecture already enforced fail-safe handling in firmware; Tribun
 > **Video Proof:** [Watch the continuous integrated test run on YouTube](https://www.youtube.com/watch?v=cULEqP0cqxU) demonstrating startup calibration, line following, barcode decoding & junction turning, hump traversal, obstacle bypass, live MQTT telemetry, and pick-up stop.<br>
 > **Full Test Procedures:** [`docs/AAI06_Test_Cases.docx`](docs/AAI06_Test_Cases.docx) contains the Master Traceability & Sign-Off Matrix, detailed test steps, expected results, and dashboard verification criteria for all 25 test cases.
 
-### Test Coverage Overview
+### Test Cases
 
-| Buddy | Subsystem | Test IDs | Focus |
-| --- | --- | --- | --- |
-| **Buddy 1** | Wi-Fi, MQTT & Vehicle Controller | `B1-T1` – `B1-T5` | Connectivity, live telemetry, remote commands, heartbeat, auto-recovery |
-| **Buddy 2** | Motors & Wheel Encoders | `B2-T1` – `B2-T5` | PID speed, distance accuracy, bend steering, turning, zero-drift stop |
-| **Buddy 3** | Line Following & Barcode Sensing | `B3-T1` – `B3-T5` | IR calibration, line following/recovery, barcode detect/decode, junctions |
-| **Buddy 4** | IMU & Terrain Sensing | `B4-T1` – `B4-T5` | IMU calibration, hump height, peak tracking/flat rejection, turn rate, pick-up |
-| **Buddy 5** | Ultrasonic & Obstacle Avoidance | `B5-T1` – `B5-T5` | Forward stop, servo scan, width/clearances, bypass planning, line rejoin |
-
-<details>
-<summary><strong>Buddy 1 — Wi-Fi, MQTT & Vehicle Controller (B1-T1 – B1-T5)</strong></summary>
-
-<br>
+#### Buddy 1 — Wi-Fi, MQTT & Vehicle Controller (`B1-T1` – `B1-T5`)
 
 | ID | Type | Test Title | Verified Capability |
 | --- | --- | --- | --- |
@@ -261,12 +250,7 @@ Much of our architecture already enforced fail-safe handling in firmware; Tribun
 | **B1-T4** | Boundary | Heartbeat & Robot Status Reporting | Report 1 Hz heartbeat, state, fault mask & build info |
 | **B1-T5** | Off-Nominal | Connection Loss & Automatic Recovery | Continue driving on link drop and auto-reconnect |
 
-</details>
-
-<details>
-<summary><strong>Buddy 2 — Motors & Wheel Encoders (B2-T1 – B2-T5)</strong></summary>
-
-<br>
+#### Buddy 2 — Motors & Wheel Encoders (`B2-T1` – `B2-T5`)
 
 | ID | Type | Test Title | Verified Capability |
 | --- | --- | --- | --- |
@@ -276,12 +260,7 @@ Much of our architecture already enforced fail-safe handling in firmware; Tribun
 | **B2-T4** | Nominal | Repeatable Encoder-Based Turning | Accurate left, right, and in-place pivot turns |
 | **B2-T5** | Off-Nominal | Clean Motor Stop & Zero Drift | `stop()` halts both wheels cleanly with no creep |
 
-</details>
-
-<details>
-<summary><strong>Buddy 3 — Line Following & Barcode Sensing (B3-T1 – B3-T5)</strong></summary>
-
-<br>
+#### Buddy 3 — Line Following & Barcode Sensing (`B3-T1` – `B3-T5`)
 
 | ID | Type | Test Title | Verified Capability |
 | --- | --- | --- | --- |
@@ -291,12 +270,7 @@ Much of our architecture already enforced fail-safe handling in firmware; Tribun
 | **B3-T4** | Nominal | Decode the Barcode & Obtain the Code | Decode Code 39 character to navigation command |
 | **B3-T5** | Nominal | Junction Detection & Follow Barcode Instruction | Detect junction and execute queued barcode turn |
 
-</details>
-
-<details>
-<summary><strong>Buddy 4 — IMU & Terrain Sensing (B4-T1 – B4-T5)</strong></summary>
-
-<br>
+#### Buddy 4 — IMU & Terrain Sensing (`B4-T1` – `B4-T5`)
 
 | ID | Type | Test Title | Verified Capability |
 | --- | --- | --- | --- |
@@ -306,12 +280,7 @@ Much of our architecture already enforced fail-safe handling in firmware; Tribun
 | **B4-T4** | Boundary | Motion Classification & Turn-Rate Reporting | Classify motion state and report encoder-derived turn rate |
 | **B4-T5** | Off-Nominal | Pick-Up Detection (Stop Motors & End Demo) | Stop motors immediately and enter `FINISHED` when lifted |
 
-</details>
-
-<details>
-<summary><strong>Buddy 5 — Ultrasonic & Obstacle Avoidance (B5-T1 – B5-T5)</strong></summary>
-
-<br>
+#### Buddy 5 — Ultrasonic & Obstacle Avoidance (`B5-T1` – `B5-T5`)
 
 | ID | Type | Test Title | Verified Capability |
 | --- | --- | --- | --- |
@@ -320,8 +289,6 @@ Much of our architecture already enforced fail-safe handling in firmware; Tribun
 | **B5-T3** | Boundary | Measure Obstacle Width & Left/Right Clearances | Estimate obstacle width and side clearances |
 | **B5-T4** | Off-Nominal | Avoidance Planning & Bypass Around Obstacle | Choose clear side and execute bypass (or stop if blocked) |
 | **B5-T5** | Nominal | Rejoin Original Line After Bypass | Search for, reacquire, and resume following the line |
-
-</details>
 
 ---
 
