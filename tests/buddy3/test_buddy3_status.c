@@ -1,6 +1,6 @@
 /** @file test_buddy3_status.c
  *
- * @brief Host unit tests for app_program/buddy3_status.c (Buddy 3).
+ * @brief Host unit tests for app_program/buddy3_line_barcode/buddy3_status.c (Buddy 3).
  *
  * Run with:  make -C tests/buddy3 test
  *

@@ -1,6 +1,6 @@
 /** @file test_nav_map.c
  *
- * @brief Host tests for app_program/nav_map.c: the barcode character ->
+ * @brief Host tests for app_program/buddy3_line_barcode/nav_map.c: the barcode character ->
  *        movement mapping the PC sends over MQTT before the demo.
  *
  * Run with:  make -C tests/buddy3 test

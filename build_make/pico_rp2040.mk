@@ -272,10 +272,11 @@ ifeq ($(VC_TERRAIN),0)
 VC_TERRAIN_SUFFIX := _noterr
 endif
 
-# VC_RECORDER=1 adds the test-only run recorder (app_program/run_rec.c): a RAM
-# ring of the last 30 s of 20 ms VC cycles, read out with the debug probe
-# (tools/run_rec_read.ps1).  Costs about 39 kB of BSS.  Never use this image
-# for RAM measurements or the final car.  Image is named ..._rec.
+# VC_RECORDER=1 adds the test-only run recorder
+# (app_program/buddy1_vehicle_comms/run_rec.c): a RAM ring of the last 30 s of
+# 20 ms VC cycles, read out with the debug probe (tools/run_rec_read.ps1).
+# Costs about 39 kB of BSS.  Never use this image for RAM measurements or the
+# final car.  Image is named ..._rec.
 VC_RECORDER ?= 0
 ifneq ($(filter $(VC_RECORDER),0 1),$(VC_RECORDER))
 $(error Unknown VC_RECORDER '$(VC_RECORDER)'; use 0 or 1)
@@ -432,12 +433,12 @@ CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
 
-# Fake-data driver for the comms API (app_program/comms_demo.c).
+# Fake-data driver for the comms API (app_program/buddy1_vehicle_comms/comms_demo.c).
 CFLAGS += -DCOMMS_DEMO=$(COMMS_DEMO) -DCOMMS_JSON=$(COMMS_JSON) -DVC_HAVE_BUDDY5=$(VC_OBSTACLE) -DVC_HAVE_BUDDY4=$(VC_TERRAIN) -DVC_RECORDER=$(VC_RECORDER) -DB4_RECORDER=$(B4_RECORDER) -DB4_REC_MAG=$(B4_REC_MAG) -DB4_REC_HUMP_STOP=$(B4_REC_HUMP_STOP)
 
 # Rebuild the build stamp every time, so the date/time printed at boot and
 # published on robot/info always identifies the image actually flashed.
-mtkernel_3/app_program/build_info.o: FORCE
+mtkernel_3/app_program/common/build_info.o: FORCE
 .PHONY: FORCE
 FORCE:
 
@@ -627,7 +628,7 @@ endif
 endif
 
 WIFI_INCLUDES := -I"$(WIFIDIR)" \
-                 -I"../app_program" \
+                 -I"../app_program/buddy1_vehicle_comms" \
                  -I"../lib/libtm/sysdepend/pico_rp2040/usb" \
                  -I"$(CYW43_DRIVER_PATH)/src" \
                  -I"$(CYW43_DRIVER_PATH)/firmware" \

@@ -1,6 +1,6 @@
 /** @file test_line_follow.c
  *
- * @brief Host tests for app_program/line_follow.c (Buddy 3).
+ * @brief Host tests for app_program/buddy3_line_barcode/line_follow.c (Buddy 3).
  *
  * Run with:  make -C tests/buddy3 test
  *

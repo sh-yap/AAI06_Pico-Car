@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../../app_program/motion_types.h"
+#include "../../app_program/buddy2_motion/motion_types.h"
 
 static void check(bool ok, const char *name)
 {

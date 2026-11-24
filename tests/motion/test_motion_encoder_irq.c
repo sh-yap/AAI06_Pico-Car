@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #define BOARD_ROBO_PICO_ROBOT 1
 #define TK_SUPPORT_SMP 1
-#include "../../app_program/motion_encoder.c"
+#include "../../app_program/buddy2_motion/motion_encoder.c"
 
 static uint32_t input_levels;
 static uint32_t pending_edges[4];

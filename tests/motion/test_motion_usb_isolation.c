@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #define TM_CONSOLE_USB_CDC 1
 #define TM_USB_HOST_DIAGNOSTIC 1
-#include "../../app_program/motion_closed_loop_button_test_main.c"
+#include "../../app_program/buddy2_motion/motion_closed_loop_button_test_main.c"
 
 static uint64_t test_clock;
 static BOOL attached;

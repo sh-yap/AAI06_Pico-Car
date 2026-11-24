@@ -7,7 +7,7 @@
 #define PWM_BASE 0x40050000U
 #define PWM_CHx_DIV 0x04U
 
-#include "../../app_program/motion_motor.c"
+#include "../../app_program/buddy2_motion/motion_motor.c"
 
 static bool fail_pin;
 static bool fail_cc;

@@ -3,7 +3,7 @@
 #
 # run_rec_read.ps1 - read the test-only run recorder (VC_RECORDER=1 build)
 # out of the car with the debug probe, and write a CSV, one row per 20 ms VC
-# cycle, oldest first.  Layout: app_program\run_rec.h.
+# cycle, oldest first.  Layout: app_program\buddy1_vehicle_comms\run_rec.h.
 #
 # Read out (car powered, after STOP; the car is NOT halted or reset):
 #   powershell -ExecutionPolicy Bypass -File tools\run_rec_read.ps1 -Name home1
@@ -26,7 +26,8 @@
 # gain (mm/s per permille; stored x1000), learn_fwd_offset = forward offset
 # (mm/s; stored x10).  turn_src = 0 default line, 1 pivot seed, 2 driving
 # data; fwd_src = 1 when the forward values come from driving data.
-# Barcode trace: if the image also has g_bc_rec (app_program\run_rec.h), the
+# Barcode trace: if the image also has g_bc_rec
+# (app_program\buddy1_vehicle_comms\run_rec.h), the
 # same command dumps it too and writes <time>_<name>_barcode.csv (and
 # _barcode.bin), one row per 10 ms Buddy 3 cycle, oldest first.  Columns:
 # dt_ms = ms step from the previous row; barcode_adc / threshold = raw sensor
