@@ -2,7 +2,7 @@
  * injected between its count copy and timestamp read. No hardware needed. */
 #include <stdio.h>
 #include <stdlib.h>
-#include "../../app_program/motion_encoder.c"
+#include "../../app_program/buddy2_motion/motion_encoder.c"
 
 static uint64_t test_clock;
 static bool inject_encoder_update;

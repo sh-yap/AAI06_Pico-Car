@@ -36,8 +36,11 @@ ifneq ($(BOARD),robo_pico_robot)
 $(error Buddy 4 car test requires BOARD=robo_pico_robot)
 endif
 
+APP_ROOT := ../app_program
+include $(APP_ROOT)/modules.mk
+
 INCPATH = -I"../include" -I"../config" -I"../kernel/knlinc" \
-          -I"../app_program" -I"../tests/buddy4"
+          $(APP_INC) -I"../tests/buddy4"
 
 # The profile includes the board, the Grove port 2 mapping, and the
 # test-local calibration mode. The shared platform makefile accepts this
@@ -62,10 +65,10 @@ EXE_FILE := b4_robopico_car_test
 # The shared platform file supplies the normal kernel and device objects. This
 # diagnostic image deliberately adds only its Buddy 4 production modules and
 # dedicated test modules. It never links app_main.c or demo_tasks.c.
-B4_APP_SRCS := ../app_program/b4_cfg.c \
-               ../app_program/b4_imu.c \
-               ../app_program/b4_proc.c \
-               ../app_program/b4_pack.c
+B4_APP_SRCS := $(APP_BUDDY4)/b4_cfg.c \
+               $(APP_BUDDY4)/b4_imu.c \
+               $(APP_BUDDY4)/b4_proc.c \
+               $(APP_BUDDY4)/b4_pack.c
 B4_TEST_SRCS := ../tests/buddy4/b4_car_test.c \
                 ../tests/buddy4/b4_car_test_log.c \
                 ../tests/buddy4/b4_car_test_main.c

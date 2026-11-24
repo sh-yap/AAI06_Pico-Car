@@ -6,9 +6,9 @@ Application tasks call `comms.h` to publish snapshots or queue events.
 
 | Source | Responsibility |
 | --- | --- |
-| `app_program/comms.c/.h` | Snapshots, events, command/acknowledgement queues and scheduling |
-| `app_program/comms_codec.c/.h` | Binary/JSON encoding and packed records |
-| `app_program/nav_map.c/.h` | Barcode-to-navigation mapping |
+| `app_program/buddy1_vehicle_comms/comms.c/.h` | Snapshots, events, command/acknowledgement queues and scheduling |
+| `app_program/buddy1_vehicle_comms/comms_codec.c/.h` | Binary/JSON encoding and packed records |
+| `app_program/buddy3_line_barcode/nav_map.c/.h` | Barcode-to-navigation mapping |
 | `lib/libnet/lwip/lwip_utk_mqtt.c` | MQTT connection, subscribe, publication and retry |
 | `lib/libwifi/sysdepend/pico_rp2040/cyw43_utk.c` | Radio polling and WiFi rejoin |
 | `tools/robot_decode.ps1` | Laptop binary decoder |

@@ -379,7 +379,14 @@ object and what to try changing:
 =======
 | Path | Contents |
 | --- | --- |
-| `app_program/` | All robot application firmware (Buddies 1–5, Vehicle Controller, comms codec, run recorder) |
+| `app_program/` | All robot application firmware, one folder per buddy (see below) |
+| `app_program/buddy1_vehicle_comms/` | Buddy 1: Vehicle Controller (`vc*`), Wi-Fi/MQTT comms and codec (`comms*`), run recorder, `vc_car_main.c` (the car image) |
+| `app_program/buddy2_motion/` | Buddy 2: motors, encoders, PID speed control, motion task (`motion_*`) and its on-target test images |
+| `app_program/buddy3_line_barcode/` | Buddy 3: IR sensors, line following, barcode decoding, navigation map |
+| `app_program/buddy4_imu_terrain/` | Buddy 4: IMU and terrain processing (`b4_*`) |
+| `app_program/buddy5_obstacle/` | Buddy 5: ultrasonic, servo, obstacle scan/bypass (`obstacle_*`) and its on-target test images |
+| `app_program/common/` | Shared: build stamp, the kernel demo (`app_main.c`), console helpers, timing probe |
+| `app_program/modules.mk` | The list of module folders used by the firmware build and the host tests |
 | `build_make/` | GNU Make build system and RP2040/ROBO-PICO profile rules |
 | `config/` | RTOS configuration (`config.h`) and local Wi-Fi/MQTT headers |
 | `kernel/`, `device/`, `include/`, `lib/` | µT-Kernel 3.0 dual-core SMP kernel and RP2040 BSP |
@@ -422,7 +429,7 @@ build_make/        GNU make build; pico_rp2040.mk is the Pico target
 etc/linker/pico_rp2040/
                    Linker script
 tools/elf2uf2/     UF2 packaging tool, built from source
-app_program/       The demo: the tasks, the kernel objects, and usermain()
+app_program/       The application, one folder per buddy; the demo is in common/
 docs/              Getting started and port feature status
 ```
 

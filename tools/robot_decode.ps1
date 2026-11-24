@@ -12,8 +12,8 @@
 # JSON format (only "v" differs: 1 = JSON, 2 = binary), so every tool that
 # reads JSON lines keeps working.
 #
-# The field table below MUST match app_program/comms.c and
-# docs/BINARY_FORMAT.md: same order, same widths.  tools\test_robot_decode.ps1
+# The field table below MUST match app_program/buddy1_vehicle_comms/comms.c
+# and docs/BINARY_FORMAT.md: same order, same widths.  tools\test_robot_decode.ps1
 # checks it against the firmware encoder's golden messages.
 
 $script:States  = @('INIT','READY','LINE_FOLLOW','EXECUTE_NAV','OBSTACLE_STOP',

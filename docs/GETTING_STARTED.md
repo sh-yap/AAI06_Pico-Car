@@ -391,15 +391,31 @@ The blink task never touches the console, and that is the point:
 
 ### What is in `app_program/`
 
+The application is split into one folder per buddy, plus `common/`:
+
+| Folder | What it is |
+|---|---|
+| `buddy1_vehicle_comms/` | Vehicle Controller, Wi-Fi/MQTT comms, run recorder, `vc_car_main.c` |
+| `buddy2_motion/` | Motors, encoders, motion control and the motion test images |
+| `buddy3_line_barcode/` | IR sensors, line following, barcode, navigation map |
+| `buddy4_imu_terrain/` | IMU and terrain processing |
+| `buddy5_obstacle/` | Ultrasonic, servo, obstacle scan and bypass, and their test images |
+| `common/` | The demo and shared helpers (below) |
+
+The demo in `common/`:
+
 | File | Lines | What it is |
 |---|---:|---|
 | `app_main.c` | 526 | The whole demo: the tasks, the kernel objects, the WiFi reporter, `usermain()` |
 | `demo_tasks.c/.h` | 90 | The console-independent blink task |
 | `usb_console_compat.h` | 31 | Console-state accessors, with constant stubs for UART builds |
 
-The build picks up whatever `.c` files are in this directory
-(`build_make/mtkernel_3/app_program/subdir.mk` globs them), so adding one
-needs no makefile edit.
+The build picks up whatever `.c` files are in the folders listed in
+`app_program/modules.mk` (`build_make/mtkernel_3/app_program/subdir.mk` globs
+them), so adding a file to an existing folder needs no makefile edit.  Every
+folder is on the include path, so `#include "x.h"` works across folders.  A
+new folder needs one line in `modules.mk`; a new entry image (a file with
+`usermain()`) needs its `APP` case in `subdir.mk`.
 
 ### A note on stack sizes
 

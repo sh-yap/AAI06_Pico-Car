@@ -1,7 +1,8 @@
 # MQTT binary format
 
-The wire implementation is `app_program/comms.c` with widths in
-`comms_codec.h`; `tools/robot_decode.ps1` provides the matching laptop table.
+The wire implementation is `app_program/buddy1_vehicle_comms/comms.c` with
+widths in `comms_codec.h`; `tools/robot_decode.ps1` provides the matching
+laptop table.
 
 ## Encoding
 

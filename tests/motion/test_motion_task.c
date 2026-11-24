@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../../app_program/motion_task.c"
+#include "../../app_program/buddy2_motion/motion_task.c"
 
 /* motion_task.c stores a packed record; read it back through the public API
    so the checks below see the same values a caller does. */

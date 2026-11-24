@@ -3,9 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../../app_program/motion_config.h"
-#include "../../app_program/motion_control.h"
-#include "../../app_program/motion_stage4_profile.h"
+#include "../../app_program/buddy2_motion/motion_config.h"
+#include "../../app_program/buddy2_motion/motion_control.h"
+#include "../../app_program/buddy2_motion/motion_stage4_profile.h"
 
 static void expect(int condition, const char *name)
 {
