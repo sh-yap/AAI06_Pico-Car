@@ -263,6 +263,10 @@ enter_state (vc_t * p_vc, vc_state_t next, uint32_t now_ms,
             p_vc->b_right_exit = false;
             break;
 
+        case VC_STATE_TURNING:
+            p_vc->last_side = 0;    /* Pre-turn drift does not apply after. */
+            break;
+
         case VC_STATE_OBSTACLE_SCAN:
             p_out->motion   = VC_MOTION_STOP;   /* Stopped while scanning. */
             p_out->obstacle = VC_OBST_SCAN_REQUEST;
@@ -357,8 +361,10 @@ handle_junction (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out,
 
     if (VC_NAV_UTURN == nav)
     {
-        /* Turning back along the same line: no need to advance first. */
+        /* Turning back along the same line: no need to advance first.
+         * search_limit_mdeg = 0 disables the 90-degree early line catch. */
         enter_state(p_vc, VC_STATE_TURNING, p_in->now_ms, p_out);
+        p_vc->search_limit_mdeg = 0;
         p_out->motion = VC_MOTION_TURN;
         p_out->turn   = nav;
     }
@@ -566,10 +572,14 @@ step_follow_line (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
              && (VC_JUNCTION_ADVANCE_MM
                  <= (p_in->travel_mm - p_vc->junction_origin_mm)))
     {
-        /* The axle is on the crossing line: turn onto it. */
+        /* The axle is on the crossing line: turn onto it.  Record the turn
+         * origin and 45-degree minimum so step_turning() can stop on the
+         * new branch instead of overshooting past it. */
         vc_nav_t const turn = p_vc->pending_turn;
 
         enter_state(p_vc, VC_STATE_TURNING, p_in->now_ms, p_out);
+        p_vc->search_origin_mdeg = p_in->cal_angle_mdeg;
+        p_vc->search_limit_mdeg  = VC_TURN_CATCH_MIN_MDEG;
         p_out->motion = VC_MOTION_TURN;
         p_out->turn   = turn;
     }
@@ -884,9 +894,21 @@ step_calibrate (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 static void
 step_turning (vc_t * p_vc, vc_inputs_t const * p_in, vc_outputs_t * p_out)
 {
+    int32_t const turned_mdeg = abs_i32(p_in->cal_angle_mdeg
+                                        - p_vc->search_origin_mdeg);
+    bool const b_line_caught = (0 < p_vc->search_limit_mdeg)
+                               && (p_vc->search_limit_mdeg <= turned_mdeg)
+                               && (0U != (p_in->line_sensors
+                                          & VC_LINE_SENSOR_CENTRE));
+
     if (p_in->b_motion_failed)
     {
         enter_state(p_vc, VC_STATE_EMERGENCY_STOP, p_in->now_ms, p_out);
+    }
+    else if (b_line_caught)
+    {
+        p_out->motion = VC_MOTION_STOP;
+        enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
     }
     else if (p_in->b_motion_done)
     {
@@ -1053,14 +1075,25 @@ step_reacquire_line (vc_t * p_vc, vc_inputs_t const * p_in,
     }
     else if (VC_LINE_JUNCTION == line)
     {
-        /* Found the line on a junction: act on it now, or it would be
-         * skipped and its barcode used at the next junction instead. */
         if (VC_SEARCH_NONE != p_vc->search)
         {
-            p_out->motion = VC_MOTION_STOP;     /* Stop the pivot first. */
+            /* A pivot search sweeps across a plain line at an angle and can
+             * put both sensors on black for one cycle with 0 mm of travel.
+             * Stop the pivot, enter FOLLOW_LINE, and arm the normal
+             * VC_JUNCTION_CONFIRM_MM check instead of consuming a stored
+             * barcode immediately. */
+            p_out->motion = VC_MOTION_STOP;
+            enter_state(p_vc, VC_STATE_FOLLOW_LINE, p_in->now_ms, p_out);
+            p_vc->b_junction_seen  = true;
+            p_vc->junction_seen_mm = p_in->travel_mm;
         }
-
-        handle_junction(p_vc, p_in, p_out, p_in->travel_mm);
+        else
+        {
+            /* Creeping forward after a bypass and found the line on a
+             * junction: act on it now, or it would be skipped and its
+             * barcode used at the next junction instead. */
+            handle_junction(p_vc, p_in, p_out, p_in->travel_mm);
+        }
     }
     else if (VC_LINE_LOST != line)
     {

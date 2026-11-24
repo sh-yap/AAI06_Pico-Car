@@ -71,13 +71,17 @@ static uint16_t centre_full_black = IR_CENTRE_FULL_BLACK_DEFAULT;
 #define LINE_CAL_FULL_BLACK_DIV    8U
 
 
-/* Junction = both line sensors black for this many consecutive cycles. */
-#define JUNCTION_DEBOUNCE_COUNT    3U
+/* Junction = 3 consecutive both-black cycles, or 4 of 5 ending in 2 black
+ * (tolerates a single 10 ms dropout inside a junction crossing). */
+#define JUNCTION_WINDOW_MASK       0x1FU
+#define JUNCTION_CONSEC_MASK       0x07U
+#define JUNCTION_TAIL_MASK         0x03U
+#define JUNCTION_DROPOUT_MIN_BITS  4U
 
 /* Both sensors white for this many cycles (10 ms each) = LINE_LOST. */
 #define LINE_LOST_COUNT            30U
 
-static uint8_t junction_count = 0U;
+static uint8_t junction_hist = 0U;
 
 static uint8_t white_count = 0U;
 
@@ -178,7 +182,7 @@ static bool ref_active;              /* Seeded from a successful START.   */
 
 static void clear_line_state(void)
 {
-    junction_count = 0U;
+    junction_hist = 0U;
     white_count = 0U;
     last_seen = LINE_CENTRE;
 }
@@ -196,9 +200,27 @@ void line_follow_init(void)
 }
 
 
+/* Count set bits in the low 5 bits of a junction history mask. */
+static uint8_t junction_popcount5(uint8_t mask)
+{
+    uint8_t count = 0U;
+    uint8_t bits = mask;
+
+    while (0U != bits)
+    {
+        count += (uint8_t)(bits & 1U);
+        bits >>= 1U;
+    }
+
+    return count;
+}
+
+
 /*
- * Debounced junction detection: true for as long as both sensors stay
- * black, once they have been for JUNCTION_DEBOUNCE_COUNT cycles.
+ * Debounced junction detection: true while both sensors are black and either
+ * the last 3 cycles were both black, or at least 4 of the last 5 cycles were
+ * both black ending in 2 consecutive both-black cycles (tolerates a single
+ * 10 ms dropout inside a crossing without firing on alternating noise).
  * Reported every cycle, not once: the VC reads only the newest of the
  * two statuses sent per 20 ms step, so a one-cycle JUNCTION could be
  * overwritten and missed.  The VC acts on each junction once, and only
@@ -209,18 +231,32 @@ void line_follow_init(void)
  */
 static bool line_detect_junction(bool centre_black, bool right_black)
 {
-    if (centre_black && right_black)
-    {
-        if (junction_count < JUNCTION_DEBOUNCE_COUNT)
-        {
-            junction_count++;
-        }
+    bool b_both = (centre_black && right_black);
+    bool b_junction = false;
 
-        return (junction_count >= JUNCTION_DEBOUNCE_COUNT);
+    junction_hist = (uint8_t)(((junction_hist << 1U)
+                               | (b_both ? 1U : 0U))
+                              & JUNCTION_WINDOW_MASK);
+
+    if (b_both)
+    {
+        if (JUNCTION_CONSEC_MASK == (junction_hist & JUNCTION_CONSEC_MASK))
+        {
+            b_junction = true;
+        }
+        else if ((JUNCTION_TAIL_MASK == (junction_hist & JUNCTION_TAIL_MASK))
+                 && (JUNCTION_DROPOUT_MIN_BITS
+                     <= junction_popcount5(junction_hist)))
+        {
+            b_junction = true;
+        }
+        else
+        {
+            /* Not enough both-black evidence yet. */
+        }
     }
 
-    junction_count = 0U;
-    return false;
+    return b_junction;
 }
 
 
@@ -687,10 +723,19 @@ static void ref_seed(void)
  * span above the START low level is at least LINE_CAL_MIN_SPAN. Then the
  * threshold is the midpoint of the START low level and the maximum.
  */
+/*
+ * In-run midpoint from a window maximum above the START white level.
+ * Does not require black > current: a brief darker tape patch can push the
+ * threshold above the lighter normal tape elsewhere on the course, and
+ * requiring black > current permanently locked the sensor blind to the
+ * lighter tape (Run 1 & Run 2, 24 Nov).  Pure white floor is still rejected
+ * by LINE_CAL_MIN_SPAN, and the right sensor keeps its START-midpoint floor
+ * in line_ref_update().
+ */
 static bool ref_threshold(uint16_t black, uint16_t start_low,
-                          uint16_t current, uint16_t *p_threshold)
+                          uint16_t *p_threshold)
 {
-    bool ok = (black > current) && (black >= start_low)
+    bool ok = (black >= start_low)
               && (((uint32_t)black - start_low) >= LINE_CAL_MIN_SPAN);
 
     if (ok)
@@ -988,8 +1033,7 @@ void line_ref_update(ir_readings_t readings, int32_t travel_counts)
         }
     }
 
-    if (ref_threshold(c_max, cal_result.centre.low, centre_threshold,
-                      &threshold))
+    if (ref_threshold(c_max, cal_result.centre.low, &threshold))
     {
         /* The error division relies on full black above the threshold. */
         full_black = (uint16_t)((uint32_t)c_max
@@ -1003,10 +1047,22 @@ void line_ref_update(ir_readings_t readings, int32_t travel_counts)
         }
     }
 
-    if (ref_threshold(r_max, cal_result.right.low, right_threshold,
-                      &threshold))
+    /*
+     * The right sensor never goes below its START threshold. While the car
+     * is centred the right sensor only touches the line edge, so its window
+     * maximum is an edge reading, not the tape's black. Taking the midpoint
+     * to it lowered the threshold by half the remaining span on each pass
+     * (1679 to 441 in three windows offline), until a half-covered right
+     * sensor read black and, with the centre on the line, JUNCTION. Saved
+     * runs show right black at ADC 608 against a START threshold of about
+     * 1700 (audit, 21 Nov). The centre sensor sits on the line while
+     * centred, so its window maximum is the tape's black and it still
+     * follows fading tape.
+     */
+    if (ref_threshold(r_max, cal_result.right.low, &threshold))
     {
-        right_threshold = threshold;
+        right_threshold = (threshold > cal_result.right.threshold)
+                          ? threshold : cal_result.right.threshold;
     }
 }
 

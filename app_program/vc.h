@@ -105,6 +105,12 @@
  * line sensors and set it. */
 #define VC_JUNCTION_ADVANCE_MM  (100)
 
+/* Minimum encoder rotation before a 90-degree LEFT/RIGHT junction turn can
+ * stop early on seeing the new branch under the centre sensor: 45 degrees
+ * clears the incoming straight line while catching a branch before a blind
+ * 90-degree turn can overshoot past it. */
+#define VC_TURN_CATCH_MIN_MDEG  (45000)
+
 /* Lift rule (requirements R20/R21, 10 Nov 2026).  The user's lift test
  * lifts the car off the ground: both line sensors read black for seconds,
  * which is far longer than any junction, and Buddy 4 sees a sharp IMU
