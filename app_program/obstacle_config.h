@@ -266,9 +266,13 @@
 #define OBSTACLE_EDGE_LOCK_READINGS     (2U)
 #define OBSTACLE_EDGE_LOCK_MAX_READINGS (8U)
 
-/* Non-face readings in a row that mean the edge has been passed (two, as
- * for STOP_DISTANCE: one stray reading in about 50 must not decide). */
-#define OBSTACLE_EDGE_LOST_READINGS     (2U)
+/* Non-face readings in a row that mean the edge has been passed.  Two was
+ * not enough: on 2026-11-24 (evidence/dashboard_20261124_110344.log) a
+ * 160-180 mm box at face 277 mm was "lost" after 51 mm of leg (36 mm
+ * reported) while the sensor was dropping single TIMEOUTs at steady range.
+ * Four is about 240 ms (about 36 mm of leg); heard_mm is the leg at the
+ * last face reading, so waiting longer does not move the estimate. */
+#define OBSTACLE_EDGE_LOST_READINGS     (4U)
 
 /* A reading more than this beyond the latest face reading is background
  * (the same rule as the scan's background subtraction). */

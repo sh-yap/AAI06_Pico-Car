@@ -1538,8 +1538,9 @@ test_edge_watch(void)
     check_u32("edge angle not a turn", obstacle_scan_edge_angle(
               OBSTACLE_ACTION_CONTINUE, 23U), 90U);
 
-    /* Face heard twice (lock), then background twice: FOUND, and the
-     * last face reading and its leg distance are kept. */
+    /* Face heard twice (lock), then background and TIMEOUTs: FOUND only
+     * at LOST_READINGS losses, and the last face reading and its leg
+     * distance are kept. */
     obstacle_scan_edge_start(&watch, 441U);
     r = edge_reading(OBSTACLE_RANGE_OK, 450U);
     obstacle_scan_edge_add(&watch, &r, 10);
@@ -1547,11 +1548,18 @@ test_edge_watch(void)
     obstacle_scan_edge_add(&watch, &r, 20);
     r = edge_reading(OBSTACLE_RANGE_OK, 900U);          /* background */
     obstacle_scan_edge_add(&watch, &r, 30);
-    check_u32("one loss is not enough", watch.result,
-              OBSTACLE_EDGE_WATCHING);
     r = edge_reading(OBSTACLE_RANGE_TIMEOUT, 0U);
-    obstacle_scan_edge_add(&watch, &r, 40);
-    check_u32("found after two losses", watch.result, OBSTACLE_EDGE_FOUND);
+
+    for (idx = 1U; idx < (OBSTACLE_EDGE_LOST_READINGS - 1U); idx++)
+    {
+        obstacle_scan_edge_add(&watch, &r, (int32_t)(30U + (idx * 10U)));
+    }
+
+    check_u32("one loss short is not enough", watch.result,
+              OBSTACLE_EDGE_WATCHING);
+    obstacle_scan_edge_add(&watch, &r, 90);
+    check_u32("found at LOST_READINGS losses", watch.result,
+              OBSTACLE_EDGE_FOUND);
     check_u32("face_mm kept", watch.face_mm, 440U);
     check_u32("heard_mm kept", (uint32_t)watch.heard_mm, 20U);
 
@@ -1580,7 +1588,12 @@ test_edge_watch(void)
     obstacle_scan_edge_add(&watch, &r, 50);
     check_u32("no echo skipped", watch.result, OBSTACLE_EDGE_WATCHING);
     r = edge_reading(OBSTACLE_RANGE_TOO_FAR, 0U);
-    obstacle_scan_edge_add(&watch, &r, 60);
+
+    for (idx = 2U; idx <= OBSTACLE_EDGE_LOST_READINGS; idx++)
+    {
+        obstacle_scan_edge_add(&watch, &r, (int32_t)(50U + (idx * 10U)));
+    }
+
     check_u32("too far counts as a loss", watch.result, OBSTACLE_EDGE_FOUND);
     check_u32("heard at the last face reading", (uint32_t)watch.heard_mm,
               30U);
