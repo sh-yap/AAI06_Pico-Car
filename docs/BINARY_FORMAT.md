@@ -142,6 +142,30 @@ The latest forward ultrasonic reading.  Added 2026-11-20 so a sensor fault
 
 57 + 34 = 91 bits → **12 bytes** (JSON 117 B).
 
+### robot/event/obstacle_width  (Buddy 5, once per bypass)
+
+The obstacle width estimate from the edge watch on bypass leg 1. The servo looks
+square at the obstacle's face while the diagonal leg moves the car sideways. The
+face stops echoing once the sensor has passed its edge on the bypass side.
+`width_mm` = 2 × `edge_mm` assumes the obstacle is centred on the car's centre line
+where it stopped (the bypass planner assumes the same). Sent once leg 1 ends, or
+sooner if the edge is found. On the robot it shares the obstacle event's queue
+slot (`CODEC_EVENT_OBSTACLE`, kind 1), so the event type list is unchanged.
+
+| Field | Bits | Range / meaning | Status |
+|---|---:|---|---|
+| `result` | 2 | 0 FOUND (an estimate), 1 AT_LEAST (still echoing at the end of leg 1: a lower bound), 2 NO_FACE (no estimate) | Code (Buddy 5) |
+| `side` | 1 | 0 LEFT, 1 RIGHT (bypass side) | Code |
+| `edge_mm` | 10 | 0 … 1023 mm, edge from the car's centre line | Code |
+| `width_mm` | 11 | 0 … 2047 mm, 2 × `edge_mm` | Code |
+| `face_mm` | 12 | 0 … 4095 mm, last face reading | Code |
+| `heard_mm` | 11 | 0 … 2047 mm, leg 1 distance at that reading | Code |
+| `turn_deg` | 6 | 0 … 63°, the plan's first pivot | Code |
+
+53 + 34 = 87 bits → **11 bytes**. Golden message (`tests/comms/test_codec.c`):
+`52670700600c63f082432e` = t 121300, FOUND, LEFT, edge 99, width 198, face 188,
+heard 270, turn 23.
+
 ### robot/event/calibration  (Vehicle Controller, once per START)
 
 The START sweep result: the raw 12-bit ADC readings of the three line

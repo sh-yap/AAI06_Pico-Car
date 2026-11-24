@@ -48,6 +48,17 @@ Check ($o.status -eq 'NO_ECHO')    "status = NO_ECHO"
 Check ($o.state -eq 'SENSOR_FAULT') "state = SENSOR_FAULT"
 Check ($o.silent -eq 17)           "silent = 17"
 
+Write-Host "golden obstacle width message (edge watch)"
+$ow = Read-RobotPayload 'robot/event/obstacle_width' (ConvertFrom-RobotHex '52670700600c63f082432e')
+Check ($ow.t -eq 121300)         "t = 121300"
+Check ($ow.result -eq 'FOUND')   "result = FOUND"
+Check ($ow.side -eq 'LEFT')      "side = LEFT"
+Check ($ow.edge_mm -eq 99)       "edge_mm = 99"
+Check ($ow.width_mm -eq 198)     "width_mm = 198"
+Check ($ow.face_mm -eq 188)      "face_mm = 188"
+Check ($ow.heard_mm -eq 270)     "heard_mm = 270"
+Check ($ow.turn_deg -eq 23)      "turn_deg = 23"
+
 Write-Host "golden calibration message (sensor gap)"
 $c = Read-RobotPayload 'robot/event/calibration' (ConvertFrom-RobotHex '027d0000103238d8da90953e70d7da580290ad6dfd0000001e')
 Check ($c.result -eq 'SENSOR_GAP') "result = SENSOR_GAP"

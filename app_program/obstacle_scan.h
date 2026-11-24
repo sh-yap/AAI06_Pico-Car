@@ -45,6 +45,24 @@ void obstacle_scan_path_add(obstacle_path_t *        p_path,
 
 void obstacle_scan_path_verdict(obstacle_path_t * p_path);
 
+/* Edge watch on bypass leg 1 (obstacle width estimate):
+ *   1. point the servo at obstacle_scan_edge_angle(side, turn_deg);
+ *   2. obstacle_scan_edge_start(known_mm = the scan's closest distance);
+ *   3. per reading, obstacle_scan_edge_add() with the leg distance, until
+ *      the result is no longer WATCHING;
+ *   4. if the leg ends first, obstacle_scan_edge_end().
+ * Then obstacle_plan_edge_mm() turns the result into a position. */
+uint32_t obstacle_scan_edge_angle(obstacle_action_t side, uint32_t turn_deg);
+
+void obstacle_scan_edge_start(obstacle_edge_watch_t * p_watch,
+                              uint32_t                known_mm);
+
+void obstacle_scan_edge_add(obstacle_edge_watch_t *  p_watch,
+                            obstacle_range_t const * p_range,
+                            int32_t                  leg_mm);
+
+void obstacle_scan_edge_end(obstacle_edge_watch_t * p_watch);
+
 #endif /* OBSTACLE_SCAN_H */
 
 /*** end of file ***/

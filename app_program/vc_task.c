@@ -848,13 +848,16 @@ static bool                   g_b_ahead_quiet;  /* See read_obstacle(). */
 static uint32_t               g_ahead_quiet_until_ms;
 
 
-/* True if Buddy 5's latest reading is within the bypass guard distance. */
+/* True if Buddy 5's latest reading is within the bypass guard distance.
+ * SIDE_WATCH readings look sideways at the obstacle's face (edge watch on
+ * leg 1, which the path check has just cleared), not along the leg. */
 static bool
 is_ahead_close (void)
 {
     obstacle_status_t status;
 
     return obstacle_task_get_status(&status)
+           && (OBSTACLE_STATE_SIDE_WATCH != status.state)
            && (OBSTACLE_RANGE_OK == status.range_status)
            && (VC_BYPASS_GUARD_MM > status.distance_mm);
 }
@@ -1351,6 +1354,11 @@ static bypass_step_t         g_bypass_step;
 static obst_req_t            g_path_req;
 static obstacle_line_watch_t g_line_watch;   /* Parallel leg only. */
 
+/* Edge watch on leg 1 (Buddy 5's obstacle width estimate). */
+static obst_req_t            g_edge_req;
+static bool                  g_b_edge_end_sent;
+static int32_t               g_edge_origin_mm;  /* travel_mm at leg 1 start. */
+
 
 static obstacle_action_t
 other_side (obstacle_action_t side)
@@ -1400,6 +1408,75 @@ queue_bypass_leg (uint32_t length_mm)
 }
 
 
+/* Edge watch finished: work out where the obstacle's edge was and send
+ * the width estimate to the laptop. */
+static void
+edge_report (void)
+{
+    obstacle_bypass_plan_t plan;
+    obstacle_edge_watch_t  watch;
+    comms_obstacle_width_t report = {0};
+    uint32_t               edge_mm = 0U;
+
+    if (vc_unpack_plan(&g_plan, &plan) && obstacle_task_get_edge(&watch))
+    {
+        report.side = (OBSTACLE_ACTION_TURN_RIGHT == plan.side)
+                      ? COMMS_SIDE_RIGHT : COMMS_SIDE_LEFT;
+        report.face_mm  = (int32_t) watch.face_mm;
+        report.heard_mm = watch.heard_mm;
+        report.turn_deg = (int32_t) plan.turn_deg;
+
+        if (obstacle_plan_edge_mm(&watch, plan.turn_deg, &edge_mm))
+        {
+            report.result   = (OBSTACLE_EDGE_FOUND == watch.result)
+                              ? COMMS_EDGE_FOUND : COMMS_EDGE_AT_LEAST;
+            report.edge_mm  = (int32_t) edge_mm;
+            report.width_mm = (int32_t) (2U * edge_mm);
+        }
+        else
+        {
+            report.result = COMMS_EDGE_NO_FACE;
+        }
+
+        (void) comms_event_obstacle_width(&report);
+        tm_printf((UB *) "[vc] edge watch: result %d, edge %u mm, width "
+                  "%u mm (face %u mm at %d mm of leg 1)\n",
+                  (INT) report.result, (UINT) report.edge_mm,
+                  (UINT) report.width_mm, (UINT) watch.face_mm,
+                  (INT) watch.heard_mm);
+    }
+}
+
+
+/* Each step: feed the running edge watch the leg 1 distance, end it when
+ * leg 1 is over (or the bypass stopped), and report its result. */
+static void
+edge_service (vc_inputs_t const * p_in, UINT flags, bool b_on_leg_1)
+{
+    if (OBST_REQ_IDLE != g_edge_req)
+    {
+        if (b_on_leg_1)
+        {
+            obstacle_task_set_leg_mm(p_in->travel_mm - g_edge_origin_mm);
+        }
+        else if (!g_b_edge_end_sent)
+        {
+            obstacle_task_end_edge_watch();
+            g_b_edge_end_sent = true;
+        }
+        else
+        {
+            /* End sent: waiting for the result. */
+        }
+
+        if (request_done(&g_edge_req, flags, OBSTACLE_EVT_EDGE_DONE))
+        {
+            edge_report();
+        }
+    }
+}
+
+
 /* VC_MOTION_BYPASS: start the sequence with the first turn.  The stored
  * plan is unpacked once here; a plan that cannot be decoded is reported as
  * a motion failure, which the VC turns into EMERGENCY_STOP. */
@@ -1418,6 +1495,7 @@ bypass_start (void)
 
     g_bypass_step = BYPASS_TURN_OUT;
     g_path_req    = OBST_REQ_IDLE;
+    g_edge_req    = OBST_REQ_IDLE;
     queue_bypass_turn(plan.side, plan.turn_deg);
     tm_printf((UB *) "[vc] bypass %s: turn %u deg, out %u mm, along %u mm\n",
               (UB *) ((OBSTACLE_ACTION_TURN_LEFT == plan.side) ? "LEFT"
@@ -1491,6 +1569,14 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
     UINT                   flags = 0U;
     bool                   b_fail = false;
 
+    if (E_OK == tk_ref_flg(obstacle_task_get_flag(), &rflg))
+    {
+        flags = rflg.flgptn;
+    }
+
+    edge_service(p_in, flags, (VC_STATE_BYPASS == state)
+                              && (BYPASS_LEG_OUT == g_bypass_step));
+
     if (VC_STATE_BYPASS != state)
     {
         g_bypass_step = BYPASS_IDLE;            /* Left BYPASS: stand down. */
@@ -1503,11 +1589,6 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
     }
     else if (BYPASS_IDLE != g_bypass_step)
     {
-        if (E_OK == tk_ref_flg(obstacle_task_get_flag(), &rflg))
-        {
-            flags = rflg.flgptn;
-        }
-
         along = watch_line_along(plan.along_mm);
 
         if (((BYPASS_LEG_OUT == g_bypass_step)
@@ -1584,8 +1665,24 @@ bypass_run (vc_inputs_t * p_in, vc_state_t state)
                             && ((OBSTACLE_PATH_CLEAR == path.verdict)
                                 || (OBSTACLE_PATH_OPEN == path.verdict)))
                         {
+                            obstacle_profile_t profile;
+
                             queue_bypass_leg(plan.out_mm);
                             g_bypass_step = BYPASS_LEG_OUT;
+
+                            /* Edge watch for the width estimate: looks at
+                             * the face while leg 1 moves the car sideways
+                             * (ended in edge_service() when leg 1 ends). */
+                            if (obstacle_calc_unpack_profile(g_profile_word,
+                                                             &profile))
+                            {
+                                obstacle_task_request_edge_watch(
+                                    plan.side, plan.turn_deg,
+                                    profile.distance_mm);
+                                g_edge_origin_mm  = p_in->travel_mm;
+                                g_b_edge_end_sent = false;
+                                g_edge_req        = OBST_REQ_SENT;
+                            }
                         }
                         else
                         {

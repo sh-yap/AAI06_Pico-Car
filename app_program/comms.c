@@ -87,6 +87,12 @@
 #define BITS_WIDTH               CODEC_BITS_WIDTH
 #define BITS_CLEARANCE           CODEC_BITS_CLEARANCE
 #define BITS_ACTION              CODEC_BITS_ACTION
+#define BITS_EDGE_RESULT         CODEC_BITS_EDGE_RESULT
+#define BITS_SIDE                CODEC_BITS_SIDE
+#define BITS_EDGE                CODEC_BITS_EDGE
+#define BITS_EST_WIDTH           CODEC_BITS_EST_WIDTH
+#define BITS_LEG                 CODEC_BITS_LEG
+#define BITS_TURN_DEG            CODEC_BITS_TURN_DEG
 #define BITS_RANGE               CODEC_BITS_RANGE
 #define BITS_SONAR_STATE         CODEC_BITS_SONAR_STATE
 #define BITS_SILENT              CODEC_BITS_SILENT
@@ -178,6 +184,16 @@ static char const * const g_motion_names[COMMS_MOTION_COUNT] =
 static char const * const g_avoid_names[COMMS_AVOID_COUNT] =
 {
     "STOP", "CONTINUE", "TURN_LEFT", "TURN_RIGHT", "REVERSE_RETRY"
+};
+
+static char const * const g_edge_names[COMMS_EDGE_COUNT] =
+{
+    "FOUND", "AT_LEAST", "NO_FACE"
+};
+
+static char const * const g_side_names[COMMS_SIDE_COUNT] =
+{
+    "LEFT", "RIGHT"
 };
 
 static char const * const g_range_names[COMMS_RANGE_COUNT] =
@@ -602,6 +618,24 @@ comms_event_obstacle (comms_obstacle_t const * p_obstacle)
 
 
 bool
+comms_event_obstacle_width (comms_obstacle_width_t const * p_width)
+{
+    codec_event_t event = {0};
+    bool          b_queued = false;
+
+    if (NULL != p_width)
+    {
+        event.type           = (uint8_t) CODEC_EVENT_OBSTACLE;
+        event.kind           = (uint8_t) CODEC_OBSTACLE_WIDTH;
+        event.obstacle_width = *p_width;
+        b_queued             = queue_event(&event);
+    }
+
+    return b_queued;
+}
+
+
+bool
 comms_event_motion (comms_motion_class_t motion)
 {
     codec_event_t event = {0};
@@ -864,6 +898,34 @@ build_calibration (codec_writer_t * p_w, comms_link_msg_t * p_msg,
 }
 
 
+/* robot/event/obstacle_width: the edge watch's estimate (not counted
+ * as another obstacle in the run summary). */
+static void
+build_obstacle_width (codec_writer_t * p_w, comms_link_msg_t * p_msg,
+                      codec_event_t const * p_event)
+{
+    comms_obstacle_width_t const * const p_wd = &p_event->obstacle_width;
+
+    codec_begin(p_w, p_msg, "robot/event/obstacle_width", QOS_1, false,
+                p_event->time_ms);
+    codec_put_name(p_w, CODEC_KEY("result"), CODEC_NAMES(g_edge_names),
+                   COMMS_EDGE_COUNT, (uint32_t) p_wd->result,
+                   BITS_EDGE_RESULT);
+    codec_put_name(p_w, CODEC_KEY("side"), CODEC_NAMES(g_side_names),
+                   COMMS_SIDE_COUNT, (uint32_t) p_wd->side, BITS_SIDE);
+    codec_put_uint(p_w, CODEC_KEY("edge_mm"), non_negative(p_wd->edge_mm),
+                   BITS_EDGE);
+    codec_put_uint(p_w, CODEC_KEY("width_mm"), non_negative(p_wd->width_mm),
+                   BITS_EST_WIDTH);
+    codec_put_uint(p_w, CODEC_KEY("face_mm"), non_negative(p_wd->face_mm),
+                   BITS_OBST_DIST);
+    codec_put_uint(p_w, CODEC_KEY("heard_mm"), non_negative(p_wd->heard_mm),
+                   BITS_LEG);
+    codec_put_uint(p_w, CODEC_KEY("turn_deg"), non_negative(p_wd->turn_deg),
+                   BITS_TURN_DEG);
+}
+
+
 static void
 build_event (comms_link_msg_t * p_msg, codec_event_t const * p_event)
 {
@@ -903,6 +965,12 @@ build_event (comms_link_msg_t * p_msg, codec_event_t const * p_event)
             break;
 
         case CODEC_EVENT_OBSTACLE:
+            if (CODEC_OBSTACLE_WIDTH == p_event->kind)
+            {
+                build_obstacle_width(&w, p_msg, p_event);
+                break;
+            }
+
             g_obstacle_count++;
             codec_begin(&w, p_msg, "robot/event/obstacle", QOS_1, false,
                         p_event->time_ms);

@@ -386,6 +386,24 @@ test_golden (void)
     CHECK(8U == g_m.msg.payload_len);
     CHECK(0 == strcmp("1a3107006c441a01", hex));
 
+    /* robot/event/obstacle_width: FOUND (0), LEFT (0), edge 99 mm, width
+     * 198 mm, last face reading 188 mm at 270 mm of leg 1, turn 23 deg. */
+    fresh();
+    codec_begin(&w, &g_m.msg, "robot/event/obstacle_width", 1U, false,
+                121300U);
+    codec_put_uint(&w, CODEC_KEY("result"), 0U, CODEC_BITS_EDGE_RESULT);
+    codec_put_uint(&w, CODEC_KEY("side"), 0U, CODEC_BITS_SIDE);
+    codec_put_uint(&w, CODEC_KEY("edge_mm"), 99U, CODEC_BITS_EDGE);
+    codec_put_uint(&w, CODEC_KEY("width_mm"), 198U, CODEC_BITS_EST_WIDTH);
+    codec_put_uint(&w, CODEC_KEY("face_mm"), 188U, CODEC_BITS_OBST_DIST);
+    codec_put_uint(&w, CODEC_KEY("heard_mm"), 270U, CODEC_BITS_LEG);
+    codec_put_uint(&w, CODEC_KEY("turn_deg"), 23U, CODEC_BITS_TURN_DEG);
+    codec_end(&w);
+    to_hex(hex);
+    printf("  obstacle_width %s\n", hex);
+    CHECK(11U == g_m.msg.payload_len);
+    CHECK(0 == strcmp("52670700600c63f082432e", hex));
+
     /* robot/event/calibration: index 4 of 5 (sensor gap), a 6 sample gap. */
     fresh();
     codec_begin(&w, &g_m.msg, "robot/event/calibration", 1U, false, 8000U);
@@ -978,6 +996,53 @@ test_pack_event (void)
     in.calibration.sweep_deg = 500;
     CHECK(event_round_trip(&in, &out));
     CHECK(255 == out.calibration.sweep_deg);
+
+    /* Obstacle width (edge watch): shares the obstacle type, kind = 1. */
+    memset(&in, 0, sizeof(in));
+    in.type                    = (uint8_t) CODEC_EVENT_OBSTACLE;
+    in.kind                    = (uint8_t) CODEC_OBSTACLE_WIDTH;
+    in.obstacle_width.result   = COMMS_EDGE_AT_LEAST;
+    in.obstacle_width.side     = COMMS_SIDE_RIGHT;
+    in.obstacle_width.edge_mm  = 111;
+    in.obstacle_width.width_mm = 222;
+    in.obstacle_width.face_mm  = 188;
+    in.obstacle_width.heard_mm = 284;
+    in.obstacle_width.turn_deg = 23;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(CODEC_EVENT_OBSTACLE == out.type);
+    CHECK(CODEC_OBSTACLE_WIDTH == out.kind);
+    CHECK(COMMS_EDGE_AT_LEAST == out.obstacle_width.result);
+    CHECK(COMMS_SIDE_RIGHT == out.obstacle_width.side);
+    CHECK(111 == out.obstacle_width.edge_mm);
+    CHECK(222 == out.obstacle_width.width_mm);
+    CHECK(188 == out.obstacle_width.face_mm);
+    CHECK(284 == out.obstacle_width.heard_mm);
+    CHECK(23 == out.obstacle_width.turn_deg);
+    CHECK(0 == out.obstacle.distance_mm);       /* Not a profile. */
+
+    /* Clamps: every field saturates at its wire range. */
+    in.obstacle_width.edge_mm  = 5000;
+    in.obstacle_width.width_mm = 9000;
+    in.obstacle_width.face_mm  = 9000;
+    in.obstacle_width.heard_mm = 9000;
+    in.obstacle_width.turn_deg = 200;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(1023 == out.obstacle_width.edge_mm);
+    CHECK(2047 == out.obstacle_width.width_mm);
+    CHECK(4095 == out.obstacle_width.face_mm);
+    CHECK(2047 == out.obstacle_width.heard_mm);
+    CHECK(63 == out.obstacle_width.turn_deg);
+
+    /* A profile still decodes as a profile (kind 0). */
+    memset(&in, 0, sizeof(in));
+    in.type                 = (uint8_t) CODEC_EVENT_OBSTACLE;
+    in.obstacle.distance_mm = 283;
+    in.obstacle.width_mm    = 1023;
+    CHECK(event_round_trip(&in, &out));
+    CHECK(CODEC_OBSTACLE_PROFILE == out.kind);
+    CHECK(283 == out.obstacle.distance_mm);
+    CHECK(1023 == out.obstacle.width_mm);
+    CHECK(0 == out.obstacle_width.edge_mm);
 
     /* Unknown event type: rejected, never guessed; the caller drops it. */
     memset(&in, 0, sizeof(in));

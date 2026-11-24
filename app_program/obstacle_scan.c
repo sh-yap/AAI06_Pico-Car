@@ -794,4 +794,173 @@ obstacle_scan_path_verdict(obstacle_path_t * p_path)
     }
 }
 
+/*!
+ * @brief Servo angle for the edge watch: square to the obstacle's face.
+ *
+ * After pivoting turn_deg towards side, the face is square to the line,
+ * so the sensor turns turn_deg back the other way (limited to the servo
+ * range; the beam is then off square by the rest).
+ *
+ * @param[in] side     TURN_LEFT or TURN_RIGHT; anything else: ahead.
+ * @param[in] turn_deg The bypass plan's first pivot.
+ *
+ * @return Servo angle in degrees.
+ */
+uint32_t
+obstacle_scan_edge_angle(obstacle_action_t side, uint32_t turn_deg)
+{
+    uint32_t angle_deg = SCAN_AHEAD_DEG;
+
+    if (OBSTACLE_ACTION_TURN_LEFT == side)
+    {
+        /* Car turned left: look right (below 90). */
+        angle_deg = (turn_deg < (SCAN_AHEAD_DEG
+                                 - OBSTACLE_SERVO_ANGLE_MIN_DEG)) ?
+                    (SCAN_AHEAD_DEG - turn_deg) :
+                    OBSTACLE_SERVO_ANGLE_MIN_DEG;
+    }
+    else if (OBSTACLE_ACTION_TURN_RIGHT == side)
+    {
+        /* Car turned right: look left (above 90). */
+        angle_deg = (turn_deg < (OBSTACLE_SERVO_ANGLE_MAX_DEG
+                                 - SCAN_AHEAD_DEG)) ?
+                    (SCAN_AHEAD_DEG + turn_deg) :
+                    OBSTACLE_SERVO_ANGLE_MAX_DEG;
+    }
+    else
+    {
+        /* Not a bypass: straight ahead. */
+    }
+
+    return (angle_deg);
+}
+
+/*!
+ * @brief Start an edge watch.
+ *
+ * @param[out] p_watch  Watch state (or NULL).
+ * @param[in]  known_mm The scan's closest distance (the face).
+ */
+void
+obstacle_scan_edge_start(obstacle_edge_watch_t * p_watch, uint32_t known_mm)
+{
+    if (NULL != p_watch)
+    {
+        p_watch->result     = OBSTACLE_EDGE_WATCHING;
+        p_watch->known_mm   = known_mm;
+        p_watch->face_mm    = 0U;
+        p_watch->heard_mm   = 0;
+        p_watch->face_count = 0U;
+        p_watch->lost_count = 0U;
+        p_watch->readings   = 0U;
+    }
+}
+
+/*!
+ * @brief Add one reading to an edge watch.
+ *
+ * A face reading is OK and no further than the face can be: before the
+ * lock, the scanned distance plus OBSTACLE_PATH_KNOWN_ABOVE_MM (the car
+ * has only moved closer since); after it, the latest face reading plus
+ * OBSTACLE_EDGE_FACE_TOL_MM.  TOO_CLOSE is a face too.  Anything further,
+ * TIMEOUT or TOO_FAR is not.  NO_ECHO and NOT_READY say nothing about the
+ * face (the sensor did not answer) and are skipped.
+ *
+ * @param[in,out] p_watch Watch state (or NULL).
+ * @param[in]     p_range The reading (or NULL).
+ * @param[in]     leg_mm  Distance driven on the leg when it was taken.
+ */
+void
+obstacle_scan_edge_add(obstacle_edge_watch_t *  p_watch,
+                       obstacle_range_t const * p_range,
+                       int32_t                  leg_mm)
+{
+    uint32_t limit_mm;
+    bool     b_face = false;
+    bool     b_counts = true;
+
+    if ((NULL != p_watch) && (NULL != p_range)
+        && (OBSTACLE_EDGE_WATCHING == p_watch->result))
+    {
+        limit_mm = (0U == p_watch->face_mm) ?
+                   (p_watch->known_mm + OBSTACLE_PATH_KNOWN_ABOVE_MM) :
+                   (p_watch->face_mm + OBSTACLE_EDGE_FACE_TOL_MM);
+
+        switch (p_range->status)
+        {
+            case OBSTACLE_RANGE_OK:
+                b_face = (p_range->distance_mm <= limit_mm);
+                break;
+
+            case OBSTACLE_RANGE_TOO_CLOSE:
+                b_face = true;
+                break;
+
+            case OBSTACLE_RANGE_TIMEOUT:
+            case OBSTACLE_RANGE_TOO_FAR:
+                b_face = false;
+                break;
+
+            case OBSTACLE_RANGE_NO_ECHO:
+            case OBSTACLE_RANGE_NOT_READY:
+            default:
+                b_counts = false;
+                break;
+        }
+
+        if (b_counts)
+        {
+            p_watch->readings++;
+
+            if (b_face)
+            {
+                p_watch->face_count++;
+                p_watch->lost_count = 0U;
+                p_watch->heard_mm   = leg_mm;
+
+                if (OBSTACLE_RANGE_OK == p_range->status)
+                {
+                    p_watch->face_mm = p_range->distance_mm;
+                }
+            }
+            else if (p_watch->face_count >= OBSTACLE_EDGE_LOCK_READINGS)
+            {
+                p_watch->lost_count++;
+
+                if (p_watch->lost_count >= OBSTACLE_EDGE_LOST_READINGS)
+                {
+                    p_watch->result = OBSTACLE_EDGE_FOUND;
+                }
+            }
+            else
+            {
+                /* Not locked yet: only the reading count grows. */
+            }
+
+            if ((OBSTACLE_EDGE_WATCHING == p_watch->result)
+                && (p_watch->face_count < OBSTACLE_EDGE_LOCK_READINGS)
+                && (p_watch->readings >= OBSTACLE_EDGE_LOCK_MAX_READINGS))
+            {
+                p_watch->result = OBSTACLE_EDGE_NO_FACE;
+            }
+        }
+    }
+}
+
+/*!
+ * @brief End an edge watch that is still looking (the leg has ended).
+ *
+ * @param[in,out] p_watch Watch state (or NULL): AT_LEAST if the face was
+ *                        still being heard, else NO_FACE.
+ */
+void
+obstacle_scan_edge_end(obstacle_edge_watch_t * p_watch)
+{
+    if ((NULL != p_watch) && (OBSTACLE_EDGE_WATCHING == p_watch->result))
+    {
+        p_watch->result = (p_watch->face_count >= OBSTACLE_EDGE_LOCK_READINGS)
+                          ? OBSTACLE_EDGE_AT_LEAST : OBSTACLE_EDGE_NO_FACE;
+    }
+}
+
 /*** end of file ***/

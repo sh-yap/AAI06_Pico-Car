@@ -13,6 +13,7 @@
  *       OBSTACLE_EVT_SCAN_DONE  set when a requested scan has a result;
  *                           cleared when the next scan starts
  *       OBSTACLE_EVT_PATH_DONE  the same for a path check
+ *       OBSTACLE_EVT_EDGE_DONE  the same for an edge watch
  *     Only the obstacle task writes these bits.  Wait for them without
  *     TWF_CLR or TWF_BITCLR.
  *
@@ -29,6 +30,7 @@
 #define OBSTACLE_EVT_FAULT  (0x00000002U)
 #define OBSTACLE_EVT_SCAN_DONE (0x00000004U)
 #define OBSTACLE_EVT_PATH_DONE (0x00000008U)
+#define OBSTACLE_EVT_EDGE_DONE (0x00000010U)
 
 /* Start the sensor and servo drivers and create the event flag.  Call once
  * from usermain() before obstacle_task_start(). */
@@ -87,6 +89,28 @@ void obstacle_task_request_path_check(obstacle_action_t side,
  * call: nothing echoed, but an angled face is silent too).  BLOCKED also
  * means the outermost angle could not see past the scanned obstacle. */
 bool obstacle_task_get_path(obstacle_path_t * p_path);
+
+/* Edge watch on bypass leg 1, for the obstacle width estimate.  Call when
+ * leg 1 starts (after the path check): the servo turns square to the
+ * obstacle's face (turned back by turn_deg) and the task reports
+ * SIDE_WATCH, with MONITOR off, until the face echo stops: the sensor has
+ * passed the face's edge.  Then OBSTACLE_EVT_EDGE_DONE is set and the task
+ * faces forward again.  Readings while in SIDE_WATCH look at the face,
+ * not along the leg: do not use them as a forward guard. */
+void obstacle_task_request_edge_watch(obstacle_action_t side,
+                                      uint32_t          turn_deg,
+                                      uint32_t          known_mm);
+
+/* Every step while the watch runs: rear-axle travel since leg 1 began. */
+void obstacle_task_set_leg_mm(int32_t leg_mm);
+
+/* Leg 1 has ended (or the bypass stopped): end a running watch.  The
+ * result is AT_LEAST if the face was still echoing. */
+void obstacle_task_end_edge_watch(void);
+
+/* Latest edge watch: result, face_mm and heard_mm, for
+ * obstacle_plan_edge_mm().  false while one is running. */
+bool obstacle_task_get_edge(obstacle_edge_watch_t * p_watch);
 
 #endif /* OBSTACLE_TASK_H */
 

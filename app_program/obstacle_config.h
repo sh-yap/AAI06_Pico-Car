@@ -245,6 +245,40 @@
 #define OBSTACLE_PATH_KNOWN_ABOVE_MM    (80U)
 
 /* ------------------------------------------------------------------------ *
+ * Edge watch on bypass leg 1 (obstacle width estimate)
+ * ------------------------------------------------------------------------ */
+
+/* The +-30 deg sweep cannot measure width: the beam hears a flat face
+ * well past its edge (finding 12).  Instead, on the diagonal leg the servo
+ * looks square at the face (turned back by the plan's turn angle) while
+ * the car moves sideways; the face stops echoing when the sensor has
+ * passed its edge.
+ *
+ * BEAM_DEG: bench test 2026-10-25 (evidence/ultrasonic/detection_tests.md
+ * section 4), sensor square to a 140 x 210 mm card at 250 mm: seen with
+ * the card's edge 0-40 mm past the sensor's axis, half the time at about
+ * 40 mm (50 mm: about half; 70 mm: never).  atan(40 / 250) = 9 deg, so
+ * the edge is face_mm x tan(9 deg) short of where the echo was lost. */
+#define OBSTACLE_EDGE_BEAM_DEG          (9U)
+
+/* Face readings needed before a loss counts, and the readings allowed to
+ * find them (about 0.5 s) before giving up with NO_FACE. */
+#define OBSTACLE_EDGE_LOCK_READINGS     (2U)
+#define OBSTACLE_EDGE_LOCK_MAX_READINGS (8U)
+
+/* Non-face readings in a row that mean the edge has been passed (two, as
+ * for STOP_DISTANCE: one stray reading in about 50 must not decide). */
+#define OBSTACLE_EDGE_LOST_READINGS     (2U)
+
+/* A reading more than this beyond the latest face reading is background
+ * (the same rule as the scan's background subtraction). */
+#define OBSTACLE_EDGE_FACE_TOL_MM       (OBSTACLE_SCAN_SPAN_TOL_MM)
+
+/* Never watch longer than this, even if the controller never ends it.
+ * Leg 1 is at most about 1.1 m at 150 mm/s. */
+#define OBSTACLE_EDGE_WATCH_MAX_MS      (15000U)
+
+/* ------------------------------------------------------------------------ *
  * Build-time checks
  * ------------------------------------------------------------------------ */
 

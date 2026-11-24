@@ -614,7 +614,9 @@ codec_unpack_sonar (uint32_t const * p_words, comms_sonar_t * p_sonar)
  *         hump        peak_dmm [3:12]
  *         motion      motion class [3:5]
  *         run         no payload: the type is BEGIN or END
- *         obstacle    no payload (see W2, W3)
+ *         obstacle    kind [3]: 0 = profile (W2, W3), 1 = width:
+ *                     result [4:5], side [6], edge [7:16],
+ *                     width [17:27]
  *         calibration result [3:5], centre_low [6:17],
  *                     centre_high [18:29], learned [30],
  *                     first_right [31]
@@ -622,6 +624,7 @@ codec_unpack_sonar (uint32_t const * p_words, comms_sonar_t * p_sonar)
  *   W2  obstacle: dist [0:11], angle [12:19], width [20:29]
  *       calibration: centre_thr [0:11], centre_full [12:23],
  *                    sweep_deg [24:31]
+ *       obstacle width: face [0:11], heard [12:22], turn [23:28]
  *   W3  obstacle: clear_l [0:11], clear_r [12:23], action [24:26]
  *       calibration: right_low [0:11], right_high [12:23]
  *   W4  calibration: right_thr [0:11], barcode_low [12:23]
@@ -651,6 +654,15 @@ codec_unpack_sonar (uint32_t const * p_words, comms_sonar_t * p_sonar)
 #define E_DIST_SHIFT         (0U)
 #define E_ANGLE_SHIFT        (E_DIST_SHIFT + CODEC_BITS_OBST_DIST)
 #define E_WIDTH_SHIFT        (E_ANGLE_SHIFT + CODEC_BITS_ANGLE)
+#define E_OBST_KIND_SHIFT    (3U)
+#define E_OBST_KIND_BITS     (1U)
+#define E_EDGE_RESULT_SHIFT  (E_OBST_KIND_SHIFT + E_OBST_KIND_BITS)
+#define E_SIDE_SHIFT         (E_EDGE_RESULT_SHIFT + CODEC_BITS_EDGE_RESULT)
+#define E_EDGE_SHIFT         (E_SIDE_SHIFT + CODEC_BITS_SIDE)
+#define E_EST_WIDTH_SHIFT    (E_EDGE_SHIFT + CODEC_BITS_EDGE)
+#define E_FACE_SHIFT         (0U)
+#define E_LEG_SHIFT          (E_FACE_SHIFT + CODEC_BITS_OBST_DIST)
+#define E_TURN_DEG_SHIFT     (E_LEG_SHIFT + CODEC_BITS_LEG)
 #define E_CLEAR_L_SHIFT      (0U)
 #define E_CLEAR_R_SHIFT      (E_CLEAR_L_SHIFT + CODEC_BITS_CLEARANCE)
 #define E_ACTION_SHIFT       (E_CLEAR_R_SHIFT + CODEC_BITS_CLEARANCE)
@@ -672,6 +684,52 @@ codec_unpack_sonar (uint32_t const * p_words, comms_sonar_t * p_sonar)
 #define E_CAL_B_THR_SHIFT    (0U)
 #define E_CAL_OVERLAP_SHIFT  (E_CAL_B_THR_SHIFT + CODEC_BITS_ADC)
 #define E_CAL_FLOOR_SHIFT    (E_CAL_OVERLAP_SHIFT + CODEC_BITS_CAL_OVERLAP)
+
+
+static void
+pack_obstacle_width (uint32_t * p_words,
+                     comms_obstacle_width_t const * p_width)
+{
+    p_words[E_W_TYPE] |=
+        pack_uint(CODEC_OBSTACLE_WIDTH, E_OBST_KIND_SHIFT, E_OBST_KIND_BITS)
+        | pack_uint((uint32_t) p_width->result, E_EDGE_RESULT_SHIFT,
+                    CODEC_BITS_EDGE_RESULT)
+        | pack_uint((uint32_t) p_width->side, E_SIDE_SHIFT, CODEC_BITS_SIDE)
+        | pack_uint(non_negative(p_width->edge_mm), E_EDGE_SHIFT,
+                    CODEC_BITS_EDGE)
+        | pack_uint(non_negative(p_width->width_mm), E_EST_WIDTH_SHIFT,
+                    CODEC_BITS_EST_WIDTH);
+    p_words[E_W_A] |=
+        pack_uint(non_negative(p_width->face_mm), E_FACE_SHIFT,
+                  CODEC_BITS_OBST_DIST)
+        | pack_uint(non_negative(p_width->heard_mm), E_LEG_SHIFT,
+                    CODEC_BITS_LEG)
+        | pack_uint(non_negative(p_width->turn_deg), E_TURN_DEG_SHIFT,
+                    CODEC_BITS_TURN_DEG);
+}
+
+
+static void
+unpack_obstacle_width (uint32_t const * p_words,
+                       comms_obstacle_width_t * p_width)
+{
+    p_width->result = (comms_edge_result_t) unpack_uint(
+        p_words[E_W_TYPE], E_EDGE_RESULT_SHIFT, CODEC_BITS_EDGE_RESULT);
+    p_width->side = (comms_side_t) unpack_uint(p_words[E_W_TYPE],
+                                               E_SIDE_SHIFT, CODEC_BITS_SIDE);
+    p_width->edge_mm = (int32_t) unpack_uint(p_words[E_W_TYPE], E_EDGE_SHIFT,
+                                             CODEC_BITS_EDGE);
+    p_width->width_mm = (int32_t) unpack_uint(p_words[E_W_TYPE],
+                                              E_EST_WIDTH_SHIFT,
+                                              CODEC_BITS_EST_WIDTH);
+    p_width->face_mm = (int32_t) unpack_uint(p_words[E_W_A], E_FACE_SHIFT,
+                                             CODEC_BITS_OBST_DIST);
+    p_width->heard_mm = (int32_t) unpack_uint(p_words[E_W_A], E_LEG_SHIFT,
+                                              CODEC_BITS_LEG);
+    p_width->turn_deg = (int32_t) unpack_uint(p_words[E_W_A],
+                                              E_TURN_DEG_SHIFT,
+                                              CODEC_BITS_TURN_DEG);
+}
 
 
 static void
@@ -804,6 +862,12 @@ codec_pack_event (uint32_t * p_words, codec_event_t const * p_event)
             break;
 
         case CODEC_EVENT_OBSTACLE:
+            if (CODEC_OBSTACLE_WIDTH == p_event->kind)
+            {
+                pack_obstacle_width(p_words, &p_event->obstacle_width);
+                break;
+            }
+
             p_words[E_W_A] |=
                 pack_uint(non_negative(p_event->obstacle.distance_mm),
                           E_DIST_SHIFT, CODEC_BITS_OBST_DIST)
@@ -843,6 +907,7 @@ bool
 codec_unpack_event (uint32_t const * p_words, codec_event_t * p_event)
 {
     comms_obstacle_t const    no_obstacle    = {0};
+    comms_obstacle_width_t const no_width    = {0};
     comms_calibration_t const no_calibration = {0};
     uint32_t const type = unpack_uint(p_words[E_W_TYPE], E_TYPE_SHIFT,
                                       CODEC_BITS_EVENT_TYPE);
@@ -854,6 +919,7 @@ codec_unpack_event (uint32_t const * p_words, codec_event_t * p_event)
     p_event->kind         = 0U;
     p_event->value        = 0;
     p_event->obstacle     = no_obstacle;
+    p_event->obstacle_width = no_width;
     p_event->calibration  = no_calibration;
 
     switch ((codec_event_type_t) type)
@@ -876,6 +942,17 @@ codec_unpack_event (uint32_t const * p_words, codec_event_t * p_event)
             break;
 
         case CODEC_EVENT_OBSTACLE:
+            p_event->kind = (uint8_t) unpack_uint(p_words[E_W_TYPE],
+                                                  E_OBST_KIND_SHIFT,
+                                                  E_OBST_KIND_BITS);
+
+            if (CODEC_OBSTACLE_WIDTH == p_event->kind)
+            {
+                unpack_obstacle_width(p_words, &p_event->obstacle_width);
+                b_ok = true;
+                break;
+            }
+
             p_event->obstacle.distance_mm = (int32_t) unpack_uint(
                 p_words[E_W_A], E_DIST_SHIFT, CODEC_BITS_OBST_DIST);
             p_event->obstacle.angle_deg = (int32_t) unpack_uint(
