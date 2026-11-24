@@ -21,7 +21,11 @@
 #endif
 
 #if (VC_LIFT_SPELL_CAP_CYCLES > 31U)
-#error "Packed vc_t assumes the lift spell counter fits 5 bits"
+#error "Packed vc_t assumes the lift spell max fits 5 bits"
+#endif
+
+#if ((VC_LIFT_UNCUED_CYCLES + 1U) > 127U)
+#error "Packed vc_t assumes the lift spell counter fits 7 bits"
 #endif
 
 /* Value counts of the vc.h enums: a code that is not below its count is not
@@ -72,15 +76,14 @@
 #define ST_FLAG_RIGHT_EXIT  (30U)
 #define ST_FLAGS_RESERVED   (0x80000000U)  /* W0 bit 31.            */
 
-/* W5: the steer ramp, the search limit and the lift spell. */
+/* W5: the steer ramp, the search limit and the lift cue latch. */
 #define ST_SEARCH_LIMIT_SHIFT  (0U)
 #define ST_SEARCH_LIMIT_BITS   (17U)
 #define ST_STEER_SIDE_SHIFT    (17U)
 #define ST_STEER_SIDE_BITS     (2U)
 #define ST_STEER_MAG_SHIFT     (19U)
 #define ST_STEER_MAG_BITS      (7U)
-#define ST_LIFT_CYCLES_SHIFT   (26U)
-#define ST_LIFT_CYCLES_BITS    (5U)
+#define ST_STEER_RESERVED      (0x7C000000U)  /* W5 bits 26..30.      */
 #define ST_FLAG_LIFT_CUED      (31U)
 
 /* W6: sweep angle and direction. */
@@ -92,12 +95,14 @@
 #define ST_CAL_DIR_BITS        (2U)
 #define ST_CAL_ANGLES_RESERVED (0xFFC00000U)  /* W6 bits 22..31.      */
 
-/* W7: furthest sweep angle and the longest normal both-black spell. */
+/* W7: furthest sweep angle and the lift spell counters. */
 #define ST_CAL_FAR_SHIFT       (0U)
 #define ST_CAL_FAR_BITS        (18U)
 #define ST_LIFT_MAX_SHIFT      (18U)
 #define ST_LIFT_MAX_BITS       (5U)
-#define ST_LIFT_RESERVED       (0xFF800000U)  /* W7 bits 23..31.      */
+#define ST_LIFT_CYCLES_SHIFT   (23U)
+#define ST_LIFT_CYCLES_BITS    (7U)
+#define ST_LIFT_RESERVED       (0xC0000000U)  /* W7 bits 30..31.      */
 
 /* W8, W9: absolute travel origins. */
 #define ST_JUNCTION_SHIFT      (0U)
@@ -348,9 +353,6 @@ vc_pack_state (vc_t const * p_vc, vc_packed_t * p_packed)
             | (pack_signed((int32_t) p_vc->steer_mag, 0,
                            (int32_t) VC_SEARCH_STEER, ST_STEER_MAG_BITS)
                << ST_STEER_MAG_SHIFT)
-            | (pack_field((uint32_t) p_vc->lift_spell_cycles,
-                          ST_LIFT_CYCLES_BITS)
-               << ST_LIFT_CYCLES_SHIFT)
             | (pack_flag(p_vc->b_lift_spell_cued) << ST_FLAG_LIFT_CUED);
 
         p_packed->word[ST_WORD_CAL_ANGLES] =
@@ -368,7 +370,10 @@ vc_pack_state (vc_t const * p_vc, vc_packed_t * p_packed)
              << ST_CAL_FAR_SHIFT)
             | (pack_field((uint32_t) p_vc->lift_spell_max_cycles,
                           ST_LIFT_MAX_BITS)
-               << ST_LIFT_MAX_SHIFT);
+               << ST_LIFT_MAX_SHIFT)
+            | (pack_field((uint32_t) p_vc->lift_spell_cycles,
+                          ST_LIFT_CYCLES_BITS)
+               << ST_LIFT_CYCLES_SHIFT);
 
         p_packed->word[ST_WORD_JUNC_ORIGIN] =
             (pack_signed(p_vc->junction_origin_mm, ST_JUNCTION_MIN,
@@ -427,6 +432,7 @@ vc_unpack_state (vc_packed_t const * p_packed, vc_t * p_vc)
                && (ST_CAL_PHASE_CODES > phase)
                && (ST_NAV_CODES > turn)
                && (0U == (flags & ST_FLAGS_RESERVED))
+               && (0U == (steer & ST_STEER_RESERVED))
                && (0U == (cal & ST_CAL_ANGLES_RESERVED))
                && (0U == (lift & ST_LIFT_RESERVED))
                && (0U == (p_packed->word[ST_WORD_JUNC_ORIGIN]
@@ -490,7 +496,7 @@ vc_unpack_state (vc_packed_t const * p_packed, vc_t * p_vc)
                 (int16_t) pack_get(steer, ST_STEER_MAG_SHIFT,
                                    ST_STEER_MAG_BITS);
             p_vc->lift_spell_cycles  =
-                (uint8_t) pack_get(steer, ST_LIFT_CYCLES_SHIFT,
+                (uint8_t) pack_get(lift, ST_LIFT_CYCLES_SHIFT,
                                    ST_LIFT_CYCLES_BITS);
             p_vc->lift_spell_max_cycles =
                 (uint8_t) pack_get(lift, ST_LIFT_MAX_SHIFT, ST_LIFT_MAX_BITS);

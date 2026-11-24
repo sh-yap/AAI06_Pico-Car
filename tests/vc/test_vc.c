@@ -1339,13 +1339,16 @@ test_pivot_search_sequence (void)
     CHECK_STATE(VC_STATE_READY);
     CHECK(VC_MOTION_STOP == g_out.motion);
 
-    /* A junction found during the search stops it and is handled. */
+    /* A junction found during the search stops it, confirms over
+     * VC_JUNCTION_CONFIRM_MM, and is handled. */
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_LEFT;
     step();
     g_in.line = VC_LINE_LOST;
     step();
     g_in.line = VC_LINE_JUNCTION;
+    step();
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
     step();
     advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
@@ -1371,7 +1374,8 @@ test_reacquire_on_junction (void)
 {
     printf("line found again on a junction\n");
 
-    /* After a plain line loss: the stored turn happens at THIS junction. */
+    /* After a plain line loss: a real junction confirms over
+     * VC_JUNCTION_CONFIRM_MM after the pivot stops, then turns. */
     go_to_follow_line(0U);
     g_in.barcode = VC_NAV_LEFT;
     step();
@@ -1380,17 +1384,24 @@ test_reacquire_on_junction (void)
     CHECK_STATE(VC_STATE_REACQUIRE_LINE);
     g_in.line = VC_LINE_JUNCTION;
     step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(VC_OBST_ABORT != g_out.obstacle);   /* Buddy 5 not involved. */
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
+    step();
     advance_to_turn();
     CHECK_STATE(VC_STATE_TURNING);
     CHECK(VC_MOTION_TURN == g_out.motion);
     CHECK(VC_NAV_LEFT == g_out.turn);
 
-    /* No stored barcode: straight across, and only once. */
+    /* No stored barcode: confirms over VC_JUNCTION_CONFIRM_MM, straight
+     * across, and only once. */
     go_to_follow_line(0U);
     g_in.line = VC_LINE_LOST;
     step();
     g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
     step();
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(VC_MOTION_DRIVE == g_out.motion);
@@ -2140,17 +2151,17 @@ test_lift_confirmed (void)
     CHECK(VC_CAL_REQ_BEGIN == g_out.cal_req);
 }
 
-/* A long both-black spell with no IMU cue is a junction, not a lift, and it
- * teaches only up to the safety cap. */
+/* A moderate both-black spell with no IMU cue is a junction, not a lift,
+ * and it teaches only up to the safety cap. */
 static void
 test_lift_without_cue (void)
 {
-    printf("lift: long both-black spell without cue -> no lift\n");
+    printf("lift: moderate both-black spell without cue -> no lift\n");
 
     go_to_follow_line(0U);
     set_both_black();
     g_in.b_imu_cue = false;
-    hold_both_black(60U);
+    hold_both_black(VC_LIFT_SPELL_CAP_CYCLES + 5U);
     CHECK_STATE(VC_STATE_FOLLOW_LINE);
     CHECK(!g_out.b_lift_confirmed);
 
@@ -2158,6 +2169,60 @@ test_lift_without_cue (void)
     g_in.line_sensors = VC_LINE_SENSOR_CENTRE;
     step();
     CHECK(VC_LIFT_SPELL_CAP_CYCLES == g_vc.lift_spell_max_cycles);
+}
+
+/* A sustained both-black spell while moving confirms a lift at the uncued
+ * safety ceiling even if Buddy 4's IMU cue never fired (e.g. during the
+ * 3 s sharp-change warm-up or a gentle vertical lift). */
+static void
+test_lift_uncued_moving (void)
+{
+    printf("lift: sustained both-black while moving without cue -> FINISHED\n");
+
+    go_to_follow_line(0U);
+    set_both_black();
+    g_in.b_imu_cue    = false;
+    g_in.b_stationary = false;
+    hold_both_black(VC_LIFT_UNCUED_CYCLES);
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
+
+    step();                                   /* Cycle 51 > 50: confirm.  */
+    CHECK_STATE(VC_STATE_FINISHED);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(g_out.b_lift_confirmed);
+    CHECK((VC_LIFT_UNCUED_CYCLES + 1U) == g_vc.lift_spell_cycles);
+}
+
+/* Stopping on a junction (e.g. OBSTACLE_SCAN) with no IMU cue must not
+ * trigger the uncued lift ceiling, nor pre-charge the counter so it fires
+ * the instant the car resumes moving off the junction. */
+static void
+test_lift_uncued_stationary (void)
+{
+    printf("lift: stationary on junction without cue -> no lift\n");
+
+    go_to_follow_line(0U);
+    g_in.b_obstacle_ahead = true;
+    step();
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+
+    g_in.b_obstacle_ahead = false;
+    g_in.b_stationary     = true;
+    g_in.b_imu_cue        = false;
+    set_both_black();
+    hold_both_black(VC_LIFT_UNCUED_CYCLES + 10U);
+    CHECK_STATE(VC_STATE_OBSTACLE_SCAN);
+    CHECK(!g_out.b_lift_confirmed);
+
+    /* Scan clears and the car resumes moving while still over the junction:
+     * must not immediately confirm a lift on the first moving cycle. */
+    g_in.b_scan_done    = true;
+    g_in.recommendation = VC_AVOID_CONTINUE;
+    g_in.b_stationary   = false;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(!g_out.b_lift_confirmed);
 }
 
 /* A short both-black spell with the cue is not a lift, even after a longer
@@ -2274,6 +2339,123 @@ test_lift_during_recovery (void)
     CHECK(g_out.b_lift_confirmed);
 }
 
+/* H2: a single JUNCTION sample during a pivot search (0 mm travel) must stop
+ * the pivot and enter FOLLOW_LINE without consuming a stored barcode. */
+static void
+test_reacquire_pivot_single_junction_ignored (void)
+{
+    printf("junction: single JUNCTION during pivot search keeps barcode\n");
+
+    go_to_follow_line(0U);
+    g_in.barcode = VC_NAV_LEFT;
+    step();
+    g_in.barcode = VC_NAV_NONE;
+    g_in.line    = VC_LINE_LOST;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+
+    /* One JUNCTION cycle at 0 mm travel while pivoting, then plain line. */
+    g_in.line = VC_LINE_JUNCTION;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+    CHECK(VC_NAV_LEFT == g_vc.stored_nav);
+    CHECK(VC_NAV_NONE == g_vc.pending_turn);
+
+    g_in.line = VC_LINE_CENTRE;
+    g_in.travel_mm += VC_JUNCTION_ADVANCE_MM;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_NAV_LEFT == g_vc.stored_nav);
+    CHECK(VC_NAV_NONE == g_vc.pending_turn);
+}
+
+/* H4: pre-turn right drift (last_side == +1) must not survive a junction turn
+ * and send a post-turn line-loss search pivot in the stale direction. */
+static void
+test_junction_turn_clears_last_side (void)
+{
+    printf("junction: turn clears pre-turn last_side\n");
+
+    go_to_follow_line(0U);
+    g_in.line    = VC_LINE_RIGHT;
+    g_in.barcode = VC_NAV_LEFT;
+    step();
+    CHECK(1 == g_vc.last_side);
+
+    g_in.barcode = VC_NAV_NONE;
+    g_in.line    = VC_LINE_JUNCTION;
+    step();
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
+    step();
+    advance_to_turn();
+    CHECK_STATE(VC_STATE_TURNING);
+    CHECK(0 == g_vc.last_side);
+
+    /* Finish turn and lose the line immediately: search must not bias +1. */
+    g_in.b_motion_done = true;
+    g_in.line          = VC_LINE_LOST;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    g_in.b_motion_done = false;
+    step();
+    CHECK_STATE(VC_STATE_REACQUIRE_LINE);
+    CHECK(-1 == g_vc.search_dir);
+}
+
+/* A 90-degree LEFT/RIGHT junction turn stops early once rotated past
+ * VC_TURN_CATCH_MIN_MDEG and the centre sensor catches the new line,
+ * preventing blind 90-degree overshoot. A U-TURN does not early-catch. */
+static void
+test_turn_stops_on_new_line (void)
+{
+    printf("junction: LEFT turn stops on new line past 45 deg\n");
+
+    go_to_follow_line(0U);
+    g_in.cal_angle_mdeg = 10000;
+    g_in.barcode        = VC_NAV_LEFT;
+    step();
+    g_in.barcode = VC_NAV_NONE;
+    g_in.line    = VC_LINE_JUNCTION;
+    step();
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
+    step();
+    advance_to_turn();
+    CHECK_STATE(VC_STATE_TURNING);
+
+    /* Under 45 deg: centre sensor seeing incoming line does not stop turn. */
+    g_in.cal_angle_mdeg = 10000 - 30000;
+    g_in.line           = VC_LINE_CENTRE;
+    g_in.line_sensors   = VC_LINE_SENSOR_CENTRE;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+
+    /* Past 45 deg: centre sensor catching new branch stops the turn. */
+    g_in.cal_angle_mdeg = 10000 - 65000;
+    g_in.line           = VC_LINE_CENTRE;
+    g_in.line_sensors   = VC_LINE_SENSOR_CENTRE;
+    step();
+    CHECK_STATE(VC_STATE_FOLLOW_LINE);
+    CHECK(VC_MOTION_STOP == g_out.motion);
+
+    /* U-TURN must ignore centre black at 65 deg and wait for b_motion_done. */
+    go_to_follow_line(0U);
+    g_in.cal_angle_mdeg = 0;
+    g_in.barcode        = VC_NAV_UTURN;
+    step();
+    g_in.barcode = VC_NAV_NONE;
+    g_in.line    = VC_LINE_JUNCTION;
+    step();
+    g_in.travel_mm += VC_JUNCTION_CONFIRM_MM;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+    g_in.cal_angle_mdeg = -65000;
+    g_in.line           = VC_LINE_CENTRE;
+    g_in.line_sensors   = VC_LINE_SENSOR_CENTRE;
+    step();
+    CHECK_STATE(VC_STATE_TURNING);
+}
+
 /* ------------------------------------------------------------------------ */
 
 int
@@ -2303,6 +2485,8 @@ main (void)
     test_finished();
     test_lift_confirmed();
     test_lift_without_cue();
+    test_lift_uncued_moving();
+    test_lift_uncued_stationary();
     test_lift_short_with_cue();
     test_lift_fallback();
     test_lift_not_in_calibration();
@@ -2311,6 +2495,9 @@ main (void)
     test_timer_wraparound();
     test_names_and_null();
     test_junction_edge();
+    test_reacquire_pivot_single_junction_ignored();
+    test_junction_turn_clears_last_side();
+    test_turn_stops_on_new_line();
     test_timeout_vs_success();
     test_init_timeout();
     test_obstacle_while_reacquiring();
